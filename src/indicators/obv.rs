@@ -10,7 +10,8 @@
 //! - **`Err(ObvError)`** on failure
 //!
 //! ## Developer Notes
-//! - Decision note: Scalar path optimized (branchless, mul_add). AVX-512 shows ~10% win vs scalar at 100k on x86_64; AVX2 is near parity. Left enabled; OBV is carry-bound so SIMD gains are modest.
+//! - Decision log: Scalar path optimized (branchless, mul_add). AVX-512 shows ~10% win vs scalar at 100k on x86_64; AVX2 is near parity. Left enabled; OBV is carry-bound so SIMD gains are modest.
+//! - CUDA: FP32 batch + many-series kernels enabled; wrapper returns VRAM handles for Python with synchronized streams and CAI v3/DLPack interop. Numerical outputs match scalar reference within existing tolerances.
 //! - **Streaming**: O(1) with branch-lean sign and mul_add to match scalar/IEEE-754 NaN parity.
 //! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 
@@ -123,17 +124,27 @@ impl ObvBuilder {
 // Error type
 #[derive(Debug, Error)]
 pub enum ObvError {
-    #[error("obv: Empty data provided.")]
-    EmptyData,
+    #[error("obv: Input data slice is empty.")]
+    EmptyInputData,
     #[error("obv: Data length mismatch: close_len = {close_len}, volume_len = {volume_len}")]
     DataLengthMismatch { close_len: usize, volume_len: usize },
     #[error("obv: All values are NaN.")]
     AllValuesNaN,
+    #[error("obv: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("obv: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("obv: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("obv: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("obv: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 impl From<Box<dyn std::error::Error>> for ObvError {
     fn from(_: Box<dyn std::error::Error>) -> Self {
-        ObvError::EmptyData
+        ObvError::EmptyInputData
     }
 }
 
@@ -146,7 +157,7 @@ pub fn obv_with_kernel(input: &ObvInput, kernel: Kernel) -> Result<ObvOutput, Ob
     let (close, volume) = input.as_refs();
 
     if close.is_empty() || volume.is_empty() {
-        return Err(ObvError::EmptyData);
+        return Err(ObvError::EmptyInputData);
     }
     if close.len() != volume.len() {
         return Err(ObvError::DataLengthMismatch {
@@ -475,7 +486,7 @@ impl ObvBatchBuilder {
         self
     }
     pub fn apply_slices(self, close: &[f64], volume: &[f64]) -> Result<ObvBatchOutput, ObvError> {
-        obv_batch_with_kernel(close, volume, self.kernel)
+    obv_batch_with_kernel(close, volume, self.kernel)
     }
     pub fn apply_candles(self, c: &Candles) -> Result<ObvBatchOutput, ObvError> {
         let close = source_type(c, "close");
@@ -501,7 +512,7 @@ pub fn obv_batch_with_kernel(
     let chosen = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => Kernel::ScalarBatch,
+        other => return Err(ObvError::InvalidKernelForBatch(other)),
     };
     obv_batch_par_slice(close, volume, chosen)
 }
@@ -532,7 +543,7 @@ fn obv_batch_inner(
     _parallel: bool,
 ) -> Result<ObvBatchOutput, ObvError> {
     if close.is_empty() || volume.is_empty() {
-        return Err(ObvError::EmptyData);
+        return Err(ObvError::EmptyInputData);
     }
     if close.len() != volume.len() {
         return Err(ObvError::DataLengthMismatch {
@@ -548,6 +559,13 @@ fn obv_batch_inner(
 
     let rows = 1usize;
     let cols = close.len();
+
+    // Guard rows*cols against overflow before allocation.
+    let _ = rows.checked_mul(cols).ok_or_else(|| ObvError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
 
     // allocate rows×cols uninit and seed only warm prefixes
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -615,12 +633,18 @@ fn obv_batch_inner_into(
     out: &mut [f64],
 ) -> Result<(), ObvError> {
     if close.is_empty() || volume.is_empty() {
-        return Err(ObvError::EmptyData);
+        return Err(ObvError::EmptyInputData);
     }
-    if close.len() != volume.len() || out.len() != close.len() {
+    if close.len() != volume.len() {
         return Err(ObvError::DataLengthMismatch {
             close_len: close.len(),
-            volume_len: out.len(),
+            volume_len: volume.len(),
+        });
+    }
+    if out.len() != close.len() {
+        return Err(ObvError::OutputLengthMismatch {
+            expected: close.len(),
+            got: out.len(),
         });
     }
     let first = close
@@ -1145,7 +1169,7 @@ pub fn obv_into_slice(
     kern: Kernel,
 ) -> Result<(), ObvError> {
     if close.is_empty() || volume.is_empty() {
-        return Err(ObvError::EmptyData);
+        return Err(ObvError::EmptyInputData);
     }
     if close.len() != volume.len() {
         return Err(ObvError::DataLengthMismatch {
@@ -1154,9 +1178,9 @@ pub fn obv_into_slice(
         });
     }
     if dst.len() != close.len() {
-        return Err(ObvError::DataLengthMismatch {
-            close_len: close.len(),
-            volume_len: dst.len(),
+        return Err(ObvError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst.len(),
         });
     }
 
@@ -1291,10 +1315,13 @@ pub fn obv_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     // OBV has no parameters, so batch is just single calculation
-    let rows = 1;
+    let rows: usize = 1;
     let cols = close_slice.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     py.allow_threads(|| {
@@ -1319,7 +1346,7 @@ pub fn obv_batch_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaObv;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "obv_cuda_batch_dev")]
@@ -1347,7 +1374,8 @@ pub fn obv_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    let dev = make_device_array_py(device_id, inner)?;
+    Ok(dev)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1368,7 +1396,10 @@ pub fn obv_cuda_many_series_one_param_dev_py(
 
     let close_slice = close_tm.as_slice()?;
     let volume_slice = volume_tm.as_slice()?;
-    if close_slice.len() != volume_slice.len() || close_slice.len() != cols * rows {
+    let elems = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("cols*rows overflow"))?;
+    if close_slice.len() != volume_slice.len() || close_slice.len() != elems {
         return Err(PyValueError::new_err("mismatched input sizes or dims"));
     }
 
@@ -1378,7 +1409,8 @@ pub fn obv_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    let dev = make_device_array_py(device_id, inner)?;
+    Ok(dev)
 }
 
 #[cfg(feature = "wasm")]

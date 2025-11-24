@@ -188,6 +188,8 @@ use crate::indicators::donchian::{
 use crate::indicators::dpo::{dpo_batch_py, dpo_py, DpoStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::dpo::{dpo_cuda_batch_dev_py, dpo_cuda_many_series_one_param_dev_py};
+#[cfg(feature = "cuda")]
+use crate::indicators::dpo::DpoDeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::indicators::dti::{dti_batch_py, dti_py, DtiStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2563,6 +2565,7 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         m.add_function(wrap_pyfunction!(dpo_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(dpo_cuda_many_series_one_param_dev_py, m)?)?;
+        m.add_class::<DpoDeviceArrayF32Py>()?;
     }
 
     // Register ER functions with their user-facing names

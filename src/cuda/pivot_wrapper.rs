@@ -15,7 +15,7 @@
 //! - Public APIs return DeviceArrayF32 with rows stacked per level (9 levels).
 
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -24,24 +24,31 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::indicators::pivot::{PivotBatchRange, PivotParams};
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaPivotError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device mismatch: buffer device {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaPivotError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaPivotError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaPivotError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaPivotError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -68,7 +75,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaPivot {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
+    device_id: u32,
     batch_policy: BatchKernelPolicy,
     many_policy: ManySeriesKernelPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -79,10 +87,9 @@ pub struct CudaPivot {
 
 impl CudaPivot {
     pub fn new(device_id: usize) -> Result<Self, CudaPivotError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/pivot_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
@@ -91,20 +98,21 @@ impl CudaPivot {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) =
+                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaPivotError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
             batch_policy: BatchKernelPolicy::Auto,
             many_policy: ManySeriesKernelPolicy::Auto,
             last_batch: None,
@@ -123,14 +131,27 @@ impl CudaPivot {
     }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaPivotError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
-        if let Ok((free, _)) = mem_get_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+        if let Some((free, _total)) = Self::device_mem_info() {
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaPivotError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
         } else {
-            true
+            Ok(())
         }
     }
 
@@ -174,19 +195,95 @@ impl CudaPivot {
         }
     }
 
-    fn expand_grid(range: &PivotBatchRange) -> Vec<PivotParams> {
-        let (start, end, step) = range.mode;
-        let mut out = Vec::new();
-        let mut m = start;
-        if step == 0 {
-            out.push(PivotParams { mode: Some(m) });
-            return out;
+    #[inline]
+    fn validate_launch(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaPivotError> {
+        let dev = Device::get_device(self.device_id).map_err(CudaPivotError::Cuda)?;
+        let max_bx = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimX)
+            .map_err(CudaPivotError::Cuda)? as u32;
+        let max_by = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimY)
+            .map_err(CudaPivotError::Cuda)? as u32;
+        let max_bz = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimZ)
+            .map_err(CudaPivotError::Cuda)? as u32;
+        let max_gx = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(CudaPivotError::Cuda)? as u32;
+        let max_gy = dev
+            .get_attribute(DeviceAttribute::MaxGridDimY)
+            .map_err(CudaPivotError::Cuda)? as u32;
+        let max_gz = dev
+            .get_attribute(DeviceAttribute::MaxGridDimZ)
+            .map_err(CudaPivotError::Cuda)? as u32;
+        let (gx, gy, gz) = grid;
+        let (bx, by, bz) = block;
+        if bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
+            return Err(CudaPivotError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
         }
-        while m <= end {
-            out.push(PivotParams { mode: Some(m) });
-            m += step;
+        Ok(())
+    }
+
+    fn expand_grid(range: &PivotBatchRange) -> Result<Vec<PivotParams>, CudaPivotError> {
+        fn axis_usize(
+            (start, end, step): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaPivotError> {
+            if step == 0 || start == end {
+                return Ok(vec![start]);
+            }
+            let mut vals = Vec::new();
+            if start < end {
+                let mut cur = start;
+                while cur <= end {
+                    vals.push(cur);
+                    cur = cur
+                        .checked_add(step)
+                        .ok_or_else(|| {
+                            CudaPivotError::InvalidInput("mode sweep overflow".into())
+                        })?;
+                }
+            } else {
+                let mut cur = start;
+                while cur >= end {
+                    vals.push(cur);
+                    cur = cur
+                        .checked_sub(step)
+                        .ok_or_else(|| {
+                            CudaPivotError::InvalidInput("mode sweep overflow".into())
+                        })?;
+                    if cur == 0 && end > 0 {
+                        break;
+                    }
+                    if let Some(&last) = vals.last() {
+                        if last == cur {
+                            break;
+                        }
+                    }
+                }
+                if let Some(&last) = vals.last() {
+                    if last < end {
+                        vals.pop();
+                    }
+                }
+            }
+            if vals.is_empty() {
+                return Err(CudaPivotError::InvalidInput(
+                    "invalid mode sweep: produced no values".into(),
+                ));
+            }
+            Ok(vals)
         }
-        out
+
+        let modes = axis_usize(range.mode)?;
+        let mut out = Vec::with_capacity(modes.len());
+        for m in modes {
+            out.push(PivotParams { mode: Some(m) });
+        }
+        Ok(out)
     }
 
     #[inline]
@@ -220,7 +317,7 @@ impl CudaPivot {
         }
         let first_valid = Self::first_valid_ohlc_f32(high, low, close)
             .ok_or_else(|| CudaPivotError::InvalidInput("all values are NaN".into()))?;
-        let combos = Self::expand_grid(sweep);
+        let combos = Self::expand_grid(sweep)?;
         if combos.is_empty() {
             return Err(CudaPivotError::InvalidInput("empty mode sweep".into()));
         }
@@ -232,23 +329,34 @@ impl CudaPivot {
             .any(|p| matches!(p.mode.unwrap_or(3), 2 | 4));
 
         // VRAM estimate: 3 or 4 inputs + modes + outputs (9 * combos * n)
-        let inputs_arrays = 3 + if need_o_any { 1 } else { 0 };
-        let bytes_inputs = inputs_arrays * n * std::mem::size_of::<f32>();
-        let bytes_modes = n_combos * std::mem::size_of::<i32>();
-        let bytes_out = 9 * n_combos * n * std::mem::size_of::<f32>();
-        let required = bytes_inputs + bytes_modes + bytes_out + 64 * 1024 * 1024;
-        if !Self::will_fit(required, 0) {
-            return Err(CudaPivotError::InvalidInput(
-                "insufficient device memory for pivot batch".into(),
-            ));
-        }
+        let inputs_arrays: usize = 3 + if need_o_any { 1 } else { 0 };
+        let bytes_inputs = inputs_arrays
+            .checked_mul(n)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
+        let bytes_modes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(9)
+            .and_then(|x| x.checked_mul(n))
+            .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
+        let bytes_out = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
+        let required = bytes_inputs
+            .checked_add(bytes_modes)
+            .and_then(|a| a.checked_add(bytes_out))
+            .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
 
-        let d_high = DeviceBuffer::from_slice(high).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high).map_err(CudaPivotError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low).map_err(CudaPivotError::Cuda)?;
+        let d_close = DeviceBuffer::from_slice(close).map_err(CudaPivotError::Cuda)?;
         // Upload open only if any mode needs it; otherwise reuse d_close as a safe placeholder
         let d_open_opt = if need_o_any {
-            Some(DeviceBuffer::from_slice(open).map_err(|e| CudaPivotError::Cuda(e.to_string()))?)
+            Some(DeviceBuffer::from_slice(open).map_err(CudaPivotError::Cuda)?)
         } else {
             None
         };
@@ -257,15 +365,12 @@ impl CudaPivot {
         for p in &combos {
             modes_i32.push(p.mode.unwrap_or(3) as i32);
         }
-        let d_modes = DeviceBuffer::from_slice(&modes_i32)
-            .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(9 * n_combos * n) }
-            .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_modes = DeviceBuffer::from_slice(&modes_i32).map_err(CudaPivotError::Cuda)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.map_err(CudaPivotError::Cuda)?;
 
         self.launch_pivot_batch(&d_high, &d_low, &d_close, d_open_ref, n, first_valid, &d_modes, n_combos, &mut d_out)?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaPivotError::Cuda)?;
 
         Ok((
             DeviceArrayF32 {
@@ -292,15 +397,19 @@ impl CudaPivot {
         let func = self
             .module
             .get_function("pivot_batch_f32")
-            .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPivotError::MissingKernelSymbol { name: "pivot_batch_f32" })?;
         let block_x = match self.batch_policy {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => 256,
         };
         let grid_x = ((n as u32) + block_x - 1) / block_x;
         // Single launch; kernel loops over all combos internally; grid.y = 1
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        let gx = grid_x.max(1);
+        let grid_dims = (gx, 1, 1);
+        let block_dims = (block_x, 1, 1);
+        self.validate_launch(grid_dims, block_dims)?;
+        let grid: GridSize = grid_dims.into();
+        let block: BlockSize = block_dims.into();
         unsafe {
             let mut h = d_high.as_device_ptr().as_raw();
             let mut l = d_low.as_device_ptr().as_raw();
@@ -324,7 +433,7 @@ impl CudaPivot {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+                .map_err(CudaPivotError::Cuda)?;
         }
         // Record selection once
         unsafe {
@@ -353,7 +462,9 @@ impl CudaPivot {
         if cols == 0 || rows == 0 {
             return Err(CudaPivotError::InvalidInput("empty dims".into()));
         }
-        let elems = cols * rows;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
         if high_tm.len() != elems
             || low_tm.len() != elems
             || close_tm.len() != elems
@@ -394,33 +505,52 @@ impl CudaPivot {
         }
 
         // VRAM estimate: 3 or 4 inputs + first_valids + outputs (9 planes)
-        let inputs_arrays = 3 + if need_o { 1 } else { 0 };
-        let bytes = (inputs_arrays * elems + 9 * elems) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>()
-            + 64 * 1024 * 1024;
-        if !Self::will_fit(bytes, 0) {
-            return Err(CudaPivotError::InvalidInput(
-                "insufficient device memory for pivot many-series".into(),
-            ));
-        }
+        let inputs_arrays: usize = 3 + if need_o { 1 } else { 0 };
+        let inputs_elems = inputs_arrays
+            .checked_mul(elems)
+            .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
+        let out_elems = 9usize
+            .checked_mul(elems)
+            .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
+        let flops_bytes = inputs_elems
+            .checked_add(out_elems)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
+        let fv_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
+        let required = flops_bytes
+            .checked_add(fv_bytes)
+            .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
 
-        let d_high = DeviceBuffer::from_slice(high_tm).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_tm).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high_tm).map_err(CudaPivotError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low_tm).map_err(CudaPivotError::Cuda)?;
+        let d_close = DeviceBuffer::from_slice(close_tm).map_err(CudaPivotError::Cuda)?;
         // Upload open only when needed; otherwise reuse d_close as a safe placeholder
         let d_open_opt = if need_o {
-            Some(DeviceBuffer::from_slice(open_tm).map_err(|e| CudaPivotError::Cuda(e.to_string()))?)
+            Some(DeviceBuffer::from_slice(open_tm).map_err(CudaPivotError::Cuda)?)
         } else {
             None
         };
         let d_open_ref: &DeviceBuffer<f32> = d_open_opt.as_ref().unwrap_or(&d_close);
-        let d_fv = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(9 * elems) }
-            .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids).map_err(CudaPivotError::Cuda)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.map_err(CudaPivotError::Cuda)?;
 
-        self.launch_pivot_many_series_tm(&d_high, &d_low, &d_close, d_open_ref, &d_fv, cols, rows, mode, &mut d_out)?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        self.launch_pivot_many_series_tm(
+            &d_high,
+            &d_low,
+            &d_close,
+            d_open_ref,
+            &d_fv,
+            cols,
+            rows,
+            mode,
+            &mut d_out,
+        )?;
+        self.stream.synchronize().map_err(CudaPivotError::Cuda)?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -444,14 +574,22 @@ impl CudaPivot {
         let func = self
             .module
             .get_function("pivot_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+            .map_err(|_| {
+                CudaPivotError::MissingKernelSymbol {
+                    name: "pivot_many_series_one_param_time_major_f32",
+                }
+            })?;
         let block_x = match self.many_policy {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             ManySeriesKernelPolicy::Auto => 256,
         };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        let gx = grid_x.max(1);
+        let grid_dims = (gx, 1, 1);
+        let block_dims = (block_x, 1, 1);
+        self.validate_launch(grid_dims, block_dims)?;
+        let grid: GridSize = grid_dims.into();
+        let block: BlockSize = block_dims.into();
         unsafe {
             let mut hp = d_high_tm.as_device_ptr().as_raw();
             let mut lp = d_low_tm.as_device_ptr().as_raw();
@@ -475,7 +613,7 @@ impl CudaPivot {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+                .map_err(CudaPivotError::Cuda)?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaPivot)).last_many =

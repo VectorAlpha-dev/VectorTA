@@ -675,12 +675,18 @@ impl CudaSwma {
             Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = periods.len();
 
-        // VRAM estimate and check (64MB headroom)
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let warm_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + warm_bytes + out_bytes;
+        // VRAM estimate and check (64MB headroom) with overflow guards
+        let sb = std::mem::size_of::<f32>();
+        let si = std::mem::size_of::<i32>();
+        let prices_bytes = series_len.checked_mul(sb).ok_or_else(|| CudaSwmaError::InvalidInput("series_len bytes overflow".into()))?;
+        let periods_bytes = n_combos.checked_mul(si).ok_or_else(|| CudaSwmaError::InvalidInput("periods bytes overflow".into()))?;
+        let warm_bytes = n_combos.checked_mul(si).ok_or_else(|| CudaSwmaError::InvalidInput("warms bytes overflow".into()))?;
+        let out_elems = n_combos.checked_mul(series_len).ok_or_else(|| CudaSwmaError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems.checked_mul(sb).ok_or_else(|| CudaSwmaError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(periods_bytes).ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?
+            .checked_add(warm_bytes).ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?
+            .checked_add(out_bytes).ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
@@ -798,16 +804,18 @@ impl CudaSwma {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM estimate: prices + [weights if not const] + first_valids + out
-        let prices_bytes = cols * rows * std::mem::size_of::<f32>();
-        let weights_bytes = if self.has_const_weights {
-            0
-        } else {
-            period * std::mem::size_of::<f32>()
-        };
-        let first_valids_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = cols * rows * std::mem::size_of::<f32>();
-        let required = prices_bytes + weights_bytes + first_valids_bytes + out_bytes;
+        // VRAM estimate: prices + [weights if not const] + first_valids + out (with overflow guards)
+        let sb = std::mem::size_of::<f32>();
+        let si = std::mem::size_of::<i32>();
+        let elems = cols.checked_mul(rows).ok_or_else(|| CudaSwmaError::InvalidInput("rows*cols overflow".into()))?;
+        let prices_bytes = elems.checked_mul(sb).ok_or_else(|| CudaSwmaError::InvalidInput("prices bytes overflow".into()))?;
+        let weights_bytes = if self.has_const_weights { 0 } else { period.checked_mul(sb).ok_or_else(|| CudaSwmaError::InvalidInput("weights bytes overflow".into()))? };
+        let first_valids_bytes = cols.checked_mul(si).ok_or_else(|| CudaSwmaError::InvalidInput("first_valids bytes overflow".into()))?;
+        let out_bytes = elems.checked_mul(sb).ok_or_else(|| CudaSwmaError::InvalidInput("out bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(weights_bytes).ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?
+            .checked_add(first_valids_bytes).ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?
+            .checked_add(out_bytes).ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 

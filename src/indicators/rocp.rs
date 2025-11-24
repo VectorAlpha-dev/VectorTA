@@ -20,7 +20,9 @@
 //! - Streaming: O(1) – ring buffer with branchless wrap; output uses
 //!   a reciprocal ring and FMA (mul_add) on the critical path for
 //!   lower latency while preserving scalar correctness.
-//! - Memory: Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
+//! - Memory/interop: uses `alloc_with_nan_prefix`/`make_uninit_matrix` for CPU and a CUDA
+//!   wrapper that returns VRAM handles. Python exposes CAI v3 + DLPack v1.x via the shared
+//!   `DeviceArrayF32Py` type; numerical outputs match scalar/CPU paths.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -189,6 +191,12 @@ pub enum RocpError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("rocp: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("rocp: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("rocp: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("rocp: Invalid kernel type for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -292,10 +300,7 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
     }
 
     if dst.len() != len {
-        return Err(RocpError::InvalidPeriod {
-            period: dst.len(),
-            data_len: len,
-        });
+        return Err(RocpError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
     // Disable SIMD for Auto in the into_slice path as well
@@ -554,11 +559,8 @@ pub fn rocp_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(RocpError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+        other => {
+            return Err(RocpError::InvalidKernelForBatch(other));
         }
     };
 
@@ -594,19 +596,38 @@ impl RocpBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &RocpBatchRange) -> Vec<RocpParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &RocpBatchRange) -> Result<Vec<RocpParams>, RocpError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, RocpError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let st = step.max(1);
+            let vals: Vec<usize> = (start..=end).step_by(st).collect();
+            if vals.is_empty() {
+                return Err(RocpError::InvalidRange { start, end, step });
+            }
+            return Ok(vals);
+        }
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(RocpError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(RocpParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -634,11 +655,12 @@ fn rocp_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<RocpBatchOutput, RocpError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(RocpError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(RocpError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -656,6 +678,14 @@ fn rocp_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(RocpError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
     // Use uninitialized memory operations like alma.rs
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -867,11 +897,12 @@ pub fn rocp_batch_inner_into(
 ) -> Result<Vec<RocpParams>, RocpError> {
     use core::mem::MaybeUninit;
 
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(RocpError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(RocpError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -887,7 +918,22 @@ pub fn rocp_batch_inner_into(
         });
     }
 
+    let rows = combos.len();
     let cols = data.len();
+
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(RocpError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(RocpError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // 1) Work in uninitialized space
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
@@ -1019,11 +1065,14 @@ pub fn rocp_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rocp: range size overflow"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -1078,7 +1127,7 @@ pub fn register_rocp_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaRocp;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "rocp_cuda_batch_dev")]
@@ -1099,7 +1148,8 @@ pub fn rocp_cuda_batch_dev_py<'py>(
     };
     let (inner, combos) = py.allow_threads(|| {
         let cuda = CudaRocp::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.rocp_batch_dev(d, &sweep)
+        cuda
+            .rocp_batch_dev(d, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
@@ -1111,7 +1161,7 @@ pub fn rocp_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((make_device_array_py(device_id, inner)?, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1132,10 +1182,11 @@ pub fn rocp_cuda_many_series_one_param_dev_py(
     let tm = data_tm_f32.as_slice()?;
     let inner = py.allow_threads(|| {
         let cuda = CudaRocp::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.rocp_many_series_one_param_time_major_dev(tm, cols, rows, period)
+        cuda
+            .rocp_many_series_one_param_time_major_dev(tm, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(make_device_array_py(device_id, inner)?)
 }
 
 #[cfg(feature = "wasm")]
@@ -1272,9 +1323,12 @@ pub fn rocp_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
-        let total_size = rows * len;
+        let total_size = rows
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("rocp_batch_into: size overflow"))?;
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 

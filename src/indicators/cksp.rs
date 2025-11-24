@@ -3,6 +3,9 @@
 //! Computes two stop lines (long and short) using ATR and rolling maxima/minima.
 //! Its parameters (`p`, `x`, `q`) control the ATR period, ATR multiplier, and rolling window size.
 //!
+//! ## Decision log
+//! SIMD kernels remain stubs (scalar is fastest for CKSP); CUDA wrapper is enabled with FP32 kernels and returns VRAM handles; Python interop uses CUDA Array Interface v3 and DLPack v1.x while keeping scalar CPU outputs as the reference path.
+//!
 //! ## Parameters
 //! - **p**: ATR period (default: 10)
 //! - **x**: ATR multiplier (default: 1.0)
@@ -37,7 +40,7 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaCksp};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -154,16 +157,37 @@ pub struct CkspOutput {
 
 #[derive(Debug, Error)]
 pub enum CkspError {
-    #[error("cksp: Data is empty or all values are NaN.")]
-    NoData,
-    #[error("cksp: Not enough data for p={p}, q={q}, data_len={data_len}.")]
-    NotEnoughData { p: usize, q: usize, data_len: usize },
-    #[error("cksp: Inconsistent input lengths.")]
+    // Inputs
+    #[error("cksp: Data is empty")]
+    EmptyInputData,
+    #[error("cksp: No data (all values are NaN)")]
+    AllValuesNaN,
+    #[error("cksp: Not enough data for period={period} (data_len={data_len})")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("cksp: Not enough data: needed={needed} valid={valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("cksp: output length mismatch: expected={expected} got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("cksp: Inconsistent input lengths")]
     InconsistentLengths,
-    #[error("cksp: Invalid param value: {param}")]
+
+    // Domain params
+    #[error("cksp: Invalid param x={x}")]
+    InvalidMultiplier { x: f64 },
+    #[error("cksp: Invalid param {param}")]
     InvalidParam { param: &'static str },
-    #[error("cksp: Candle field error: {0}")]
+
+    // Batch / ranges
+    #[error("cksp: invalid range: start={start} end={end} step={step}")]
+    InvalidRange { start: i128, end: i128, step: i128 },
+    #[error("cksp: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    // Misc
+    #[error("cksp: candle field error: {0}")]
     CandleFieldError(String),
+    #[error("cksp: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 // ========================= Builder Struct =========================
@@ -299,27 +323,33 @@ pub fn cksp_with_kernel(input: &CkspInput, kernel: Kernel) -> Result<CkspOutput,
     if p == 0 || q == 0 {
         return Err(CkspError::InvalidParam { param: "p/q" });
     }
-    if !(x.is_finite()) || x.is_nan() {
-        return Err(CkspError::InvalidParam { param: "x" });
+    if !x.is_finite() {
+        return Err(CkspError::InvalidMultiplier { x });
     }
 
     // Now check data
     let size = close.len();
     if size == 0 {
-        return Err(CkspError::NoData);
-    }
-    if p > size || q > size {
-        return Err(CkspError::NotEnoughData {
-            p,
-            q,
-            data_len: size,
-        });
+        return Err(CkspError::EmptyInputData);
     }
 
     let first_valid_idx = match close.iter().position(|&v| !v.is_nan()) {
         Some(idx) => idx,
-        None => return Err(CkspError::NoData),
+        None => return Err(CkspError::AllValuesNaN),
     };
+
+    let valid = size - first_valid_idx;
+    let warmup = p
+        .checked_add(q)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| CkspError::InvalidInput("warmup overflow (p+q too large)".into()))?;
+    if valid <= warmup {
+        // need at least warmup+1 valid points after first_valid_idx
+        let needed = warmup
+            .checked_add(1)
+            .ok_or_else(|| CkspError::InvalidInput("warmup+1 overflow".into()))?;
+        return Err(CkspError::NotEnoughValidData { needed, valid });
+    }
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -379,8 +409,11 @@ pub fn cksp_into_slices(
     if high.len() != low.len() || low.len() != close.len() {
         return Err(CkspError::InconsistentLengths);
     }
-    if out_long.len() != close.len() || out_short.len() != close.len() {
-        return Err(CkspError::InconsistentLengths); // Fixed: was NotEnoughData
+    if out_long.len() != close.len() {
+        return Err(CkspError::OutputLengthMismatch { expected: close.len(), got: out_long.len() });
+    }
+    if out_short.len() != close.len() {
+        return Err(CkspError::OutputLengthMismatch { expected: close.len(), got: out_short.len() });
     }
 
     let p = input.get_p();
@@ -390,13 +423,25 @@ pub fn cksp_into_slices(
         return Err(CkspError::InvalidParam { param: "p/q" });
     }
     if !x.is_finite() {
-        return Err(CkspError::InvalidParam { param: "x" });
+        return Err(CkspError::InvalidMultiplier { x });
     }
 
+    let size = close.len();
     let first_valid = close
         .iter()
         .position(|v| !v.is_nan())
-        .ok_or(CkspError::NoData)?;
+        .ok_or(CkspError::AllValuesNaN)?;
+    let valid = size - first_valid;
+    let warmup = p
+        .checked_add(q)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| CkspError::InvalidInput("warmup overflow (p+q too large)".into()))?;
+    if valid <= warmup {
+        let needed = warmup
+            .checked_add(1)
+            .ok_or_else(|| CkspError::InvalidInput("warmup+1 overflow".into()))?;
+        return Err(CkspError::NotEnoughValidData { needed, valid });
+    }
     let chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
         k => k,
@@ -1472,43 +1517,77 @@ impl CkspBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &CkspBatchRange) -> Vec<CkspParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &CkspBatchRange) -> Result<Vec<CkspParams>, CkspError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CkspError> {
+        let s = start as i128;
+        let e = end as i128;
+        let st = step as i128;
         if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
-    }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start <= end {
+            let stp = step.max(1);
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                cur = match cur.checked_add(stp) { Some(n) => n, None => break };
+            }
+        } else {
+            let stp = step.max(1);
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                if cur <= end { break; }
+                cur = match cur.checked_sub(stp) { Some(n) => n, None => break };
+                if cur < end { break; }
+            }
         }
-        v
+        if v.is_empty() { Err(CkspError::InvalidRange { start: s, end: e, step: st }) } else { Ok(v) }
+    }
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CkspError> {
+        let s = start as f64;
+        let e = end as f64;
+        let st = step as f64;
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        let mut v = Vec::new();
+        if start <= end {
+            let mut x = start;
+            while x <= end + 1e-12 {
+                v.push(x);
+                x = x + step;
+            }
+        } else {
+            let mut x = start;
+            while x >= end - 1e-12 {
+                v.push(x);
+                x = x - step.abs();
+            }
+        }
+        if v.is_empty() { Err(CkspError::InvalidRange { start: s as i128, end: e as i128, step: st as i128 }) } else { Ok(v) }
     }
 
-    let ps = axis_usize(r.p);
-    let xs = axis_f64(r.x);
-    let qs = axis_usize(r.q);
+    let ps = axis_usize(r.p)?;
+    let xs = axis_f64(r.x)?;
+    let qs = axis_usize(r.q)?;
 
-    let mut out = Vec::with_capacity(ps.len() * xs.len() * qs.len());
+    let cap = ps
+        .len()
+        .checked_mul(xs.len())
+        .and_then(|t| t.checked_mul(qs.len()))
+        .ok_or_else(|| CkspError::InvalidInput("parameter grid too large".into()))?;
+
+    let mut out = Vec::with_capacity(cap);
     for &p in &ps {
         for &x in &xs {
             for &q in &qs {
-                out.push(CkspParams {
-                    p: Some(p),
-                    x: Some(x),
-                    q: Some(q),
-                });
+                out.push(CkspParams { p: Some(p), x: Some(x), q: Some(q) });
             }
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn cksp_batch_with_kernel(
@@ -1521,7 +1600,7 @@ pub fn cksp_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(CkspError::InvalidParam { param: "kernel" }),
+        other => return Err(CkspError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -1565,7 +1644,7 @@ fn cksp_batch_inner(
     parallel: bool,
 ) -> Result<CkspBatchOutput, CkspError> {
     let _ = kern; // runtime kernel currently unused (precomputed scalar path)
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
         return Err(CkspError::InvalidParam { param: "combos" });
     }
@@ -1576,22 +1655,40 @@ fn cksp_batch_inner(
     let first_valid = close
         .iter()
         .position(|x| !x.is_nan())
-        .ok_or(CkspError::NoData)?;
+        .ok_or(CkspError::AllValuesNaN)?;
 
     let rows = combos.len();
     let cols = size;
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| CkspError::InvalidInput("rows*cols overflow".into()))?;
+
+    let valid = size - first_valid;
+    let mut warm: Vec<usize> = Vec::with_capacity(rows);
+    for c in &combos {
+        let p_row = c.p.unwrap_or(10);
+        let q_row = c.q.unwrap_or(9);
+        let warm_rel = p_row
+            .checked_add(q_row)
+            .and_then(|v| v.checked_sub(1))
+            .ok_or_else(|| CkspError::InvalidInput("warmup overflow (p+q too large)".into()))?;
+        if valid <= warm_rel {
+            let needed = warm_rel
+                .checked_add(1)
+                .ok_or_else(|| CkspError::InvalidInput("warmup+1 overflow".into()))?;
+            return Err(CkspError::NotEnoughValidData { needed, valid });
+        }
+        let warm_idx = first_valid
+            .checked_add(warm_rel)
+            .ok_or_else(|| CkspError::InvalidInput("warmup index overflow".into()))?;
+        warm.push(warm_idx);
+    }
 
     // Step 1: Allocate uninitialized matrices
     let mut long_buf_mu = make_uninit_matrix(rows, cols);
     let mut short_buf_mu = make_uninit_matrix(rows, cols);
 
-    // Step 2: Calculate warmup periods for each row
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first_valid + c.p.unwrap() + c.q.unwrap() - 1)
-        .collect();
-
-    // Step 3: Initialize NaN prefixes for each row
+    // Step 2: Initialize NaN prefixes for each row
     init_matrix_prefixes(&mut long_buf_mu, cols, &warm);
     init_matrix_prefixes(&mut short_buf_mu, cols, &warm);
 
@@ -2880,7 +2977,7 @@ mod tests {
         let input = CkspInput::from_slices(&empty, &empty, &empty, CkspParams::default());
         let res = cksp_with_kernel(&input, kernel);
         assert!(
-            matches!(res, Err(CkspError::NoData)),
+            matches!(res, Err(CkspError::EmptyInputData)),
             "[{}] CKSP should fail with empty input",
             test_name
         );
@@ -2900,7 +2997,7 @@ mod tests {
         let input = CkspInput::from_slices(&high, &low, &close, params);
         let res = cksp_with_kernel(&input, kernel);
         assert!(
-            matches!(res, Err(CkspError::InvalidParam { .. })),
+            matches!(res, Err(CkspError::InvalidMultiplier { .. })),
             "[{}] CKSP should fail with invalid x parameter (NaN)",
             test_name
         );
@@ -3185,30 +3282,33 @@ fn cksp_prepare(
     if p == 0 || q == 0 {
         return Err(CkspError::InvalidParam { param: "p/q" });
     }
-    if !x.is_finite() || x.is_nan() {
-        return Err(CkspError::InvalidParam { param: "x" });
+    if !x.is_finite() {
+        return Err(CkspError::InvalidMultiplier { x });
     }
 
     // Now check data
     let size = close.len();
     if size == 0 {
-        return Err(CkspError::NoData);
+        return Err(CkspError::EmptyInputData);
     }
     if high.len() != low.len() || low.len() != close.len() {
         return Err(CkspError::InconsistentLengths);
     }
-    if p > size || q > size {
-        return Err(CkspError::NotEnoughData {
-            p,
-            q,
-            data_len: size,
-        });
-    }
-
     let first_valid_idx = match close.iter().position(|&v| !v.is_nan()) {
         Some(idx) => idx,
-        None => return Err(CkspError::NoData),
+        None => return Err(CkspError::AllValuesNaN),
     };
+    let valid = size - first_valid_idx;
+    let warmup = p
+        .checked_add(q)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| CkspError::InvalidInput("warmup overflow (p+q too large)".into()))?;
+    if valid <= warmup {
+        let needed = warmup
+            .checked_add(1)
+            .ok_or_else(|| CkspError::InvalidInput("warmup+1 overflow".into()))?;
+        return Err(CkspError::NotEnoughValidData { needed, valid });
+    }
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -3306,7 +3406,7 @@ fn cksp_batch_inner_into(
     long_out: &mut [f64],
     short_out: &mut [f64],
 ) -> Result<Vec<CkspParams>, CkspError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
         return Err(CkspError::InvalidParam { param: "combos" });
     }
@@ -3317,16 +3417,38 @@ fn cksp_batch_inner_into(
     let first_valid = close
         .iter()
         .position(|x| !x.is_nan())
-        .ok_or(CkspError::NoData)?;
+        .ok_or(CkspError::AllValuesNaN)?;
 
     let rows = combos.len();
     let cols = size;
-    if long_out.len() != rows * cols || short_out.len() != rows * cols {
-        return Err(CkspError::NotEnoughData {
-            p: 0,
-            q: 0,
-            data_len: cols,
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| CkspError::InvalidInput("rows*cols overflow".into()))?;
+    if long_out.len() != expected {
+        return Err(CkspError::OutputLengthMismatch { expected, got: long_out.len() });
+    }
+    if short_out.len() != expected {
+        return Err(CkspError::OutputLengthMismatch { expected, got: short_out.len() });
+    }
+    let valid = size - first_valid;
+    let mut warm: Vec<usize> = Vec::with_capacity(rows);
+    for c in &combos {
+        let p_row = c.p.unwrap_or(10);
+        let q_row = c.q.unwrap_or(9);
+        let warm_rel = p_row
+            .checked_add(q_row)
+            .and_then(|v| v.checked_sub(1))
+            .ok_or_else(|| CkspError::InvalidInput("warmup overflow (p+q too large)".into()))?;
+        if valid <= warm_rel {
+            let needed = warm_rel
+                .checked_add(1)
+                .ok_or_else(|| CkspError::InvalidInput("warmup+1 overflow".into()))?;
+            return Err(CkspError::NotEnoughValidData { needed, valid });
+        }
+        let warm_idx = first_valid
+            .checked_add(warm_rel)
+            .ok_or_else(|| CkspError::InvalidInput("warmup index overflow".into()))?;
+        warm.push(warm_idx);
     }
 
     // Initialize warm prefixes in-place via MaybeUninit view (debug poison supported)
@@ -3339,10 +3461,6 @@ fn cksp_batch_inner_into(
             short_out.as_mut_ptr() as *mut MaybeUninit<f64>,
             short_out.len(),
         );
-        let warm: Vec<usize> = combos
-            .iter()
-            .map(|c| first_valid + c.p.unwrap() + c.q.unwrap() - 1)
-            .collect();
         init_matrix_prefixes(&mut long_mu, cols, &warm);
         init_matrix_prefixes(&mut short_mu, cols, &warm);
     }
@@ -3426,13 +3544,16 @@ pub fn cksp_batch_py<'py>(
     };
 
     // Calculate dimensions
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = close_slice.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
     // Pre-allocate output arrays
-    let long_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let short_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let long_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let short_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let long_slice = unsafe { long_arr.as_slice_mut()? };
     let short_slice = unsafe { short_arr.as_slice_mut()? };
 
@@ -3531,14 +3652,10 @@ pub fn cksp_cuda_batch_dev_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item(
-        "long_values",
-        Py::new(py, DeviceArrayF32Py { inner: pair.long })?,
-    )?;
-    dict.set_item(
-        "short_values",
-        Py::new(py, DeviceArrayF32Py { inner: pair.short })?,
-    )?;
+    let long_dev = make_device_array_py(device_id, pair.long)?;
+    let short_dev = make_device_array_py(device_id, pair.short)?;
+    dict.set_item("long_values", Py::new(py, long_dev)?)?;
+    dict.set_item("short_values", Py::new(py, short_dev)?)?;
     use numpy::IntoPyArray;
     dict.set_item(
         "p",
@@ -3609,14 +3726,10 @@ pub fn cksp_cuda_many_series_one_param_dev_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item(
-        "long_values",
-        Py::new(py, DeviceArrayF32Py { inner: pair.long })?,
-    )?;
-    dict.set_item(
-        "short_values",
-        Py::new(py, DeviceArrayF32Py { inner: pair.short })?,
-    )?;
+    let long_dev = make_device_array_py(device_id, pair.long)?;
+    let short_dev = make_device_array_py(device_id, pair.short)?;
+    dict.set_item("long_values", Py::new(py, long_dev)?)?;
+    dict.set_item("short_values", Py::new(py, short_dev)?)?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     dict.set_item("p", p)?;
@@ -3644,30 +3757,37 @@ pub fn cksp_into_slice(
     if high.len() != low.len() || low.len() != close.len() {
         return Err(CkspError::InconsistentLengths);
     }
-    if long_dst.len() != close.len() || short_dst.len() != close.len() {
-        return Err(CkspError::InconsistentLengths);
+    if long_dst.len() != close.len() {
+        return Err(CkspError::OutputLengthMismatch { expected: close.len(), got: long_dst.len() });
+    }
+    if short_dst.len() != close.len() {
+        return Err(CkspError::OutputLengthMismatch { expected: close.len(), got: short_dst.len() });
     }
     if close.is_empty() {
-        return Err(CkspError::NoData);
+        return Err(CkspError::EmptyInputData);
     }
     if p == 0 || q == 0 {
         return Err(CkspError::InvalidParam { param: "p/q" });
     }
-    if p > close.len() || q > close.len() {
-        return Err(CkspError::NotEnoughData {
-            p,
-            q,
-            data_len: close.len(),
-        });
-    }
     if !x.is_finite() {
-        return Err(CkspError::InvalidParam { param: "x" });
+        return Err(CkspError::InvalidMultiplier { x });
     }
-
+    let size = close.len();
     let first_valid_idx = match close.iter().position(|&v| !v.is_nan()) {
         Some(idx) => idx,
-        None => return Err(CkspError::NoData),
+        None => return Err(CkspError::AllValuesNaN),
     };
+    let valid = size - first_valid_idx;
+    let warmup = p
+        .checked_add(q)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| CkspError::InvalidInput("warmup overflow (p+q too large)".into()))?;
+    if valid <= warmup {
+        let needed = warmup
+            .checked_add(1)
+            .ok_or_else(|| CkspError::InvalidInput("warmup+1 overflow".into()))?;
+        return Err(CkspError::NotEnoughValidData { needed, valid });
+    }
 
     let chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
@@ -3854,13 +3974,16 @@ pub fn cksp_batch_js(
         q: config.q_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = close.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
 
     // Pre-allocate output arrays
-    let mut long_values = vec![0.0; rows * cols];
-    let mut short_values = vec![0.0; rows * cols];
+    let mut long_values = vec![0.0; total];
+    let mut short_values = vec![0.0; total];
 
     // Compute batch results with appropriate kernel for WASM
     let kernel = detect_best_batch_kernel();
@@ -3934,12 +4057,15 @@ pub fn cksp_batch_into(
             q: (q_start, q_end, q_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
 
-        let long_out = std::slice::from_raw_parts_mut(long_ptr, rows * cols);
-        let short_out = std::slice::from_raw_parts_mut(short_ptr, rows * cols);
+        let long_out = std::slice::from_raw_parts_mut(long_ptr, total);
+        let short_out = std::slice::from_raw_parts_mut(short_ptr, total);
 
         // Use appropriate kernel for WASM
         let kernel = detect_best_batch_kernel();

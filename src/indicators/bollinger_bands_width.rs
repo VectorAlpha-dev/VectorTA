@@ -58,7 +58,7 @@ use crate::cuda::bollinger_bands_width_wrapper::CudaBbw;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 
 impl<'a> AsRef<[f64]> for BollingerBandsWidthInput<'a> {
     #[inline(always)]
@@ -306,7 +306,7 @@ impl<'a> BollingerBandsWidthInput<'a> {
 #[derive(Debug, Error)]
 pub enum BollingerBandsWidthError {
     #[error("bbw: Empty data provided.")]
-    EmptyData,
+    EmptyInputData,
     #[error("bbw: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("bbw: All values are NaN.")]
@@ -319,6 +319,12 @@ pub enum BollingerBandsWidthError {
     DeviationError(String),
     #[error("bbw: Not enough valid data for period: needed={needed}, valid={valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("bbw: output slice length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("bbw: invalid range expansion: start={start}, end={end}, step={step}")]
+    InvalidRange { start: i64, end: i64, step: i64 },
+    #[error("bbw: invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[derive(Clone, Debug)]
@@ -421,7 +427,7 @@ pub fn bollinger_bands_width_with_kernel(
 ) -> Result<BollingerBandsWidthOutput, BollingerBandsWidthError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
-        return Err(BollingerBandsWidthError::EmptyData);
+        return Err(BollingerBandsWidthError::EmptyInputData);
     }
 
     let period = input.get_period();
@@ -461,12 +467,12 @@ pub fn bollinger_bands_width_compute_into(
     kernel: Kernel,
 ) -> Result<(), BollingerBandsWidthError> {
     if data.is_empty() {
-        return Err(BollingerBandsWidthError::EmptyData);
+        return Err(BollingerBandsWidthError::EmptyInputData);
     }
     if data.len() != out.len() {
-        return Err(BollingerBandsWidthError::InvalidPeriod {
-            period: 0,
-            data_len: data.len(),
+        return Err(BollingerBandsWidthError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
         });
     }
     let period = input.get_period();
@@ -527,13 +533,12 @@ pub fn bollinger_bands_width_into(
     let data = input.as_ref();
 
     if data.is_empty() {
-        return Err(BollingerBandsWidthError::EmptyData);
+        return Err(BollingerBandsWidthError::EmptyInputData);
     }
     if out.len() != data.len() {
-        // Reuse existing error type for length mismatch, matching other modules.
-        return Err(BollingerBandsWidthError::InvalidPeriod {
-            period: 0,
-            data_len: data.len(),
+        return Err(BollingerBandsWidthError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
         });
     }
 
@@ -578,13 +583,13 @@ pub fn bollinger_bands_width_into_slice(
     let data = input.as_ref();
 
     if data.is_empty() {
-        return Err(BollingerBandsWidthError::EmptyData);
+        return Err(BollingerBandsWidthError::EmptyInputData);
     }
 
     if dst.len() != data.len() {
-        return Err(BollingerBandsWidthError::InvalidPeriod {
-            period: 0,
-            data_len: data.len(),
+        return Err(BollingerBandsWidthError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -1301,31 +1306,84 @@ impl BollingerBandsWidthBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &BollingerBandsWidthBatchRange) -> Vec<BollingerBandsWidthParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid_checked(
+    r: &BollingerBandsWidthBatchRange,
+) -> Result<Vec<BollingerBandsWidthParams>, BollingerBandsWidthError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, BollingerBandsWidthError> {
         if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
-    }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start < end {
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                match x.checked_add(step) { Some(n) => x = n, None => break }
+            }
+        } else {
+            // reversed bounds supported
+            let mut x = start as i64;
+            let step_i = step as i64;
+            while x >= end as i64 {
+                v.push(x as usize);
+                x -= step_i;
+            }
         }
-        v
+        if v.is_empty() {
+            return Err(BollingerBandsWidthError::InvalidRange {
+                start: start as i64,
+                end: end as i64,
+                step: step as i64,
+            });
+        }
+        Ok(v)
+    }
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, BollingerBandsWidthError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        let mut v = Vec::new();
+        if step > 0.0 {
+            if start <= end {
+                let mut x = start;
+                while x <= end + 1e-12 {
+                    v.push(x);
+                    x += step;
+                }
+            }
+        } else {
+            if start >= end {
+                let mut x = start;
+                while x >= end - 1e-12 {
+                    v.push(x);
+                    x += step; // step < 0
+                }
+            }
+        }
+        if v.is_empty() {
+            return Err(BollingerBandsWidthError::InvalidRange {
+                start: start as i64,
+                end: end as i64,
+                step: step as i64,
+            });
+        }
+        Ok(v)
     }
 
-    let periods = axis_usize(r.period);
-    let devups = axis_f64(r.devup);
-    let devdns = axis_f64(r.devdn);
+    let periods = axis_usize(r.period)?;
+    let devups = axis_f64(r.devup)?;
+    let devdns = axis_f64(r.devdn)?;
 
-    let mut out = Vec::with_capacity(periods.len() * devups.len() * devdns.len());
+    let cap = periods
+        .len()
+        .checked_mul(devups.len())
+        .and_then(|v| v.checked_mul(devdns.len()))
+        .ok_or(BollingerBandsWidthError::InvalidRange {
+            start: periods.len() as i64,
+            end: devups.len() as i64,
+            step: devdns.len() as i64,
+        })?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &u in &devups {
             for &d in &devdns {
@@ -1339,7 +1397,7 @@ fn expand_grid(r: &BollingerBandsWidthBatchRange) -> Vec<BollingerBandsWidthPara
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1351,12 +1409,7 @@ pub fn bollinger_bands_width_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(BollingerBandsWidthError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(BollingerBandsWidthError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1392,7 +1445,7 @@ fn bollinger_bands_width_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<BollingerBandsWidthBatchOutput, BollingerBandsWidthError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_checked(sweep)?;
     let rows = combos.len();
     let cols = data.len();
 
@@ -1401,7 +1454,10 @@ fn bollinger_bands_width_batch_inner(
         return Err(BollingerBandsWidthError::AllValuesNaN);
     }
 
-    // Step 1: Allocate uninitialized matrix
+    // Step 1: Allocate uninitialized matrix (checked rows*cols)
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(BollingerBandsWidthError::InvalidRange { start: rows as i64, end: cols as i64, step: 0 })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     // Step 2: Calculate warmup periods for each row
@@ -1449,12 +1505,9 @@ pub fn bollinger_bands_width_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<BollingerBandsWidthParams>, BollingerBandsWidthError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_checked(sweep)?;
     if combos.is_empty() {
-        return Err(BollingerBandsWidthError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(BollingerBandsWidthError::InvalidRange { start: 0, end: 0, step: 0 });
     }
     let first = data
         .iter()
@@ -1469,6 +1522,13 @@ pub fn bollinger_bands_width_batch_inner_into(
     }
 
     let cols = data.len();
+    let rows = combos.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(BollingerBandsWidthError::InvalidRange { start: rows as i64, end: cols as i64, step: 0 })?;
+    if out.len() != expected {
+        return Err(BollingerBandsWidthError::OutputLengthMismatch { expected, got: out.len() });
+    }
 
     // Group combinations by (period, matype, devtype) to avoid redundant calculations
     use std::collections::HashMap;
@@ -2466,11 +2526,14 @@ pub fn bollinger_bands_width_batch_py<'py>(
         devdn: devdn_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("bbw: output size overflow"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Initialize NaN prefixes for each row based on warmup period
@@ -2553,10 +2616,13 @@ pub fn bollinger_bands_width_cuda_batch_dev_py<'py>(
         devdn: devdn_range,
     };
 
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, dev_id, combos) = py.allow_threads(|| {
         let cuda = CudaBbw::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.bbw_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let dev_id = cuda.device_id();
+        let (arr, meta) = cuda
+            .bbw_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, dev_id, meta))
     })?;
 
     let dict = PyDict::new(py);
@@ -2569,7 +2635,8 @@ pub fn bollinger_bands_width_cuda_batch_dev_py<'py>(
     dict.set_item("ma_types", PyList::new(py, vec!["sma"; uplusd_len])?)?;
     dict.set_item("devtypes", vec![0u64; uplusd_len].into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    let handle = make_device_array_py(dev_id as usize, inner)?;
+    Ok((handle, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2589,19 +2656,22 @@ pub fn bollinger_bands_width_cuda_many_series_one_param_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, dev_id) = py.allow_threads(|| {
         let cuda = CudaBbw::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.bbw_many_series_one_param_time_major_dev(
-            slice_in,
-            cols,
-            rows,
-            period,
-            devup as f32,
-            devdn as f32,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .bbw_many_series_one_param_time_major_dev(
+                slice_in,
+                cols,
+                rows,
+                period,
+                devup as f32,
+                devdn as f32,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(dev_id as usize, inner)
 }
 
 #[cfg(feature = "wasm")]
@@ -2689,7 +2759,7 @@ pub fn bollinger_bands_width_batch_metadata_js(
         devdn: (devdn_start, devdn_end, devdn_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let mut metadata = Vec::with_capacity(combos.len() * 3);
 
     for combo in combos {
@@ -2833,11 +2903,15 @@ pub fn bollinger_bands_width_batch_into(
             devdn: (devdn_start, devdn_end, devdn_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid_checked(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("bbw: output size overflow"))?;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         // Initialize NaN prefixes for each row based on warmup period
         let first = data

@@ -14,6 +14,7 @@
 //! **AVX512**: Stub with short/long variants (all call scalar)
 //! **Streaming**: O(1) amortized via monotonic deques; matches batch
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
+//! **Decision log**: SIMD stubs call the scalar path; no CUDA wrapper or VRAM handles for Midpoint, batch/streaming share scalar semantics and reference outputs.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -177,12 +178,22 @@ impl MidpointBuilder {
 
 #[derive(Debug, Error)]
 pub enum MidpointError {
+    #[error("midpoint: Empty input data (All values are NaN).")]
+    EmptyInputData,
     #[error("midpoint: All values are NaN.")]
     AllValuesNaN,
     #[error("midpoint: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("midpoint: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("midpoint: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("midpoint: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("midpoint: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("midpoint: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[cfg(feature = "wasm")]
@@ -199,11 +210,14 @@ pub fn midpoint(input: &MidpointInput) -> Result<MidpointOutput, MidpointError> 
     midpoint_with_kernel(input, Kernel::Auto)
 }
 
-pub fn midpoint_with_kernel(
-    input: &MidpointInput,
-    kernel: Kernel,
-) -> Result<MidpointOutput, MidpointError> {
+#[inline(always)]
+fn midpoint_prepare<'a>(
+    input: &'a MidpointInput,
+) -> Result<(&'a [f64], usize, usize, usize), MidpointError> {
     let data: &[f64] = input.as_ref();
+    if data.is_empty() {
+        return Err(MidpointError::EmptyInputData);
+    }
 
     let first = data
         .iter()
@@ -225,6 +239,14 @@ pub fn midpoint_with_kernel(
         });
     }
 
+    Ok((data, period, first, len))
+}
+
+pub fn midpoint_with_kernel(
+    input: &MidpointInput,
+    kernel: Kernel,
+) -> Result<MidpointOutput, MidpointError> {
+    let (data, period, first, len) = midpoint_prepare(input)?;
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
     let chosen = match kernel {
@@ -263,32 +285,12 @@ pub fn midpoint_into_slice(
     input: &MidpointInput,
     kernel: Kernel,
 ) -> Result<(), MidpointError> {
-    let data: &[f64] = input.as_ref();
-
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(MidpointError::AllValuesNaN)?;
-    let len = data.len();
-    let period = input.get_period();
-
-    if period == 0 || period > len {
-        return Err(MidpointError::InvalidPeriod {
-            period,
-            data_len: len,
-        });
-    }
-    if (len - first) < period {
-        return Err(MidpointError::NotEnoughValidData {
-            needed: period,
-            valid: len - first,
-        });
-    }
+    let (data, period, first, len) = midpoint_prepare(input)?;
 
     if out.len() != len {
-        return Err(MidpointError::InvalidPeriod {
-            period: out.len(),
-            data_len: len,
+        return Err(MidpointError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
         });
     }
 
@@ -537,12 +539,7 @@ pub fn midpoint_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(MidpointError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(MidpointError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -577,19 +574,62 @@ impl MidpointBatchOutput {
 // --- BATCH INNER ---
 
 #[inline(always)]
-fn expand_grid(r: &MidpointBatchRange) -> Vec<MidpointParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid_checked(r: &MidpointBatchRange) -> Result<Vec<MidpointParams>, MidpointError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, MidpointError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            loop {
+                if v > end {
+                    break;
+                }
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(next) => {
+                        if next == v {
+                            break;
+                        }
+                        v = next;
+                    }
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            loop {
+                if v < end {
+                    break;
+                }
+                out.push(v);
+                if v == end {
+                    break;
+                }
+                let next = match v.checked_sub(step) {
+                    Some(n) => n,
+                    None => break,
+                };
+                if next > v {
+                    break;
+                }
+                v = next;
+            }
+        }
+        if out.is_empty() {
+            return Err(MidpointError::InvalidRange { start, end, step });
+        }
+        Ok(out)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(MidpointParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -617,13 +657,11 @@ fn midpoint_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<MidpointBatchOutput, MidpointError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(MidpointError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+    if data.is_empty() {
+        return Err(MidpointError::EmptyInputData);
     }
+
+    let combos = expand_grid_checked(sweep)?;
 
     let first = data
         .iter()
@@ -1851,13 +1889,11 @@ pub fn midpoint_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<MidpointParams>, MidpointError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(MidpointError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+    if data.is_empty() {
+        return Err(MidpointError::EmptyInputData);
     }
+
+    let combos = expand_grid_checked(sweep)?;
 
     let first = data
         .iter()
@@ -1873,10 +1909,16 @@ pub fn midpoint_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    if out.len() != rows * cols {
-        return Err(MidpointError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| MidpointError::InvalidInput("rows*cols overflow in midpoint_batch_inner".into()))?;
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| MidpointError::InvalidInput("rows*cols overflow in midpoint_batch_inner_into".into()))?;
+    if out.len() != expected {
+        return Err(MidpointError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
         });
     }
 
@@ -1993,11 +2035,14 @@ pub fn midpoint_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
@@ -2124,11 +2169,15 @@ pub fn midpoint_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid_checked(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
+        let expected = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow in midpoint_batch_into"))?;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let out = std::slice::from_raw_parts_mut(out_ptr, expected);
 
         midpoint_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

@@ -10,7 +10,8 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::wto::{WtoBatchRange, WtoParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -18,14 +19,22 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
 
 #[derive(Debug)]
 pub enum CudaWtoError {
-    Cuda(String),
+    Cuda(CudaError),
     InvalidInput(String),
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    MissingKernelSymbol { name: &'static str },
+    InvalidPolicy(&'static str),
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    DeviceMismatch { buf: u32, current: u32 },
+    InvalidRange { start: String, end: String, step: String },
+    NotImplemented,
 }
 
 impl fmt::Display for CudaWtoError {
@@ -33,6 +42,30 @@ impl fmt::Display for CudaWtoError {
         match self {
             CudaWtoError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaWtoError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
+            CudaWtoError::OutOfMemory { required, free, headroom } => write!(
+                f,
+                "out of memory: required={} free={} headroom={}",
+                required, free, headroom
+            ),
+            CudaWtoError::MissingKernelSymbol { name } => {
+                write!(f, "missing kernel symbol: {}", name)
+            }
+            CudaWtoError::InvalidPolicy(p) => write!(f, "invalid policy: {}", p),
+            CudaWtoError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+                f,
+                "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
+            ),
+            CudaWtoError::DeviceMismatch { buf, current } => write!(
+                f,
+                "device mismatch: buf={} current={}",
+                buf, current
+            ),
+            CudaWtoError::InvalidRange { start, end, step } => write!(
+                f,
+                "invalid range: start={} end={} step={}",
+                start, end, step
+            ),
+            CudaWtoError::NotImplemented => write!(f, "not implemented"),
         }
     }
 }
@@ -95,7 +128,7 @@ pub struct CudaWtoPolicy {
 pub struct CudaWto {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaWtoPolicy,
     debug_batch_logged: AtomicBool,
@@ -104,39 +137,35 @@ pub struct CudaWto {
 
 impl CudaWto {
     pub fn new(device_id: usize) -> Result<Self, CudaWtoError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty()).map_err(CudaWtoError::Cuda)?;
+        let device = Device::get_device(device_id as u32).map_err(CudaWtoError::Cuda)?;
+        let context = Arc::new(Context::new(device).map_err(CudaWtoError::Cuda)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/wto_kernel.ptx"));
         // Prefer context-targeted JIT with highest opt level, fallback to simpler modes
-        let module = match Module::from_ptx(
-            ptx,
-            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O4)],
-        ) {
-            Ok(m) => m,
-            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                Ok(m) => m,
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaWtoError::Cuda(e.to_string()))?
-                }
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaWtoError::Cuda(e.to_string()))?
-                }
-            },
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))
+            .map_err(CudaWtoError::Cuda)?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaWtoError::Cuda)?;
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaWtoPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto },
             debug_batch_logged: AtomicBool::new(false),
             debug_many_logged: AtomicBool::new(false),
         })
     }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -145,7 +174,8 @@ impl CudaWto {
         }
     }
 
-    #[inline] fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
 
     // Prefill outputs with canonical qNaN via driver memset (async, ordered on the stream)
     #[inline]
@@ -165,24 +195,100 @@ impl CudaWto {
             let n2 = d_wt2.len();
             let n3 = d_hist.len();
             let r1 = cu::cuMemsetD32Async(p1, QNAN_BITS, n1, st);
-            if r1 != cu::CUresult::CUDA_SUCCESS { return Err(CudaWtoError::Cuda(format!("cuMemsetD32Async wt1 failed: {:?}", r1))); }
+            if r1 != cu::CUresult::CUDA_SUCCESS {
+                return Err(CudaWtoError::Cuda(CudaError::UnknownError {
+                    msg: format!("cuMemsetD32Async wt1 failed: {:?}", r1),
+                }));
+            }
             let r2 = cu::cuMemsetD32Async(p2, QNAN_BITS, n2, st);
-            if r2 != cu::CUresult::CUDA_SUCCESS { return Err(CudaWtoError::Cuda(format!("cuMemsetD32Async wt2 failed: {:?}", r2))); }
+            if r2 != cu::CUresult::CUDA_SUCCESS {
+                return Err(CudaWtoError::Cuda(CudaError::UnknownError {
+                    msg: format!("cuMemsetD32Async wt2 failed: {:?}", r2),
+                }));
+            }
             let r3 = cu::cuMemsetD32Async(p3, QNAN_BITS, n3, st);
-            if r3 != cu::CUresult::CUDA_SUCCESS { return Err(CudaWtoError::Cuda(format!("cuMemsetD32Async hist failed: {:?}", r3))); }
+            if r3 != cu::CUresult::CUDA_SUCCESS {
+                return Err(CudaWtoError::Cuda(CudaError::UnknownError {
+                    msg: format!("cuMemsetD32Async hist failed: {:?}", r3),
+                }));
+            }
         }
         Ok(())
     }
 
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaWtoError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaWtoError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
         } else {
-            true
+            Ok(())
         }
+    }
+
+    #[inline]
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaWtoError> {
+        let dev = Device::get_device(self.device_id).map_err(CudaWtoError::Cuda)?;
+        let max_threads = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
+            .map_err(CudaWtoError::Cuda)? as u32;
+        let max_bx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            .map_err(CudaWtoError::Cuda)? as u32;
+        let max_by = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimY)
+            .map_err(CudaWtoError::Cuda)? as u32;
+        let max_bz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimZ)
+            .map_err(CudaWtoError::Cuda)? as u32;
+        let max_gx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            .map_err(CudaWtoError::Cuda)? as u32;
+        let max_gy = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
+            .map_err(CudaWtoError::Cuda)? as u32;
+        let max_gz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimZ)
+            .map_err(CudaWtoError::Cuda)? as u32;
+
+        let threads = bx
+            .saturating_mul(by)
+            .saturating_mul(bz);
+        if threads > max_threads
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaWtoError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
     }
 
     pub fn wto_batch_dev(
@@ -200,33 +306,41 @@ impl CudaWto {
             average_i32.push(params.average_length.unwrap() as i32);
         }
 
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let params_bytes = 2 * n_combos * std::mem::size_of::<i32>();
-        let out_bytes = 3 * n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaWtoError::InvalidInput("series_len overflow".into()))?;
+        let params_elems = n_combos
+            .checked_mul(2)
+            .ok_or_else(|| CudaWtoError::InvalidInput("n_combos overflow".into()))?;
+        let params_bytes = params_elems
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaWtoError::InvalidInput("params_bytes overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .and_then(|v| v.checked_mul(3))
+            .ok_or_else(|| CudaWtoError::InvalidInput("output elements overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaWtoError::InvalidInput("out_bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaWtoError::InvalidInput("required bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaWtoError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                required as f64 / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(required, headroom)?;
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
-        let d_channel = DeviceBuffer::from_slice(&channel_i32)
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
-        let d_average = DeviceBuffer::from_slice(&average_i32)
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32).map_err(CudaWtoError::Cuda)?;
+        let d_channel = DeviceBuffer::from_slice(&channel_i32).map_err(CudaWtoError::Cuda)?;
+        let d_average = DeviceBuffer::from_slice(&average_i32).map_err(CudaWtoError::Cuda)?;
+        let elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaWtoError::InvalidInput("n_combos * series_len overflow".into()))?;
         let mut d_wt1: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaWtoError::Cuda)?;
         let mut d_wt2: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaWtoError::Cuda)?;
         let mut d_hist: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaWtoError::Cuda)?;
 
         // Prefill outputs with NaN (async)
         self.prefill_nan_triplet(&mut d_wt1, &mut d_wt2, &mut d_hist)?;
@@ -243,9 +357,7 @@ impl CudaWto {
             &mut d_hist,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaWtoError::Cuda)?;
 
         let outputs = DeviceArrayF32Triplet {
             wt1: DeviceArrayF32 {
@@ -277,7 +389,10 @@ impl CudaWto {
         hist_host: &mut [f32],
     ) -> Result<(usize, usize, Vec<WtoParams>), CudaWtoError> {
         let (combos, first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        let expected = combos.len() * series_len;
+        let expected = combos
+            .len()
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaWtoError::InvalidInput("combos.len() * series_len overflow".into()))?;
         if wt1_host.len() != expected || wt2_host.len() != expected || hist_host.len() != expected {
             return Err(CudaWtoError::InvalidInput(format!(
                 "output slices must be len {}",
@@ -286,15 +401,9 @@ impl CudaWto {
         }
         let CudaWtoBatchResult { outputs, combos } = self.wto_batch_dev(data_f32, sweep)?;
         let DeviceArrayF32Triplet { wt1, wt2, hist } = outputs;
-        wt1.buf
-            .copy_to(wt1_host)
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
-        wt2.buf
-            .copy_to(wt2_host)
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
-        hist.buf
-            .copy_to(hist_host)
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+        wt1.buf.copy_to(wt1_host).map_err(CudaWtoError::Cuda)?;
+        wt2.buf.copy_to(wt2_host).map_err(CudaWtoError::Cuda)?;
+        hist.buf.copy_to(hist_host).map_err(CudaWtoError::Cuda)?;
         Ok((combos.len(), series_len, combos))
     }
 
@@ -308,28 +417,34 @@ impl CudaWto {
         let (first_valids, channel, average) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        let prices_bytes = cols * rows * std::mem::size_of::<f32>();
-        let first_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = 3 * cols * rows * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_bytes + out_bytes;
+        let elems_matrix = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaWtoError::InvalidInput("cols * rows overflow".into()))?;
+        let prices_bytes = elems_matrix
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaWtoError::InvalidInput("prices_bytes overflow".into()))?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaWtoError::InvalidInput("first_bytes overflow".into()))?;
+        let out_bytes = elems_matrix
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaWtoError::InvalidInput("out_bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(first_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaWtoError::InvalidInput("required bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaWtoError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                required as f64 / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(required, headroom)?;
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
-        let mut d_wt1: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
-        let mut d_wt2: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
-        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32).map_err(CudaWtoError::Cuda)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(CudaWtoError::Cuda)?;
+        let mut d_wt1: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems_matrix) }.map_err(CudaWtoError::Cuda)?;
+        let mut d_wt2: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems_matrix) }.map_err(CudaWtoError::Cuda)?;
+        let mut d_hist: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems_matrix) }.map_err(CudaWtoError::Cuda)?;
 
         // Prefill outputs with NaN (async)
         self.prefill_nan_triplet(&mut d_wt1, &mut d_wt2, &mut d_hist)?;
@@ -346,9 +461,7 @@ impl CudaWto {
             &mut d_hist,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaWtoError::Cuda)?;
 
         Ok(DeviceArrayF32Triplet {
             wt1: DeviceArrayF32 {
@@ -379,7 +492,9 @@ impl CudaWto {
         wt2_tm: &mut [f32],
         hist_tm: &mut [f32],
     ) -> Result<(), CudaWtoError> {
-        let expected = cols * rows;
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaWtoError::InvalidInput("cols * rows overflow".into()))?;
         if wt1_tm.len() != expected || wt2_tm.len() != expected || hist_tm.len() != expected {
             return Err(CudaWtoError::InvalidInput(format!(
                 "output slices must be len {}",
@@ -388,15 +503,9 @@ impl CudaWto {
         }
         let DeviceArrayF32Triplet { wt1, wt2, hist } =
             self.wto_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, params)?;
-        wt1.buf
-            .copy_to(wt1_tm)
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
-        wt2.buf
-            .copy_to(wt2_tm)
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
-        hist.buf
-            .copy_to(hist_tm)
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+        wt1.buf.copy_to(wt1_tm).map_err(CudaWtoError::Cuda)?;
+        wt2.buf.copy_to(wt2_tm).map_err(CudaWtoError::Cuda)?;
+        hist.buf.copy_to(hist_tm).map_err(CudaWtoError::Cuda)?;
         Ok(())
     }
 
@@ -480,12 +589,7 @@ impl CudaWto {
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaWtoError::InvalidInput("all values are NaN".into()))?;
-        let combos = expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaWtoError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = expand_grid(sweep)?;
         let len = data_f32.len();
         for params in &combos {
             let ch = params.channel_length.unwrap();
@@ -525,11 +629,14 @@ impl CudaWto {
                 "num_series or series_len is zero".into(),
             ));
         }
-        if data_tm_f32.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaWtoError::InvalidInput("cols * rows overflow".into()))?;
+        if data_tm_f32.len() != expected {
             return Err(CudaWtoError::InvalidInput(format!(
                 "data length {} != cols*rows {}",
                 data_tm_f32.len(),
-                cols * rows
+                expected
             )));
         }
         let channel = params.channel_length.unwrap_or(0);
@@ -607,14 +714,19 @@ impl CudaWto {
         let func = self
             .module
             .get_function("wto_batch_f32")
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaWtoError::MissingKernelSymbol { name: "wto_batch_f32" })?;
 
+        self.validate_launch(grid_x.max(1), 1, 1, block_x, 1, 1)?;
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
             let mut channel_ptr = d_channel.as_device_ptr().as_raw();
             let mut average_ptr = d_average.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut n_combos_i = n_combos as i32;
+            let mut series_len_i: i32 = series_len
+                .try_into()
+                .map_err(|_| CudaWtoError::InvalidInput("series_len exceeds i32".into()))?;
+            let mut n_combos_i: i32 = n_combos
+                .try_into()
+                .map_err(|_| CudaWtoError::InvalidInput("n_combos exceeds i32".into()))?;
             let mut first_valid_i = first_valid as i32;
             let mut wt1_ptr = d_wt1.as_device_ptr().as_raw();
             let mut wt2_ptr = d_wt2.as_device_ptr().as_raw();
@@ -632,7 +744,7 @@ impl CudaWto {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+                .map_err(CudaWtoError::Cuda)?;
         }
         Ok(())
     }
@@ -669,14 +781,25 @@ impl CudaWto {
         let func = self
             .module
             .get_function("wto_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaWtoError::MissingKernelSymbol {
+                name: "wto_many_series_one_param_time_major_f32",
+            })?;
 
+        self.validate_launch(grid_x.max(1), 1, 1, block_x, 1, 1)?;
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
-            let mut cols_i = cols as i32;
-            let mut rows_i = rows as i32;
-            let mut channel_i = channel_length as i32;
-            let mut average_i = average_length as i32;
+            let mut cols_i: i32 = cols
+                .try_into()
+                .map_err(|_| CudaWtoError::InvalidInput("cols exceeds i32".into()))?;
+            let mut rows_i: i32 = rows
+                .try_into()
+                .map_err(|_| CudaWtoError::InvalidInput("rows exceeds i32".into()))?;
+            let mut channel_i: i32 = channel_length
+                .try_into()
+                .map_err(|_| CudaWtoError::InvalidInput("channel_length exceeds i32".into()))?;
+            let mut average_i: i32 = average_length
+                .try_into()
+                .map_err(|_| CudaWtoError::InvalidInput("average_length exceeds i32".into()))?;
             let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
             let mut wt1_ptr = d_wt1.as_device_ptr().as_raw();
             let mut wt2_ptr = d_wt2.as_device_ptr().as_raw();
@@ -694,7 +817,7 @@ impl CudaWto {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+                .map_err(CudaWtoError::Cuda)?;
         }
         Ok(())
     }
@@ -810,17 +933,54 @@ pub mod benches {
     }
 }
 
-fn expand_grid(r: &WtoBatchRange) -> Vec<WtoParams> {
-    fn axis_u(range: (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &WtoBatchRange) -> Result<Vec<WtoParams>, CudaWtoError> {
+    fn axis_u(range: (usize, usize, usize)) -> Result<Vec<usize>, CudaWtoError> {
         let (start, end, step) = range;
         if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect::<Vec<_>>()
+            return Ok(vec![start]);
         }
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            loop {
+                if v > end {
+                    break;
+                }
+                out.push(v);
+                let next = v.checked_add(step).ok_or_else(|| CudaWtoError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                })?;
+                if next == v {
+                    break;
+                }
+                v = next;
+            }
+        } else {
+            let mut v = start;
+            loop {
+                if v < end {
+                    break;
+                }
+                out.push(v);
+                if v - end < step {
+                    break;
+                }
+                v -= step;
+            }
+        }
+        if out.is_empty() {
+            return Err(CudaWtoError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(out)
     }
-    let channels = axis_u(r.channel);
-    let averages = axis_u(r.average);
+    let channels = axis_u(r.channel)?;
+    let averages = axis_u(r.average)?;
     let mut out = Vec::with_capacity(channels.len() * averages.len());
     for &ch in &channels {
         for &av in &averages {
@@ -830,5 +990,12 @@ fn expand_grid(r: &WtoBatchRange) -> Vec<WtoParams> {
             });
         }
     }
-    out
+    if out.is_empty() {
+        return Err(CudaWtoError::InvalidRange {
+            start: r.channel.0.to_string(),
+            end: r.channel.1.to_string(),
+            step: r.channel.2.to_string(),
+        });
+    }
+    Ok(out)
 }

@@ -18,6 +18,7 @@
 //! - SIMD enabled: AVX2/AVX512 vectorize across time (4/8 lanes) and use FMA; selected at runtime via detect_best_kernel(). Benchmarked >5% faster than scalar at 100k.
 //! - Streaming: Kept as O(N) per-tick dot product to match batch numerics exactly under strict 1e-9 tests. A Sliding DFT O(1) variant was evaluated but disabled due to last-bit drift; revisit with a guaranteed-stable SDFT if parity can be ensured.
 //! - Zero-copy Memory: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations.
+//! - Decision log: SIMD enabled (AVX2/AVX512), CUDA wrapper present for batch and many-series paths, Python interop reuses ALMA DeviceArrayF32Py for CUDA Array Interface v3 + DLPack v1.x; scalar remains the numerical reference.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -36,7 +37,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaMsw};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -188,13 +189,22 @@ impl MswBuilder {
 #[derive(Debug, Error)]
 pub enum MswError {
     #[error("msw: Empty data provided for MSW.")]
-    EmptyData,
+    EmptyInputData,
+    #[error("msw: All values are NaN.")]
+    AllValuesNaN,
     #[error("msw: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("msw: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("msw: All values are NaN.")]
-    AllValuesNaN,
+    #[error("msw: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("msw: Invalid range expansion: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("msw: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
+    // Backwards-compatible alias; prefer EmptyInputData in new call sites.
+    #[error("msw: Empty data provided for MSW.")]
+    EmptyData,
 }
 
 #[inline]
@@ -208,7 +218,7 @@ pub fn msw_with_kernel(input: &MswInput, kernel: Kernel) -> Result<MswOutput, Ms
         MswData::Slice(sl) => sl,
     };
     if data.is_empty() {
-        return Err(MswError::EmptyData);
+        return Err(MswError::EmptyInputData);
     }
     let period = input.get_period();
     let first = data
@@ -696,12 +706,7 @@ pub fn msw_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(MswError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(MswError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -742,18 +747,57 @@ impl MswBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &MswBatchRange) -> Vec<MswParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &MswBatchRange) -> Result<Vec<MswParams>, MswError> {
+    #[inline]
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, MswError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step).collect();
+            return if v.is_empty() {
+                Err(MswError::InvalidRange { start, end, step })
+            } else {
+                Ok(v)
+            };
+        }
+        // Reversed bounds: walk downwards, including both ends.
+        let mut v = Vec::new();
+        let mut cur = start;
+        loop {
+            v.push(cur);
+            if cur <= end {
+                break;
+            }
+            match cur.checked_sub(step) {
+                Some(next) => {
+                    cur = next;
+                    if cur <= end {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        if v.is_empty() {
+            Err(MswError::InvalidRange { start, end, step })
+        } else {
+            Ok(v)
+        }
     }
-    let periods = axis_usize(r.period);
-    periods
+
+    let periods = axis_usize(r.period)?;
+    if periods.is_empty() {
+        return Err(MswError::InvalidRange {
+            start: r.period.0,
+            end: r.period.1,
+            step: r.period.2,
+        });
+    }
+    Ok(periods
         .into_iter()
         .map(|p| MswParams { period: Some(p) })
-        .collect()
+        .collect())
 }
 
 #[inline(always)]
@@ -781,13 +825,7 @@ fn msw_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<MswBatchOutput, MswError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(MswError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -898,13 +936,7 @@ fn msw_batch_inner_into(
 ) -> Result<Vec<MswParams>, MswError> {
     use std::mem::MaybeUninit;
 
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(MswError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -921,10 +953,17 @@ fn msw_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    if sine_out.len() != rows * cols || lead_out.len() != rows * cols {
-        return Err(MswError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(MswError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if sine_out.len() != expected || lead_out.len() != expected {
+        return Err(MswError::OutputLengthMismatch {
+            expected,
+            got: sine_out.len().max(lead_out.len()),
         });
     }
 
@@ -1362,13 +1401,16 @@ pub fn msw_batch_py<'py>(
     };
 
     // Calculate dimensions
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
     // Pre-allocate output arrays (OK for batch operations)
-    let out_sine = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let out_lead = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("msw_batch_py: rows*cols overflow"))?;
+    let out_sine = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let out_lead = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out_sine = unsafe { out_sine.as_slice_mut()? };
     let slice_out_lead = unsafe { out_lead.as_slice_mut()? };
 
@@ -1421,7 +1463,7 @@ pub fn msw_into_slice(
     };
 
     if data.is_empty() {
-        return Err(MswError::EmptyData);
+        return Err(MswError::EmptyInputData);
     }
 
     let period = input.get_period();
@@ -1445,10 +1487,11 @@ pub fn msw_into_slice(
         });
     }
 
-    if sine_dst.len() != data.len() || lead_dst.len() != data.len() {
-        return Err(MswError::InvalidPeriod {
-            period: sine_dst.len(),
-            data_len: data.len(),
+    let expected = data.len();
+    if sine_dst.len() != expected || lead_dst.len() != expected {
+        return Err(MswError::OutputLengthMismatch {
+            expected,
+            got: sine_dst.len().max(lead_dst.len()),
         });
     }
 
@@ -1728,14 +1771,16 @@ pub fn msw_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
     };
 
     // Plan buffers: first half for sine rows, second half for lead rows
-    let combos = expand_grid(&sweep);
-    if combos.is_empty() {
-        return Err(JsValue::from_str("No parameter combinations"));
-    }
+    let combos = expand_grid(&sweep)
+        .map_err(|_| JsValue::from_str("No parameter combinations"))?;
     let rows = combos.len();
     let cols = data.len();
 
-    let mut values = vec![f64::NAN; 2 * rows * cols];
+    let total = rows
+        .checked_mul(cols)
+        .and_then(|n| n.checked_mul(2))
+        .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+    let mut values = vec![f64::NAN; total];
     let (sine_out, lead_out) = values.split_at_mut(rows * cols);
 
     msw_batch_inner_into(data, &sweep, Kernel::Auto, false, sine_out, lead_out)
@@ -1792,7 +1837,8 @@ pub fn msw_batch_metadata_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|_| JsValue::from_str("No parameter combinations"))?;
     let metadata = combos
         .iter()
         .map(|combo| combo.period.unwrap() as f64)
@@ -1819,10 +1865,8 @@ pub fn msw_batch_into_flat(
         let sweep = MswBatchRange {
             period: (period_start, period_end, period_step),
         };
-        let combos = expand_grid(&sweep);
-        if combos.is_empty() {
-            return Err(JsValue::from_str("No parameter combinations"));
-        }
+        let combos = expand_grid(&sweep)
+            .map_err(|_| JsValue::from_str("No parameter combinations"))?;
         let rows = combos.len();
         let cols = len;
 
@@ -1858,14 +1902,14 @@ pub fn msw_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
-        if combos.is_empty() {
-            return Err(JsValue::from_str("No valid parameter combinations"));
-        }
+        let combos = expand_grid(&sweep)
+            .map_err(|_| JsValue::from_str("No valid parameter combinations"))?;
 
         let rows = combos.len();
         let cols = len;
-        let total_len = rows * cols;
+        let total_len = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
 
         let sine_out = std::slice::from_raw_parts_mut(sine_ptr, total_len);
         let lead_out = std::slice::from_raw_parts_mut(lead_ptr, total_len);
@@ -2805,6 +2849,7 @@ pub fn msw_cuda_batch_dev_py<'py>(
         cuda.msw_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
+    let handle = make_device_array_py(device_id, inner)?;
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item(
         "periods",
@@ -2816,7 +2861,7 @@ pub fn msw_cuda_batch_dev_py<'py>(
     )?;
     dict.set_item("rows", 2 * combos.len())?;
     dict.set_item("cols", slice.len())?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((handle, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2847,5 +2892,5 @@ pub fn msw_cuda_many_series_one_param_dev_py<'py>(
         cuda.msw_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(make_device_array_py(device_id, inner)?)
 }

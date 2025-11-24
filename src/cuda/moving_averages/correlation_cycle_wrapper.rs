@@ -10,6 +10,7 @@
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
+use thiserror::Error;
 use crate::indicators::correlation_cycle::{CorrelationCycleBatchRange, CorrelationCycleParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -25,22 +26,27 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaCorrelationCycleError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaCorrelationCycleError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaCorrelationCycleError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaCorrelationCycleError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaCorrelationCycleError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -106,7 +112,7 @@ impl DeviceCorrelationCycleQuad {
 pub struct CudaCorrelationCycle {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaCorrelationCyclePolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -117,12 +123,9 @@ pub struct CudaCorrelationCycle {
 
 impl CudaCorrelationCycle {
     pub fn new(device_id: usize) -> Result<Self, CudaCorrelationCycleError> {
-        cust::init(CudaFlags::empty())
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let context =
-            Context::new(device).map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/correlation_cycle_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
@@ -131,21 +134,18 @@ impl CudaCorrelationCycle {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaCorrelationCyclePolicy::default(),
             last_batch: None,
@@ -168,10 +168,11 @@ impl CudaCorrelationCycle {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaCorrelationCycleError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
+
+    pub fn ctx(&self) -> Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -228,6 +229,40 @@ impl CudaCorrelationCycle {
         } else {
             true
         }
+    }
+
+    #[inline]
+    fn validate_launch(&self, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32) -> Result<(), CudaCorrelationCycleError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+        let threads = bx
+            .checked_mul(by)
+            .and_then(|v| v.checked_mul(bz))
+            .ok_or(CudaCorrelationCycleError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz })?;
+        if threads > max_threads || bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
+            return Err(CudaCorrelationCycleError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
     }
 
     #[inline]
@@ -288,20 +323,56 @@ impl CudaCorrelationCycle {
             if step == 0 || start == end {
                 return vec![start];
             }
-            (start..=end).step_by(step).collect()
+            let mut vals = Vec::new();
+            if start < end {
+                let mut v = start;
+                loop {
+                    vals.push(v);
+                    if v >= end { break; }
+                    let next = match v.checked_add(step) { Some(n) => n, None => break };
+                    if next == v { break; }
+                    v = next;
+                }
+            } else {
+                let mut v = start;
+                loop {
+                    vals.push(v);
+                    if v <= end { break; }
+                    let next = v.saturating_sub(step);
+                    if next == v { break; }
+                    v = next;
+                }
+            }
+            vals
         }
         fn axis_f64(a: (f64, f64, f64)) -> Vec<f64> {
             let (start, end, step) = a;
             if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
                 return vec![start];
             }
-            let mut v = Vec::new();
-            let mut x = start;
-            while x <= end + 1e-12 {
-                v.push(x);
-                x += step;
+            let mut vals = Vec::new();
+            if start <= end {
+                let mut x = start;
+                loop {
+                    vals.push(x);
+                    if x >= end { break; }
+                    let next = x + step;
+                    if !next.is_finite() || next == x { break; }
+                    x = next;
+                    if x > end + 1e-12 { break; }
+                }
+            } else {
+                let mut x = start;
+                loop {
+                    vals.push(x);
+                    if x <= end { break; }
+                    let next = x - step.abs();
+                    if !next.is_finite() || next == x { break; }
+                    x = next;
+                    if x < end - 1e-12 { break; }
+                }
             }
-            v
+            vals
         }
         let periods = axis_usize(r.period);
         let thresholds = axis_f64(r.threshold);
@@ -378,50 +449,61 @@ impl CudaCorrelationCycle {
         }
 
         // VRAM estimate: inputs + params + weights + 4 outputs + headroom
-        let prices_bytes = series_len * 4;
-        let params_bytes =
-            (n_combos * (4 + 4)) + (n_combos * (4 * 4)) + (2 * n_combos * max_period * 4);
-        let outputs_bytes = 4 * n_combos * series_len * 4;
-        let required = prices_bytes + params_bytes + outputs_bytes;
+        let total_out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("rows*cols overflow".into()))?;
+        let f32_bytes = std::mem::size_of::<f32>();
+        let i32_bytes = std::mem::size_of::<i32>();
+        let prices_bytes = series_len
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("series_len bytes overflow".into()))?;
+        // periods_i32 (i32) + thresholds/sum_cos/sum_sin/sqrt_t2/sqrt_t4 (5×f32) per combo
+        let per_combo_meta = i32_bytes
+            .checked_add(5usize.checked_mul(f32_bytes).ok_or_else(|| CudaCorrelationCycleError::InvalidInput("meta bytes overflow".into()))?)
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("meta bytes overflow".into()))?;
+        let meta_bytes = n_combos
+            .checked_mul(per_combo_meta)
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("params bytes overflow".into()))?;
+        // cos_flat + sin_flat: 2 * n_combos * max_period * sizeof(f32)
+        let weight_elems = n_combos
+            .checked_mul(max_period)
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("n_combos*max_period overflow".into()))?;
+        let weight_bytes = weight_elems
+            .checked_mul(2usize.checked_mul(f32_bytes).ok_or_else(|| CudaCorrelationCycleError::InvalidInput("weight bytes overflow".into()))?)
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("weight bytes overflow".into()))?;
+        let params_bytes = meta_bytes
+            .checked_add(weight_bytes)
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("params bytes overflow".into()))?;
+        // 4 outputs (real/imag/angle/state), each f32
+        let outputs_bytes = total_out_elems
+            .checked_mul(4)
+            .and_then(|v| v.checked_mul(f32_bytes))
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(outputs_bytes))
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("VRAM size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaCorrelationCycleError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                required as f64 / (1024.0 * 1024.0)
-            )));
+            let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
+            return Err(CudaCorrelationCycleError::OutOfMemory { required, free, headroom });
         }
 
         // Upload
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let d_cos = DeviceBuffer::from_slice(&cos_flat)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let d_sin = DeviceBuffer::from_slice(&sin_flat)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let d_thresholds = DeviceBuffer::from_slice(&thresholds_f32)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let d_sum_cos = DeviceBuffer::from_slice(&sum_cos)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let d_sum_sin = DeviceBuffer::from_slice(&sum_sin)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let d_sqrt_t2 = DeviceBuffer::from_slice(&sqrt_t2)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let d_sqrt_t4 = DeviceBuffer::from_slice(&sqrt_t4)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let mut d_real: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let mut d_imag: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let mut d_angle: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let mut d_state: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
+        let d_cos = DeviceBuffer::from_slice(&cos_flat)?;
+        let d_sin = DeviceBuffer::from_slice(&sin_flat)?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+        let d_thresholds = DeviceBuffer::from_slice(&thresholds_f32)?;
+        let d_sum_cos = DeviceBuffer::from_slice(&sum_cos)?;
+        let d_sum_sin = DeviceBuffer::from_slice(&sum_sin)?;
+        let d_sqrt_t2 = DeviceBuffer::from_slice(&sqrt_t2)?;
+        let d_sqrt_t4 = DeviceBuffer::from_slice(&sqrt_t4)?;
+        let total = total_out_elems;
+        let mut d_real: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
+        let mut d_imag: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
+        let mut d_angle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
+        let mut d_state: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
 
         // Kernel selection
         let (grid, block, bx) = match self.policy.batch {
@@ -436,7 +518,7 @@ impl CudaCorrelationCycle {
         let func_ria = self
             .module
             .get_function("correlation_cycle_batch_f32_ria")
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCorrelationCycleError::MissingKernelSymbol { name: "correlation_cycle_batch_f32_ria" })?;
         let smem = (max_period * 2 * std::mem::size_of::<f32>()) as u32; // wcos + wsin
         let stream = &self.stream;
         // Chunk grid.y to ≤ 65_535
@@ -444,6 +526,7 @@ impl CudaCorrelationCycle {
         while processed < n_combos {
             let chunk = (n_combos - processed).min(65_535);
             let grid_chunk: GridSize = (grid.x, chunk as u32, 1).into();
+            self.validate_launch(grid_chunk.x, grid_chunk.y, grid_chunk.z, block.x, block.y, block.z)?;
             let out_off = processed * series_len;
             let out_real_ptr = unsafe { d_real.as_device_ptr().add(out_off) };
             let out_imag_ptr = unsafe { d_imag.as_device_ptr().add(out_off) };
@@ -466,14 +549,13 @@ impl CudaCorrelationCycle {
                     out_real_ptr,
                     out_imag_ptr,
                     out_angle_ptr
-                ))
-                .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
+                ))?;
             }
             // State pass for this chunk
             let func_state = self
                 .module
                 .get_function("correlation_cycle_state_batch_f32")
-                .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaCorrelationCycleError::MissingKernelSymbol { name: "correlation_cycle_state_batch_f32" })?;
             let out_state_ptr = unsafe { d_state.as_device_ptr().add(out_off) };
             unsafe {
                 launch!(func_state<<<grid_chunk, block, 0, stream>>>(
@@ -485,8 +567,7 @@ impl CudaCorrelationCycle {
                     first_valid as i32,
                     processed as i32,
                     out_state_ptr
-                ))
-                .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
+                ))?;
             }
             processed += chunk;
         }
@@ -533,7 +614,10 @@ impl CudaCorrelationCycle {
         if period == 0 {
             return Err(CudaCorrelationCycleError::InvalidInput("period=0".into()));
         }
-        if prices_tm_f32.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("rows*cols overflow".into()))?;
+        if prices_tm_f32.len() != expected {
             return Err(CudaCorrelationCycleError::InvalidInput(
                 "flat data size mismatch".into(),
             ));
@@ -557,32 +641,45 @@ impl CudaCorrelationCycle {
         let (wcos, wsin, sum_c, sum_s, st2, st4) = Self::compute_trig_weights_and_consts(period);
 
         // VRAM estimate
-        let elems = cols * rows;
-        let required =
-            elems * 4 + (period * 2 * 4) + (cols * 4) + (4 * elems * 4) + 64 * 1024 * 1024;
-        if !Self::will_fit(required, 0) {
-            return Err(CudaCorrelationCycleError::InvalidInput(
-                "insufficient VRAM".into(),
-            ));
+        let elems = expected;
+        let f32_bytes = std::mem::size_of::<f32>();
+        let prices_bytes = elems
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("prices bytes overflow".into()))?;
+        // wcos + wsin: 2 * period * sizeof(f32)
+        let weights_bytes = period
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(f32_bytes))
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("weights bytes overflow".into()))?;
+        // first_valids (i32 per series)
+        let first_valid_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("first_valid bytes overflow".into()))?;
+        // 4 outputs: real/imag/angle/state
+        let outputs_bytes = elems
+            .checked_mul(4)
+            .and_then(|v| v.checked_mul(f32_bytes))
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(weights_bytes)
+            .and_then(|v| v.checked_add(first_valid_bytes))
+            .and_then(|v| v.checked_add(outputs_bytes))
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("VRAM size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
+            return Err(CudaCorrelationCycleError::OutOfMemory { required, free, headroom });
         }
 
         // Upload
-        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let d_wcos = DeviceBuffer::from_slice(&wcos)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let d_wsin = DeviceBuffer::from_slice(&wsin)
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let mut d_real: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let mut d_imag: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let mut d_angle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
-        let mut d_state: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
+        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
+        let d_wcos = DeviceBuffer::from_slice(&wcos)?;
+        let d_wsin = DeviceBuffer::from_slice(&wsin)?;
+        let mut d_real: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_imag: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_angle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_state: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         // Kernel selection
         let (grid, block, (tx, ty)) = match self.policy.many_series {
@@ -597,9 +694,10 @@ impl CudaCorrelationCycle {
         let func_ria = self
             .module
             .get_function("correlation_cycle_many_series_one_param_f32_ria")
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCorrelationCycleError::MissingKernelSymbol { name: "correlation_cycle_many_series_one_param_f32_ria" })?;
         let smem = (period * 2 * std::mem::size_of::<f32>()) as u32;
         let stream = &self.stream;
+        self.validate_launch(grid.x, grid.y, grid.z, block.x, block.y, block.z)?;
         unsafe {
             launch!(func_ria<<<grid, block, smem, stream>>>(
                 d_prices_tm.as_device_ptr(),
@@ -610,14 +708,14 @@ impl CudaCorrelationCycle {
                 d_first_valids.as_device_ptr(),
                 d_real.as_device_ptr(), d_imag.as_device_ptr(), d_angle.as_device_ptr()
             ))
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
+            .map_err(CudaCorrelationCycleError::from)?;
         }
 
         // State pass
         let func_state = self
             .module
             .get_function("correlation_cycle_state_many_series_one_param_f32")
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCorrelationCycleError::MissingKernelSymbol { name: "correlation_cycle_state_many_series_one_param_f32" })?;
         let stream = &self.stream;
         unsafe {
             launch!(func_state<<<grid, block, 0, stream>>>(
@@ -627,7 +725,7 @@ impl CudaCorrelationCycle {
                 cols as i32, rows as i32, period as i32,
                 d_state.as_device_ptr()
             ))
-            .map_err(|e| CudaCorrelationCycleError::Cuda(e.to_string()))?;
+            .map_err(CudaCorrelationCycleError::from)?;
         }
 
         self.synchronize()?;

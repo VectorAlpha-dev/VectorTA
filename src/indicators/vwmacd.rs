@@ -26,7 +26,7 @@
 //! - Batch: Row path reuses MACD per row; default SMA/SMA macd computation optimized to sliding sums (no per-row temporaries).
 //! - Streaming update: O(1) for default SMA/SMA + EMA via sliding sums and one-time EMA seed; fallback remains for other MA types.
 //! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes) and avoids O(N) temps on hot paths.
-//! - CUDA: No dedicated kernel here; improvements focus on scalar/SIMD. VWMA has a CUDA kernel.
+//! - CUDA/Interop: Dedicated VWMACD CUDA wrapper with typed errors + VRAM checks; Python DeviceArrayF32Py preserves context/device_id and exposes CUDA Array Interface v3 and DLPack v1.x (versioned capsules).
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -304,6 +304,8 @@ impl VwmacdBuilder {
 
 #[derive(Debug, Error)]
 pub enum VwmacdError {
+    #[error("vwmacd: Input data slice is empty.")]
+    EmptyInputData,
     #[error("vwmacd: All values are NaN.")]
     AllValuesNaN,
     #[error(
@@ -317,6 +319,12 @@ pub enum VwmacdError {
     },
     #[error("vwmacd: Not enough valid data: needed={needed}, valid={valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("vwmacd: Output length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("vwmacd: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("vwmacd: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("vwmacd: MA calculation error: {0}")]
     MaError(String),
 }
@@ -402,11 +410,21 @@ pub fn vwmacd_into_slice(
     ) = vwmacd_prepare(input, kern)?;
     let len = close.len();
     if dst_macd.len() != len || dst_signal.len() != len || dst_hist.len() != len {
-        return Err(VwmacdError::InvalidPeriod {
-            fast,
-            slow,
-            signal: signal_period,
-            data_len: len,
+        if dst_macd.len() != len {
+            return Err(VwmacdError::OutputLengthMismatch {
+                expected: len,
+                got: dst_macd.len(),
+            });
+        }
+        if dst_signal.len() != len {
+            return Err(VwmacdError::OutputLengthMismatch {
+                expected: len,
+                got: dst_signal.len(),
+            });
+        }
+        return Err(VwmacdError::OutputLengthMismatch {
+            expected: len,
+            got: dst_hist.len(),
         });
     }
 
@@ -458,11 +476,21 @@ pub fn vwmacd_into(
 
     let len = close.len();
     if macd_out.len() != len || signal_out.len() != len || hist_out.len() != len {
-        return Err(VwmacdError::InvalidPeriod {
-            fast,
-            slow,
-            signal,
-            data_len: len,
+        if macd_out.len() != len {
+            return Err(VwmacdError::OutputLengthMismatch {
+                expected: len,
+                got: macd_out.len(),
+            });
+        }
+        if signal_out.len() != len {
+            return Err(VwmacdError::OutputLengthMismatch {
+                expected: len,
+                got: signal_out.len(),
+            });
+        }
+        return Err(VwmacdError::OutputLengthMismatch {
+            expected: len,
+            got: hist_out.len(),
         });
     }
 
@@ -1549,12 +1577,13 @@ fn vwmacd_prepare<'a>(
     };
 
     let len = close.len();
-    if len == 0 || volume.len() != len {
-        return Err(VwmacdError::InvalidPeriod {
-            fast: 0,
-            slow: 0,
-            signal: 0,
-            data_len: len,
+    if len == 0 {
+        return Err(VwmacdError::EmptyInputData);
+    }
+    if volume.len() != len {
+        return Err(VwmacdError::OutputLengthMismatch {
+            expected: len,
+            got: volume.len(),
         });
     }
 
@@ -2122,18 +2151,67 @@ impl VwmacdBatchBuilder {
 }
 
 #[inline(always)]
-fn expand_grid(r: &VwmacdBatchRange) -> Vec<VwmacdParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &VwmacdBatchRange) -> Result<Vec<VwmacdParams>, VwmacdError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, VwmacdError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let st = step.max(1);
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                let next = cur.saturating_add(st);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+            }
+            if v.is_empty() {
+                return Err(VwmacdError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(VwmacdError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let fasts = axis(r.fast);
-    let slows = axis(r.slow);
-    let signals = axis(r.signal);
 
-    let mut out = Vec::with_capacity(fasts.len() * slows.len() * signals.len());
+    let fasts = axis_usize(r.fast)?;
+    let slows = axis_usize(r.slow)?;
+    let signals = axis_usize(r.signal)?;
+
+    let cap = fasts
+        .len()
+        .checked_mul(slows.len())
+        .and_then(|x| x.checked_mul(signals.len()))
+        .ok_or_else(|| VwmacdError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &f in &fasts {
         for &s in &slows {
             for &g in &signals {
@@ -2148,7 +2226,7 @@ fn expand_grid(r: &VwmacdBatchRange) -> Vec<VwmacdParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[derive(Clone, Debug)]
@@ -2189,13 +2267,8 @@ pub fn vwmacd_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(VwmacdError::InvalidPeriod {
-                fast: 0,
-                slow: 0,
-                signal: 0,
-                data_len: 0,
-            });
+        other => {
+            return Err(VwmacdError::InvalidKernelForBatch(other));
         }
     };
     let simd = match kernel {
@@ -2239,18 +2312,24 @@ fn vwmacd_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<VwmacdBatchOutput, VwmacdError> {
-    let params = expand_grid(sweep);
-    if params.is_empty() {
-        return Err(VwmacdError::InvalidPeriod {
-            fast: 0,
-            slow: 0,
-            signal: 0,
-            data_len: 0,
+    let params = expand_grid(sweep)?;
+    let len = close.len();
+    if len == 0 {
+        return Err(VwmacdError::EmptyInputData);
+    }
+    if volume.len() != len {
+        return Err(VwmacdError::OutputLengthMismatch {
+            expected: len,
+            got: volume.len(),
         });
     }
-    let len = close.len();
     let rows = params.len();
     let cols = len;
+    rows.checked_mul(cols).ok_or_else(|| VwmacdError::InvalidRange {
+        start: "rows".into(),
+        end: "cols".into(),
+        step: "mul".into(),
+    })?;
 
     let first = first_valid_pair(close, volume).ok_or(VwmacdError::AllValuesNaN)?;
     // warmup per row
@@ -2426,18 +2505,34 @@ fn vwmacd_batch_inner_into(
     signal_out: &mut [f64],
     hist_out: &mut [f64],
 ) -> Result<Vec<VwmacdParams>, VwmacdError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(VwmacdError::InvalidPeriod {
-            fast: 0,
-            slow: 0,
-            signal: 0,
-            data_len: 0,
+    let combos = expand_grid(sweep)?;
+    let rows = combos.len();
+    let cols = close.len();
+
+    if cols == 0 {
+        return Err(VwmacdError::EmptyInputData);
+    }
+    if volume.len() != cols {
+        return Err(VwmacdError::OutputLengthMismatch {
+            expected: cols,
+            got: volume.len(),
         });
     }
 
-    let rows = combos.len();
-    let cols = close.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| VwmacdError::InvalidRange {
+            start: "rows".into(),
+            end: "cols".into(),
+            step: "mul".into(),
+        })?;
+    if macd_out.len() != expected || signal_out.len() != expected || hist_out.len() != expected {
+        let got = macd_out
+            .len()
+            .min(signal_out.len())
+            .min(hist_out.len());
+        return Err(VwmacdError::OutputLengthMismatch { expected, got });
+    }
 
     let first = first_valid_pair(close, volume).ok_or(VwmacdError::AllValuesNaN)?;
 
@@ -2942,13 +3037,16 @@ pub fn vwmacd_batch_py<'py>(
         slow_ma_type: slow_ma_type.to_string(),
         signal_ma_type: signal_ma_type.to_string(),
     };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = close.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("vwmacd_batch: rows*cols overflow".to_string()))?;
 
-    let macd_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let signal_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let hist_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let macd_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let signal_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let hist_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
 
     let macd_slice = unsafe { macd_arr.as_slice_mut()? };
     let signal_slice = unsafe { signal_arr.as_slice_mut()? };
@@ -3029,7 +3127,7 @@ pub fn vwmacd_batch_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaVwmacd};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "vwmacd_cuda_batch_dev")]
@@ -3058,39 +3156,29 @@ pub fn vwmacd_cuda_batch_dev_py<'py>(
         signal_ma_type: "ema".to_string(),
     };
 
-    let (triplet, combos) = py.allow_threads(|| {
+    let ((macd_buf, signal_buf, hist_buf), combos) = py.allow_threads(|| {
         let cuda = CudaVwmacd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vwmacd_batch_dev(prices, volumes, &sweep)
+        cuda
+            .vwmacd_batch_dev(prices, volumes, &sweep)
+            .map(|(triplet, combos)| ( (triplet.macd, triplet.signal, triplet.hist), combos ))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let dict = pyo3::types::PyDict::new(py);
+    let macd_dev = make_device_array_py(device_id, macd_buf)?;
     dict.set_item(
         "macd",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: triplet.macd,
-            },
-        )?,
+        Py::new(py, macd_dev)?,
     )?;
+    let signal_dev = make_device_array_py(device_id, signal_buf)?;
     dict.set_item(
         "signal",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: triplet.signal,
-            },
-        )?,
+        Py::new(py, signal_dev)?,
     )?;
+    let hist_dev = make_device_array_py(device_id, hist_buf)?;
     dict.set_item(
         "hist",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: triplet.hist,
-            },
-        )?,
+        Py::new(py, hist_dev)?,
     )?;
     dict.set_item("rows", combos.len())?;
     dict.set_item("cols", prices.len())?;
@@ -3157,39 +3245,29 @@ pub fn vwmacd_cuda_many_series_one_param_dev_py<'py>(
         signal_ma_type: Some("ema".into()),
     };
 
-    let triplet = py.allow_threads(|| {
+    let (macd_buf, signal_buf, hist_buf) = py.allow_threads(|| {
         let cuda = CudaVwmacd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vwmacd_many_series_one_param_time_major_dev(p, v, cols, rows, &params)
+        cuda
+            .vwmacd_many_series_one_param_time_major_dev(p, v, cols, rows, &params)
+            .map(|triplet| (triplet.macd, triplet.signal, triplet.hist))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let dict = pyo3::types::PyDict::new(py);
+    let macd_dev = make_device_array_py(device_id, macd_buf)?;
     dict.set_item(
         "macd",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: triplet.macd,
-            },
-        )?,
+        Py::new(py, macd_dev)?,
     )?;
+    let signal_dev = make_device_array_py(device_id, signal_buf)?;
     dict.set_item(
         "signal",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: triplet.signal,
-            },
-        )?,
+        Py::new(py, signal_dev)?,
     )?;
+    let hist_dev = make_device_array_py(device_id, hist_buf)?;
     dict.set_item(
         "hist",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: triplet.hist,
-            },
-        )?,
+        Py::new(py, hist_dev)?,
     )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;

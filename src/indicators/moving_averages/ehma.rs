@@ -31,7 +31,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaEhma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{DeviceArrayF32Py, make_device_array_py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -1316,7 +1316,8 @@ pub fn ehma_cuda_batch_dev_py(
 
     // CAI v3 note: producing stream is synchronized before returning the device array,
     // so DeviceArrayF32Py.__cuda_array_interface__ should omit the "stream" key.
-    Ok(DeviceArrayF32Py { inner })
+    // Use helper to attach a primary-context guard and preserve device_id.
+    Ok(make_device_array_py(device_id, inner)?)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1348,7 +1349,7 @@ pub fn ehma_cuda_many_series_one_param_dev_py(
     })?;
 
     // CAI v3 note: producing stream is synchronized before returning the device array.
-    Ok(DeviceArrayF32Py { inner })
+    Ok(make_device_array_py(device_id, inner)?)
 }
 
 #[cfg(feature = "python")]

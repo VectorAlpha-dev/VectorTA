@@ -12,7 +12,8 @@
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::indicators::qqe::{QqeBatchRange, QqeParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -20,23 +21,29 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaQqeError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf}, current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaQqeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaQqeError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaQqeError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaQqeError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -63,7 +70,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaQqe {
     module: Module,
     stream: Stream,
-    _context: Context,
+    ctx: Arc<Context>,
     device_id: u32,
     policy_batch: BatchKernelPolicy,
     policy_many: ManySeriesKernelPolicy,
@@ -81,10 +88,9 @@ impl CudaQqe {
         ((clamped + 31) / 32) * 32
     }
     pub fn new(device_id: usize) -> Result<Self, CudaQqeError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/qqe_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
@@ -97,16 +103,15 @@ impl CudaQqe {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaQqeError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _context: context,
+            ctx: context,
             device_id: device_id as u32,
             policy_batch: BatchKernelPolicy::Auto,
             policy_many: ManySeriesKernelPolicy::Auto,
@@ -135,9 +140,8 @@ impl CudaQqe {
     }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaQqeError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
     }
 
     #[inline]
@@ -178,12 +182,56 @@ impl CudaQqe {
     }
 
     // ---- Helpers ----
-    fn device_mem_ok(bytes: usize) -> bool {
-        match mem_get_info() {
-            Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
             Err(_) => true,
         }
     }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaQqeError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Ok((free, _)) = mem_get_info() {
+            let need = required_bytes
+                .checked_add(headroom_bytes)
+                .ok_or_else(|| {
+                    CudaQqeError::InvalidInput(
+                        "size overflow when adding headroom to required bytes".into(),
+                    )
+                })?;
+            if need > free {
+                return Err(CudaQqeError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn validate_launch(&self, grid: (u32, u32, u32), block: (u32, u32, u32)) -> Result<(), CudaQqeError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
+
+        let (gx, gy, gz) = grid;
+        let (bx, by, bz) = block;
+        if bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
+            return Err(CudaQqeError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
+    }
+
     fn first_valid_f32(series: &[f32]) -> Result<usize, CudaQqeError> {
         if series.is_empty() {
             return Err(CudaQqeError::InvalidInput("empty series".into()));
@@ -195,24 +243,49 @@ impl CudaQqe {
     }
     fn expand_grid(range: &QqeBatchRange) -> Vec<QqeParams> {
         fn axis_usize(t: (usize, usize, usize)) -> Vec<usize> {
-            if t.2 == 0 || t.0 == t.1 {
-                vec![t.0]
-            } else {
-                (t.0..=t.1).step_by(t.2).collect()
+            let (s, e, st) = t;
+            if st == 0 || s == e {
+                return vec![s];
             }
+            if s < e {
+                return (s..=e).step_by(st.max(1)).collect();
+            }
+            let mut v = Vec::new();
+            let step = st.max(1);
+            let mut cur = s;
+            while cur >= e {
+                v.push(cur);
+                if cur < step {
+                    break;
+                }
+                cur -= step;
+                if cur == usize::MAX {
+                    break;
+                }
+            }
+            v
         }
         fn axis_f64(t: (f64, f64, f64)) -> Vec<f64> {
-            if t.2.abs() < 1e-12 || (t.0 - t.1).abs() < 1e-12 {
-                vec![t.0]
-            } else {
-                let mut v = Vec::new();
-                let mut x = t.0;
-                while x <= t.1 + 1e-12 {
-                    v.push(x);
-                    x += t.2;
-                }
-                v
+            let (s, e, st) = t;
+            let step = if st.is_sign_negative() { -st } else { st };
+            if step.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+                return vec![s];
             }
+            let mut v = Vec::new();
+            if s <= e {
+                let mut x = s;
+                while x <= e + 1e-12 {
+                    v.push(x);
+                    x += step;
+                }
+            } else {
+                let mut x = s;
+                while x + 1e-12 >= e {
+                    v.push(x);
+                    x -= step;
+                }
+            }
+            v
         }
         let rs = axis_usize(range.rsi_period);
         let sm = axis_usize(range.smoothing_factor);
@@ -243,7 +316,6 @@ impl CudaQqe {
         }
         let first_valid = Self::first_valid_f32(prices_f32)?;
         let combos = Self::expand_grid(sweep);
-        
         if combos.is_empty() {
             return Err(CudaQqeError::InvalidInput("empty parameter sweep".into()));
         }
@@ -270,41 +342,53 @@ impl CudaQqe {
             ));
         }
 
-        // VRAM: prices + (rsi+ema+fast arrays) + outputs (2 * rows * len)
+        // VRAM: prices + params + outputs (2 * rows * len)
         let rows = combos.len();
-        let req_bytes = len * 4 + rows * (4 + 4 + 4) + (2 * rows * len) * 4;
-        if !Self::device_mem_ok(req_bytes) {
-            return Err(CudaQqeError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
-        }
-        let req_bytes = len * 4 + rows * (4 + 4 + 4) + (2 * rows * len) * 4;
-        if !Self::device_mem_ok(req_bytes) {
-            return Err(CudaQqeError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
-        }
+        let bytes_prices = len
+            .checked_mul(4)
+            .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in prices bytes".into()))?;
+        let bytes_params = rows
+            .checked_mul(12)
+            .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in params bytes".into()))?;
+        let elems_out = rows
+            .checked_mul(len)
+            .and_then(|x| x.checked_mul(2))
+            .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in output elements".into()))?;
+        let bytes_out = elems_out
+            .checked_mul(4)
+            .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in output bytes".into()))?;
+        let required = bytes_prices
+            .checked_add(bytes_params)
+            .and_then(|x| x.checked_add(bytes_out))
+            .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in VRAM estimate".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        let d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(prices_f32, &self.stream) }
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
+        let d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(prices_f32, &self.stream) }?;
         let rsi_i32: Vec<i32> = combos.iter().map(|c| c.rsi_period.unwrap() as i32).collect();
         let ema_i32: Vec<i32> = combos.iter().map(|c| c.smoothing_factor.unwrap() as i32).collect();
         let fast_f32: Vec<f32> = combos.iter().map(|c| c.fast_factor.unwrap() as f32).collect();
         // async param uploads to avoid implicit syncs
-        let d_rsi: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&rsi_i32, &self.stream) }
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
-        let d_ema: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&ema_i32, &self.stream) }
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
-        let d_fast: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&fast_f32, &self.stream) }
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(2 * rows * len, &self.stream) }
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
+        let d_rsi: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::from_slice_async(&rsi_i32, &self.stream) }?;
+        let d_ema: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::from_slice_async(&ema_i32, &self.stream) }?;
+        let d_fast: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(&fast_f32, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems_out, &self.stream) }?;
 
         // Kernel launch: grid = (grid_x=1, grid_y=chunk_rows), block.x warp-aligned
-        let mut block_x = match self.policy_batch { BatchKernelPolicy::Plain { block_x } => block_x, BatchKernelPolicy::Auto => 256 };
+        let mut block_x = match self.policy_batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            BatchKernelPolicy::Auto => 256,
+        };
         block_x = Self::warp_align(block_x);
         // Cache function lookup
-        let func = self.module.get_function("qqe_batch_f32").map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
+        let func = self
+            .module
+            .get_function("qqe_batch_f32")
+            .map_err(|_| CudaQqeError::MissingKernelSymbol { name: "qqe_batch_f32" })?;
         const MAX_Y: usize = 65_535;
         let mut base = 0usize;
         while base < rows {
@@ -329,9 +413,12 @@ impl CudaQqe {
                     &mut first_i as *mut _ as *mut c_void,
                     &mut f_out as *mut _ as *mut c_void,
                 ];
-                let grid: GridSize = (1u32, take as u32, 1u32).into();
-                let block: BlockSize = (block_x, 1, 1).into();
-                self.stream.launch(&func, grid, block, 0, args).map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
+                let grid_dims = (1u32, take as u32, 1u32);
+                let block_dims = (block_x, 1u32, 1u32);
+                Self::validate_launch(self, grid_dims, block_dims)?;
+                let grid: GridSize = grid_dims.into();
+                let block: BlockSize = block_dims.into();
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
             unsafe {
                 (*(self as *const _ as *mut CudaQqe)).last_batch =
@@ -342,7 +429,7 @@ impl CudaQqe {
         }
         self.stream
             .synchronize()
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
+            ?;
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
@@ -400,31 +487,64 @@ impl CudaQqe {
             first_valids[s] = fv as i32;
         }
 
-        let req = cols * rows * 4 + cols * 4 + 2 * cols * rows * 4 + 64 * 1024 * 1024usize;
-        if !Self::device_mem_ok(req) {
-            return Err(CudaQqeError::InvalidInput("insufficient VRAM".into()));
-        }
+        let bytes_series = cols
+            .checked_mul(rows)
+            .and_then(|x| x.checked_mul(4))
+            .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in series bytes".into()))?;
+        let bytes_first = cols
+            .checked_mul(4)
+            .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in first-valid bytes".into()))?;
+        let elems_out = rows
+            .checked_mul(2)
+            .and_then(|x| x.checked_mul(cols))
+            .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in output elements".into()))?;
+        let bytes_out = elems_out
+            .checked_mul(4)
+            .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in output bytes".into()))?;
+        let required = bytes_series
+            .checked_add(bytes_first)
+            .and_then(|x| x.checked_add(bytes_out))
+            .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in VRAM estimate".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
         let d_prices: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }
-                .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
-        let d_first: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows * (2 * cols), &self.stream) }
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
+                ?;
+        let d_first: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems_out, &self.stream) }?;
 
         // Heuristic + warp alignment for block size: kernel uses block.x to prefill warmup
         let warm_max = (0..cols)
-            .map(|s| (first_valids[s] as usize).saturating_add(rsi_p + ema_p).saturating_sub(2))
-            .max().unwrap_or(0);
+            .map(|s| {
+                (first_valids[s] as usize)
+                    .saturating_add(rsi_p + ema_p)
+                    .saturating_sub(2)
+            })
+            .max()
+            .unwrap_or(0);
         let mut block_x = match self.policy_many {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
-            ManySeriesKernelPolicy::Auto => { if warm_max < 128 { 128 } else if warm_max < 512 { 256 } else { 512 } }
+            ManySeriesKernelPolicy::Auto => {
+                if warm_max < 128 {
+                    128
+                } else if warm_max < 512 {
+                    256
+                } else {
+                    512
+                }
+            }
         };
         block_x = Self::warp_align(block_x);
         // Cache function lookup
-        let func = self.module.get_function("qqe_many_series_one_param_time_major_f32").map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
+        let func = self
+            .module
+            .get_function("qqe_many_series_one_param_time_major_f32")
+            .map_err(|_| {
+                CudaQqeError::MissingKernelSymbol {
+                    name: "qqe_many_series_one_param_time_major_f32",
+                }
+            })?;
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
             let mut rsi_i = rsi_p as i32;
@@ -445,9 +565,12 @@ impl CudaQqe {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
             // Critical: grid.x must be 1; one block per series along Y
-            let grid: GridSize = (1u32, cols as u32, 1u32).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            self.stream.launch(&func, grid, block, 0, args).map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
+            let grid_dims = (1u32, cols as u32, 1u32);
+            let block_dims = (block_x, 1u32, 1u32);
+            Self::validate_launch(self, grid_dims, block_dims)?;
+            let grid: GridSize = grid_dims.into();
+            let block: BlockSize = block_dims.into();
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaQqe)).last_many =
@@ -460,7 +583,7 @@ impl CudaQqe {
         self.maybe_log_many_debug();
         self.stream
             .synchronize()
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
+            ?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,

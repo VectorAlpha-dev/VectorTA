@@ -17,8 +17,8 @@
 //! - **SIMD Kernels**: AVX2/AVX512 enabled (AXPY-style) — disabled by default for Auto since scalar is as fast or faster on typical CPUs (memory-bound). Use explicit Avx2/Avx512 kernels only for experimentation.
 //! - **Row-Specific Batch**: Not implemented; MA cost dominates and AXPY write per row is cheap. Potential future work: group by (ma_type, period) and reuse `range_ma` across rows.
 //! - **Streaming**: O(1) for SMA/EMA; Other MA types fall back to O(n) with correct chronological order
-//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
-use crate::indicators::moving_averages::ma::{ma, MaData};
+//! - **Memory/Interop Decision Log**: Scalar path is the reference; CUDA wrapper returns VRAM handles with Python CAI v3 + DLPack v1.x via `DeviceArrayF32Py`; numerical outputs match scalar and existing tests.
+use crate::indicators::moving_averages::ma::{ma, MaData, MaError};
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -35,7 +35,7 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -232,14 +232,22 @@ impl KaufmanstopBuilder {
 
 #[derive(Debug, Error)]
 pub enum KaufmanstopError {
-    #[error("kaufmanstop: Empty data provided.")]
-    EmptyData,
+    #[error("kaufmanstop: Empty data provided (input slice is empty).")]
+    EmptyInputData,
+    #[error("kaufmanstop: All values are NaN.")]
+    AllValuesNaN,
     #[error("kaufmanstop: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("kaufmanstop: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("kaufmanstop: All values are NaN.")]
-    AllValuesNaN,
+    #[error("kaufmanstop: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("kaufmanstop: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("kaufmanstop: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("kaufmanstop: invalid MA type: {ma_type}")]
+    InvalidMaType { ma_type: String },
 }
 
 #[cfg(feature = "wasm")]
@@ -284,22 +292,22 @@ fn kaufmanstop_prepare<'a>(
         KaufmanstopData::Candles { candles } => {
             let high = candles
                 .select_candle_field("high")
-                .map_err(|_| KaufmanstopError::EmptyData)?;
+                .map_err(|_| KaufmanstopError::EmptyInputData)?;
             let low = candles
                 .select_candle_field("low")
-                .map_err(|_| KaufmanstopError::EmptyData)?;
+                .map_err(|_| KaufmanstopError::EmptyInputData)?;
             (high, low)
         }
         KaufmanstopData::Slices { high, low } => {
             if high.is_empty() || low.is_empty() {
-                return Err(KaufmanstopError::EmptyData);
+                return Err(KaufmanstopError::EmptyInputData);
             }
             (*high, *low)
         }
     };
 
     if high.is_empty() || low.is_empty() {
-        return Err(KaufmanstopError::EmptyData);
+        return Err(KaufmanstopError::EmptyInputData);
     }
 
     let period = input.get_period();
@@ -340,9 +348,9 @@ fn kaufmanstop_compute_into(
         kaufmanstop_prepare(input)?;
 
     if out.len() != high.len() {
-        return Err(KaufmanstopError::InvalidPeriod {
-            period: out.len(),
-            data_len: high.len(),
+        return Err(KaufmanstopError::OutputLengthMismatch {
+            expected: high.len(),
+            got: out.len(),
         });
     }
 
@@ -386,7 +394,15 @@ fn kaufmanstop_compute_into(
     }
 
     let ma_input = MaData::Slice(&hl_diff[first_valid_idx..]);
-    let hl_diff_ma = ma(ma_type, ma_input, period).map_err(|_| KaufmanstopError::AllValuesNaN)?;
+    let hl_diff_ma = ma(ma_type, ma_input, period).map_err(|e| {
+        match e.downcast::<MaError>() {
+            Ok(ma_err) => match *ma_err {
+                MaError::UnknownType { ma_type } => KaufmanstopError::InvalidMaType { ma_type },
+                _ => KaufmanstopError::AllValuesNaN,
+            },
+            Err(_) => KaufmanstopError::AllValuesNaN,
+        }
+    })?;
 
     // SIMD underperforms vs scalar (memory-bound AXPY); default to Scalar for Auto.
     let chosen = match kernel {
@@ -447,9 +463,9 @@ pub fn kaufmanstop_into(
     let (high, _low, period, first_valid_idx, _mult, _direction, _ma_type) =
         kaufmanstop_prepare(input)?;
     if out.len() != high.len() {
-        return Err(KaufmanstopError::InvalidPeriod {
-            period: out.len(),
-            data_len: high.len(),
+        return Err(KaufmanstopError::OutputLengthMismatch {
+            expected: high.len(),
+            got: out.len(),
         });
     }
 
@@ -959,10 +975,10 @@ impl KaufmanstopBatchBuilder {
     pub fn apply_candles(self, c: &Candles) -> Result<KaufmanstopBatchOutput, KaufmanstopError> {
         let high = c
             .select_candle_field("high")
-            .map_err(|_| KaufmanstopError::EmptyData)?;
+            .map_err(|_| KaufmanstopError::EmptyInputData)?;
         let low = c
             .select_candle_field("low")
-            .map_err(|_| KaufmanstopError::EmptyData)?;
+            .map_err(|_| KaufmanstopError::EmptyInputData)?;
         self.apply_slices(high, low)
     }
     pub fn with_default_candles(c: &Candles) -> Result<KaufmanstopBatchOutput, KaufmanstopError> {
@@ -999,39 +1015,103 @@ impl KaufmanstopBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &KaufmanstopBatchRange) -> Vec<KaufmanstopParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &KaufmanstopBatchRange) -> Result<Vec<KaufmanstopParams>, KaufmanstopError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, KaufmanstopError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
-    }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.max(1);
+            while x <= end {
+                v.push(x);
+                match x.checked_add(st) {
+                    Some(nx) => x = nx,
+                    None => break,
+                }
+            }
+            if v.is_empty() {
+                return Err(KaufmanstopError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
         }
+        // reversed bounds: walk downward
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
         }
-        v
+        if v.is_empty() {
+            return Err(KaufmanstopError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
+    }
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, KaufmanstopError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        let st = step.abs();
+        let mut v = Vec::new();
+        if start < end {
+            let mut x = start;
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+        } else {
+            let mut x = start;
+            while x + 1e-12 >= end {
+                v.push(x);
+                x -= st;
+            }
+        }
+        if v.is_empty() {
+            return Err(KaufmanstopError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
     fn axis_string((start, end, _step): (String, String, f64)) -> Vec<String> {
-        // For string parameters, we only support single values or start/end pairs
-        // The step parameter is ignored for strings
+        // For string parameters, we only support single values or start/end pairs.
+        // The step parameter is ignored for strings.
         if start == end {
             return vec![start.clone()];
         }
         vec![start.clone(), end.clone()]
     }
-    let periods = axis_usize(r.period);
-    let mults = axis_f64(r.mult);
+
+    let periods = axis_usize(r.period)?;
+    let mults = axis_f64(r.mult)?;
     let directions = axis_string(r.direction.clone());
     let ma_types = axis_string(r.ma_type.clone());
-    let mut out =
-        Vec::with_capacity(periods.len() * mults.len() * directions.len() * ma_types.len());
+
+    let cap = periods
+        .len()
+        .checked_mul(mults.len())
+        .and_then(|x| x.checked_mul(directions.len()))
+        .and_then(|x| x.checked_mul(ma_types.len()))
+        .ok_or_else(|| KaufmanstopError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &m in &mults {
             for d in &directions {
@@ -1046,7 +1126,7 @@ fn expand_grid(r: &KaufmanstopBatchRange) -> Vec<KaufmanstopParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1060,12 +1140,7 @@ pub fn kaufmanstop_batch_with_kernel(
         // SIMD underperforms for this indicator; prefer ScalarBatch for Auto.
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(KaufmanstopError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(KaufmanstopError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1104,15 +1179,25 @@ fn kaufmanstop_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<KaufmanstopBatchOutput, KaufmanstopError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let cols = high.len();
     let rows = combos.len();
     if rows == 0 {
-        return Err(KaufmanstopError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(KaufmanstopError::InvalidRange {
+            start: sweep.period.0.to_string(),
+            end: sweep.period.1.to_string(),
+            step: sweep.period.2.to_string(),
         });
     }
+
+    // Guard rows * cols overflow before allocation
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| KaufmanstopError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
 
     // Allocate rows×cols with helpers and initialize warm prefixes
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1160,17 +1245,18 @@ pub fn kaufmanstop_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<KaufmanstopParams>, KaufmanstopError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(KaufmanstopError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(KaufmanstopError::InvalidRange {
+            start: sweep.period.0.to_string(),
+            end: sweep.period.1.to_string(),
+            step: sweep.period.2.to_string(),
         });
     }
 
     let len = high.len();
     if len == 0 || len != low.len() {
-        return Err(KaufmanstopError::EmptyData);
+        return Err(KaufmanstopError::EmptyInputData);
     }
 
     let first = high
@@ -1180,6 +1266,15 @@ pub fn kaufmanstop_batch_inner_into(
         .ok_or(KaufmanstopError::AllValuesNaN)?;
 
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    // Guard n_combos * max_period against overflow (advisory; detects absurd inputs)
+    let _ = combos
+        .len()
+        .checked_mul(max_p)
+        .ok_or_else(|| KaufmanstopError::InvalidRange {
+            start: sweep.period.0.to_string(),
+            end: sweep.period.1.to_string(),
+            step: sweep.period.2.to_string(),
+        })?;
     if len - first < max_p {
         return Err(KaufmanstopError::NotEnoughValidData {
             needed: max_p,
@@ -1199,7 +1294,19 @@ pub fn kaufmanstop_batch_inner_into(
 
     let rows = combos.len();
     let cols = len;
-    assert_eq!(out.len(), rows * cols, "out size must be rows*cols");
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| KaufmanstopError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
+    if out.len() != expected {
+        return Err(KaufmanstopError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Reinterpret as MaybeUninit for parity with ALMA's writer
     let out_mu = unsafe {
@@ -1347,7 +1454,9 @@ pub unsafe fn kaufmanstop_row_avx512_long(
 }
 
 #[inline(always)]
-pub fn expand_grid_wrapper(r: &KaufmanstopBatchRange) -> Vec<KaufmanstopParams> {
+pub fn expand_grid_wrapper(
+    r: &KaufmanstopBatchRange,
+) -> Result<Vec<KaufmanstopParams>, KaufmanstopError> {
     expand_grid(r)
 }
 
@@ -1452,12 +1561,16 @@ pub fn kaufmanstop_batch_py<'py>(
     };
 
     // Predict rows/cols before allocating
-    let combos_preview = expand_grid(&sweep);
+    let combos_preview = expand_grid(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos_preview.len();
     let cols = h.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow in kaufmanstop_batch_py"))?;
 
     // Preallocate NumPy 1D buffer then fill
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -1555,7 +1668,7 @@ pub fn kaufmanstop_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>(dev)
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1596,7 +1709,7 @@ pub fn kaufmanstop_cuda_many_series_one_param_dev_py(
         cuda.kaufmanstop_many_series_one_param_time_major_dev(h, l, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 // ================== Core Helper Functions ==================
@@ -1612,36 +1725,36 @@ pub fn kaufmanstop_into_slice(
         KaufmanstopData::Candles { candles } => {
             let high = candles
                 .select_candle_field("high")
-                .map_err(|_| KaufmanstopError::EmptyData)?;
+                .map_err(|_| KaufmanstopError::EmptyInputData)?;
             let low = candles
                 .select_candle_field("low")
-                .map_err(|_| KaufmanstopError::EmptyData)?;
+                .map_err(|_| KaufmanstopError::EmptyInputData)?;
             (high, low)
         }
         KaufmanstopData::Slices { high, low } => (*high, *low),
     };
 
-    // Validate inputs
-    if high.is_empty() || low.is_empty() {
-        return Err(KaufmanstopError::EmptyData);
-    }
-    if high.len() != low.len() {
-        return Err(KaufmanstopError::InvalidPeriod {
-            period: 0,
-            data_len: high.len(),
-        });
-    }
-    if dst.len() != high.len() {
-        return Err(KaufmanstopError::InvalidPeriod {
-            period: 0,
-            data_len: high.len(),
-        });
-    }
-
     let period = input.get_period();
     let mult = input.get_mult();
     let direction = input.get_direction();
     let ma_type = input.get_ma_type();
+
+    // Validate inputs
+    if high.is_empty() || low.is_empty() {
+        return Err(KaufmanstopError::EmptyInputData);
+    }
+    if high.len() != low.len() {
+        return Err(KaufmanstopError::InvalidPeriod {
+            period,
+            data_len: high.len().min(low.len()),
+        });
+    }
+    if dst.len() != high.len() {
+        return Err(KaufmanstopError::OutputLengthMismatch {
+            expected: high.len(),
+            got: dst.len(),
+        });
+    }
 
     if period == 0 || period > high.len() || period > low.len() {
         return Err(KaufmanstopError::InvalidPeriod {
@@ -1675,7 +1788,15 @@ pub fn kaufmanstop_into_slice(
 
     // Calculate moving average of the differences
     let ma_input = MaData::Slice(&hl_diff[first_valid_idx..]);
-    let hl_diff_ma = ma(ma_type, ma_input, period).map_err(|_| KaufmanstopError::AllValuesNaN)?;
+    let hl_diff_ma = ma(ma_type, ma_input, period).map_err(|e| {
+        match e.downcast::<MaError>() {
+            Ok(ma_err) => match *ma_err {
+                MaError::UnknownType { ma_type } => KaufmanstopError::InvalidMaType { ma_type },
+                _ => KaufmanstopError::AllValuesNaN,
+            },
+            Err(_) => KaufmanstopError::AllValuesNaN,
+        }
+    })?;
 
     // SIMD underperforms vs scalar (memory-bound AXPY); default to Scalar for Auto.
     let chosen = match kern {
@@ -2022,11 +2143,15 @@ pub fn kaufmanstop_batch_into(
             ma_type: (ma_type.to_string(), ma_type.to_string(), 0.0),
         };
 
-        let combos_preview = expand_grid(&sweep);
+        let combos_preview =
+            expand_grid(&sweep).map_err(|e| JsError::new(&e.to_string()))?;
         let rows = combos_preview.len();
         let cols = len;
+        let expected = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsError::new("rows*cols overflow in kaufmanstop_batch_into"))?;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let out = std::slice::from_raw_parts_mut(out_ptr, expected);
 
         let _ =
             kaufmanstop_batch_inner_into(high, low, &sweep, detect_best_batch_kernel(), false, out)

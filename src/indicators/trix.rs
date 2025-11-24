@@ -15,6 +15,9 @@
 //! - Scalar: Optimized safe path using loop-jammed EMA1→EMA2→EMA3 with `mul_add`; no O(period) rings.
 //! - Batch: Row-specific optimization precomputes `ln(data)` once and shares across rows; parallel rows enabled.
 //! - Allocation: Uses `alloc_with_nan_prefix` / `make_uninit_matrix` patterns; warmup NaN prefix preserved.
+//! - Decision log: SIMD stubs short-circuit to scalar; CUDA TRIX wrapper present and returns VRAM
+//!   handles; Python interop reuses ALMA DeviceArrayF32Py with CAI v3 + DLPack v1.x; numerical
+//!   outputs and warmup behavior unchanged.
 //!
 //! Decision: Streaming kernel uses O(1) EMA state (no rings) and matches scalar outputs and warmup.
 
@@ -36,7 +39,7 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaTrix;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -179,14 +182,22 @@ impl TrixBuilder {
 
 #[derive(Debug, Error)]
 pub enum TrixError {
-    #[error("trix: Empty data provided.")]
-    EmptyData,
+    #[error("trix: input data slice is empty")]
+    EmptyInputData,
     #[error("trix: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("trix: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("trix: All values are NaN.")]
     AllValuesNaN,
+    #[error("trix: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("trix: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("trix: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("trix: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -195,27 +206,50 @@ pub fn trix(input: &TrixInput) -> Result<TrixOutput, TrixError> {
 }
 
 #[inline(always)]
+fn trix_needed_len(period: usize) -> Result<usize, TrixError> {
+    let base = period
+        .checked_sub(1)
+        .and_then(|v| v.checked_mul(3))
+        .and_then(|v| v.checked_add(2))
+        .ok_or_else(|| TrixError::InvalidInput("period overflow when computing TRIX warmup length".into()))?;
+    Ok(base)
+}
+
+#[inline(always)]
+fn trix_warmup_end(first: usize, period: usize) -> Result<usize, TrixError> {
+    let delta = period
+        .checked_sub(1)
+        .and_then(|v| v.checked_mul(3))
+        .and_then(|v| v.checked_add(1))
+        .ok_or_else(|| TrixError::InvalidInput("period overflow when computing TRIX warmup index".into()))?;
+    first
+        .checked_add(delta)
+        .ok_or_else(|| TrixError::InvalidInput("index overflow when computing TRIX warmup index".into()))
+}
+
+#[inline(always)]
 fn trix_prepare<'a>(
     input: &'a TrixInput,
     k: Kernel,
 ) -> Result<(&'a [f64], usize, usize, Kernel, f64, usize), TrixError> {
     let data: &[f64] = input.as_ref();
-    if data.is_empty() {
-        return Err(TrixError::EmptyData);
+    let len = data.len();
+    if len == 0 {
+        return Err(TrixError::EmptyInputData);
     }
     let period = input.get_period();
-    if period == 0 || period > data.len() {
+    if period == 0 || period > len {
         return Err(TrixError::InvalidPeriod {
             period,
-            data_len: data.len(),
+            data_len: len,
         });
     }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(TrixError::AllValuesNaN)?;
-    let needed = 3 * (period - 1) + 2; // Need one bar after seeding EMA3 to emit at least one non-NaN
-    let valid_len = data.len() - first;
+    let needed = trix_needed_len(period)?; // Need one bar after seeding EMA3 to emit at least one non-NaN
+    let valid_len = len.saturating_sub(first);
     if valid_len < needed {
         return Err(TrixError::NotEnoughValidData {
             needed,
@@ -227,7 +261,7 @@ fn trix_prepare<'a>(
         other => other,
     };
     let alpha = 2.0 / (period as f64 + 1.0);
-    let warmup_end = first + 3 * (period - 1) + 1; // index after last warmup NaN
+    let warmup_end = trix_warmup_end(first, period)?; // index after last warmup NaN
     Ok((data, period, first, chosen, alpha, warmup_end))
 }
 
@@ -430,9 +464,9 @@ pub fn trix_into(input: &TrixInput, out: &mut [f64]) -> Result<(), TrixError> {
     let (data, period, first, chosen, alpha, warmup_end) = trix_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(TrixError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
+        return Err(TrixError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
         });
     }
 
@@ -680,10 +714,7 @@ pub fn trix_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(TrixError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(TrixError::InvalidKernelForBatch(k));
         }
     };
     let simd = match kernel {
@@ -717,19 +748,53 @@ impl TrixBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &TrixBatchRange) -> Vec<TrixParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &TrixBatchRange) -> Result<Vec<TrixParams>, TrixError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TrixError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut vals = Vec::new();
+        if start < end {
+            let mut v = start;
+            loop {
+                vals.push(v);
+                if v >= end {
+                    break;
+                }
+                let next = match v.checked_add(step) {
+                    Some(n) => n,
+                    None => break,
+                };
+                if next == v {
+                    break;
+                }
+                v = next;
+            }
+        } else {
+            let mut v = start;
+            loop {
+                vals.push(v);
+                if v <= end {
+                    break;
+                }
+                let next = v.saturating_sub(step);
+                if next == v {
+                    break;
+                }
+                v = next;
+            }
+        }
+        if vals.is_empty() {
+            return Err(TrixError::InvalidRange { start, end, step });
+        }
+        Ok(vals)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(TrixParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -757,19 +822,13 @@ fn trix_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<TrixBatchOutput, TrixError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(TrixError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(TrixError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let needed = 3 * (max_p - 1) + 2; // Need one bar after seeding EMA3 to emit at least one non-NaN
+    let needed = trix_needed_len(max_p)?; // Need one bar after seeding EMA3 to emit at least one non-NaN
     if data.len() - first < needed {
         return Err(TrixError::NotEnoughValidData {
             needed,
@@ -778,6 +837,9 @@ fn trix_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| TrixError::InvalidInput("rows*cols overflow".into()))?;
 
     // Use make_uninit_matrix and init_matrix_prefixes like ALMA
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -785,8 +847,8 @@ fn trix_batch_inner(
     // Calculate warmup periods for each parameter combination
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first + 3 * (c.period.unwrap() - 1) + 1)
-        .collect();
+        .map(|c| trix_warmup_end(first, c.period.unwrap()))
+        .collect::<Result<_, _>>()?;
 
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
@@ -1178,8 +1240,12 @@ pub fn trix_cuda_batch_dev_py<'py>(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaTrix::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.trix_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let arr = cuda
+            .trix_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(arr)
     })?;
 
     let dict = PyDict::new(py);
@@ -1196,7 +1262,8 @@ pub fn trix_cuda_batch_dev_py<'py>(
     }
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok((handle, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1221,11 +1288,16 @@ pub fn trix_cuda_many_series_one_param_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaTrix::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.trix_many_series_one_param_time_major_dev(flat_in, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let arr = cuda
+            .trix_many_series_one_param_time_major_dev(flat_in, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(arr)
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 #[cfg(feature = "python")]
@@ -1246,11 +1318,15 @@ pub fn trix_batch_py<'py>(
     let sweep = TrixBatchRange {
         period: period_range,
     };
-    let combos = expand_grid(&sweep);
-    let rows = combos.len();
+    let combos_probe = expand_grid(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let rows = combos_probe.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("trix_batch_py: rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Warmup prefill to guarantee NaNs in prefixes (mirrors init_matrix_prefixes behavior)
@@ -1258,7 +1334,7 @@ pub fn trix_batch_py<'py>(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or_else(|| PyValueError::new_err("AllValuesNaN"))?;
-    for (r, prm) in combos.iter().enumerate() {
+    for (r, prm) in combos_probe.iter().enumerate() {
         let warm = first + 3 * (prm.period.unwrap() - 1) + 1;
         let start = r * cols;
         let end = start + warm.min(cols);
@@ -1304,19 +1380,13 @@ fn trix_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<TrixParams>, TrixError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(TrixError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(TrixError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let needed = 3 * (max_p - 1) + 2; // Need one bar after seeding EMA3 to emit at least one non-NaN
+    let needed = trix_needed_len(max_p)?; // Need one bar after seeding EMA3 to emit at least one non-NaN
     if data.len() - first < needed {
         return Err(TrixError::NotEnoughValidData {
             needed,
@@ -1367,9 +1437,9 @@ fn trix_batch_inner_into(
 pub fn trix_into_slice(dst: &mut [f64], input: &TrixInput, kern: Kernel) -> Result<(), TrixError> {
     let (data, period, first, chosen, alpha, warmup_end) = trix_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(TrixError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(TrixError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
     // Fill warmup NaNs and compute
@@ -1523,9 +1593,12 @@ pub fn trix_batch_into(
         };
 
         // Calculate output size
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let num_combos = combos.len();
-        let total_size = num_combos * len;
+        let total_size = num_combos
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("trix_batch_into: rows*cols overflow"))?;
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 

@@ -277,7 +277,10 @@ impl CudaEdcf {
         first_valid: usize,
         d_dist: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEdcfError> {
-        let prefer_rolling = period >= 8 && len >= (period * 4);
+        // Prefer the rolling tiled variant only for sufficiently long series where
+        // it shows measurable wins; for short series plain kernel improves numerical
+        // agreement with the CPU scalar path and keeps launch overhead low.
+        let prefer_rolling = period >= 8 && len >= (period * 4) && len >= 8192;
         let force = Self::dist_impl_override();
 
         if force == Some("plain") || (!prefer_rolling && force.is_none()) {
@@ -450,6 +453,19 @@ impl CudaEdcf {
                 expected
             )));
         }
+        // VRAM headroom check (input + output + scratch)
+        let sz = std::mem::size_of::<f32>();
+        let in_bytes = series_len
+            .checked_mul(sz)
+            .ok_or_else(|| CudaEdcfError::InvalidInput("input byte size overflow".into()))?;
+        let out_bytes = expected
+            .checked_mul(sz)
+            .ok_or_else(|| CudaEdcfError::InvalidInput("output byte size overflow".into()))?;
+        let scratch_bytes = series_len
+            .checked_mul(sz)
+            .ok_or_else(|| CudaEdcfError::InvalidInput("scratch byte size overflow".into()))?;
+        let required = in_bytes.saturating_add(out_bytes).saturating_add(scratch_bytes);
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected)? };
         let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len)? };
@@ -489,6 +505,19 @@ impl CudaEdcf {
                 expected
             )));
         }
+        // VRAM headroom check (input + output + scratch)
+        let sz = std::mem::size_of::<f32>();
+        let in_bytes = series_len
+            .checked_mul(sz)
+            .ok_or_else(|| CudaEdcfError::InvalidInput("input byte size overflow".into()))?;
+        let out_bytes = expected
+            .checked_mul(sz)
+            .ok_or_else(|| CudaEdcfError::InvalidInput("output byte size overflow".into()))?;
+        let scratch_bytes = series_len
+            .checked_mul(sz)
+            .ok_or_else(|| CudaEdcfError::InvalidInput("scratch byte size overflow".into()))?;
+        let required = in_bytes.saturating_add(out_bytes).saturating_add(scratch_bytes);
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected)? };
         let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len)? };
@@ -561,6 +590,17 @@ impl CudaEdcf {
             }
         }
         let n_combos = combos.len();
+        // VRAM headroom check for output + scratch
+        let sz = std::mem::size_of::<f32>();
+        let out_bytes = n_combos
+            .checked_mul(series_len)
+            .and_then(|e| e.checked_mul(sz))
+            .ok_or_else(|| CudaEdcfError::InvalidInput("output byte size overflow".into()))?;
+        let scratch_bytes = series_len
+            .checked_mul(sz)
+            .ok_or_else(|| CudaEdcfError::InvalidInput("scratch byte size overflow".into()))?;
+        let required = out_bytes.saturating_add(scratch_bytes);
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len)? };
         let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len)? };
@@ -973,6 +1013,7 @@ impl CudaEdcf {
             let grid_y = ((cols as u32) + ty - 1) / ty;
             let grid: GridSize = (grid_x, grid_y, 1).into();
             let block: BlockSize = (128, ty, 1).into();
+            Self::validate_launch_dims(grid_x, grid_y, 1, 128, ty, 1)?;
             let stream = &self.stream;
             unsafe {
                 launch!(

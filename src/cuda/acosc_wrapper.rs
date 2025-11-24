@@ -288,7 +288,9 @@ impl CudaAcosc {
         if num_series == 0 || series_len == 0 {
             return Err(CudaAcoscError::InvalidInput("empty dimensions".into()));
         }
-        let elems = num_series * series_len;
+        let elems = num_series
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaAcoscError::InvalidInput("size overflow (rows*cols)".into()))?;
         let mut d_osc: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(CudaAcoscError::Cuda)?;
         let mut d_change: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }

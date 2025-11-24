@@ -28,6 +28,7 @@
 //! - Batch: current path computes each row via the scalar kernel; parallelization uses rayon when selected.
 //!   Row-specific SIMD was evaluated as low benefit without shared precompute; no RMQ/sparse-table added.
 //! - Memory: follows `alma.rs` patterns (zero-copy/uninitialized allocation; warmup prefixes preserved).
+//! - Decision log: SIMD stubs call scalar; CUDA wrapper returns FP32 VRAM handles; Python interop exposes CAI v3 + DLPack v1.x; numerical outputs unchanged.
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
@@ -188,12 +189,12 @@ impl AroonOscBuilder {
 
 #[derive(Debug, Error)]
 pub enum AroonOscError {
-    #[error("aroonosc: All values are NaN.")]
-    AllValuesNaN,
     #[error("aroonosc: Input data slice is empty.")]
     EmptyInputData,
-    #[error("aroonosc: Invalid length: length = {length}, data length = {data_len}")]
-    InvalidLength { length: usize, data_len: usize },
+    #[error("aroonosc: All values are NaN.")]
+    AllValuesNaN,
+    #[error("aroonosc: Invalid length: length = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
     #[error("aroonosc: Not enough data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("aroonosc: Mismatch in high/low slice length: high_len={high_len}, low_len={low_len}")]
@@ -221,8 +222,8 @@ fn aroon_osc_prepare<'a>(
     let high = input.get_high();
     let low = input.get_low();
     let len = low.len();
-    if length == 0 || length > len {
-        return Err(AroonOscError::InvalidLength { length, data_len: len });
+    if length == 0 {
+        return Err(AroonOscError::InvalidPeriod { period: length, data_len: len });
     }
 
     if high.is_empty() || low.is_empty() {
@@ -237,11 +238,20 @@ fn aroon_osc_prepare<'a>(
 
     let first = first_valid_hilo(high, low).ok_or(AroonOscError::AllValuesNaN)?;
     // Need at least (length+1) values after `first`
-    if len.saturating_sub(first) < length + 1 {
-        return Err(AroonOscError::NotEnoughValidData {
-            needed: length + 1,
-            valid: len.saturating_sub(first),
-        });
+    let window = length
+        .checked_add(1)
+        .ok_or(AroonOscError::InvalidPeriod {
+            period: length,
+            data_len: len,
+        })?;
+    let available = len
+        .checked_sub(first)
+        .ok_or(AroonOscError::InvalidPeriod {
+            period: length,
+            data_len: len,
+        })?;
+    if available < window {
+        return Err(AroonOscError::NotEnoughValidData { needed: window, valid: available });
     }
 
     let chosen = match kernel {
@@ -256,7 +266,13 @@ pub fn aroon_osc_with_kernel(
     kernel: Kernel,
 ) -> Result<AroonOscOutput, AroonOscError> {
     let (high, low, length, first, chosen) = aroon_osc_prepare(input, kernel)?;
-    let mut out = alloc_with_nan_prefix(high.len(), first + length);
+    let warm_end = first
+        .checked_add(length)
+        .ok_or(AroonOscError::InvalidPeriod {
+            period: length,
+            data_len: high.len(),
+        })?;
+    let mut out = alloc_with_nan_prefix(high.len(), warm_end);
 
     match chosen {
         Kernel::Scalar | Kernel::ScalarBatch => {
@@ -288,7 +304,13 @@ pub fn aroon_osc_into(input: &AroonOscInput, out: &mut [f64]) -> Result<(), Aroo
     }
 
     // Prefill warmup prefix to match Vec-returning API's quiet-NaN pattern
-    let warm = (first + length).min(out.len());
+    let warm_end = first
+        .checked_add(length)
+        .ok_or(AroonOscError::InvalidPeriod {
+            period: length,
+            data_len: high.len(),
+        })?;
+    let warm = warm_end.min(out.len());
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..warm] {
         *v = qnan;
@@ -533,7 +555,13 @@ pub fn aroon_osc_into_slice(
         _ => unreachable!(),
     }
 
-    let warm = first + length;
+    let warm_end = first
+        .checked_add(length)
+        .ok_or(AroonOscError::InvalidPeriod {
+            period: length,
+            data_len: high.len(),
+        })?;
+    let warm = warm_end.min(dst.len());
     for v in &mut dst[..warm] {
         *v = f64::NAN;
     }
@@ -660,7 +688,9 @@ fn expand_grid(r: &AroonOscBatchRange) -> Result<Vec<AroonOscParams>, AroonOscEr
         }
         if start < end {
             let v: Vec<usize> = (start..=end).step_by(step).collect();
-            if v.is_empty() { return Err(AroonOscError::InvalidRange { start, end, step }); }
+            if v.is_empty() {
+                return Err(AroonOscError::InvalidRange { start, end, step });
+            }
             Ok(v)
         } else {
             // reversed bounds supported
@@ -727,25 +757,52 @@ fn aroon_osc_batch_inner(
 
     let len = high.len();
     let first = first_valid_hilo(high, low).ok_or(AroonOscError::AllValuesNaN)?;
-
     // largest window = length + 1; first must allow that
     let max_len = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
-    let needed = max_len + 1;
-    if len.saturating_sub(first) < needed {
-        return Err(AroonOscError::NotEnoughValidData {
-            needed,
-            valid: len.saturating_sub(first),
-        });
+    let needed = max_len
+        .checked_add(1)
+        .ok_or(AroonOscError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
+        })?;
+    let available = len
+        .checked_sub(first)
+        .ok_or(AroonOscError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
+        })?;
+    if available < needed {
+        return Err(AroonOscError::NotEnoughValidData { needed, valid: available });
     }
 
     let rows = combos.len();
     let cols = len;
 
+    // Guard rows * cols before allocation
+    rows.checked_mul(cols).ok_or(AroonOscError::InvalidRange {
+        start: sweep.length.0,
+        end: sweep.length.1,
+        step: sweep.length.2,
+    })?;
+
     // Step 1: Allocate uninitialized matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     // Step 2: per-row warm prefix = first + length
-    let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.length.unwrap()).collect();
+    let warmup_periods: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            first
+                .checked_add(c.length.unwrap())
+                .ok_or(AroonOscError::InvalidRange {
+                    start: sweep.length.0,
+                    end: sweep.length.1,
+                    step: sweep.length.2,
+                })
+        })
+        .collect::<Result<_, _>>()?;
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
     // Step 4: Convert to mutable slice for computation
@@ -824,17 +881,38 @@ fn aroon_osc_batch_inner_into(
     let len = high.len();
     let first = first_valid_hilo(high, low).ok_or(AroonOscError::AllValuesNaN)?;
     let max_len = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
-    let needed = max_len + 1;
-    if len.saturating_sub(first) < needed {
-        return Err(AroonOscError::NotEnoughValidData {
-            needed,
-            valid: len.saturating_sub(first),
-        });
+    let needed = max_len
+        .checked_add(1)
+        .ok_or(AroonOscError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
+        })?;
+    let available = len
+        .checked_sub(first)
+        .ok_or(AroonOscError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
+        })?;
+    if available < needed {
+        return Err(AroonOscError::NotEnoughValidData { needed, valid: available });
     }
 
     let rows = combos.len();
     let cols = len;
-    let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.length.unwrap()).collect();
+    let warmup_periods: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            first
+                .checked_add(c.length.unwrap())
+                .ok_or(AroonOscError::InvalidRange {
+                    start: sweep.length.0,
+                    end: sweep.length.1,
+                    step: sweep.length.2,
+                })
+        })
+        .collect::<Result<_, _>>()?;
 
     // Initialize warm prefixes to NaN using the standard helper
     let mut out_uninit = unsafe {
@@ -1012,9 +1090,11 @@ impl AroonOscStream {
     pub fn try_new(params: AroonOscParams) -> Result<Self, AroonOscError> {
         let length = params.length.unwrap_or(14);
         if length == 0 {
-            return Err(AroonOscError::InvalidLength { length, data_len: 0 });
+            return Err(AroonOscError::InvalidPeriod { period: length, data_len: 0 });
         }
-        let cap = length + 1; // inclusive window [t-length, t]
+        let cap = length
+            .checked_add(1)
+            .ok_or(AroonOscError::InvalidPeriod { period: length, data_len: 0 })?; // inclusive window [t-length, t]
         Ok(Self {
             length,
             scale: 100.0 / length as f64,
@@ -1808,7 +1888,7 @@ mod tests {
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaAroonOsc;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::PrimaryCtxGuard;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -1985,6 +2065,7 @@ use crate::cuda::oscillators::DeviceArrayF32Aroonosc;
 pub struct AroonOscDeviceArrayF32Py {
     inner: Option<DeviceArrayF32Aroonosc>,
     device_id: u32,
+    pc_guard: PrimaryCtxGuard,
 }
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pymethods]
@@ -2003,7 +2084,9 @@ impl AroonOscDeviceArrayF32Py {
                 std::mem::size_of::<f32>(),
             ),
         )?;
-        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        let ptr_val: usize =
+            if inner.rows == 0 || inner.cols == 0 { 0 } else { inner.device_ptr() as usize };
+        d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2012,7 +2095,15 @@ impl AroonOscDeviceArrayF32Py {
         (2, self.device_id as i32)
     }
 
-    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<i64>,
+        max_version: Option<(i32, i32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
         use std::os::raw::c_char;
         use std::ptr::null_mut;
 
@@ -2037,72 +2128,188 @@ impl AroonOscDeviceArrayF32Py {
             deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
         }
 
-        struct Holder {
+        #[repr(C)]
+        #[derive(Copy, Clone)]
+        struct DLPackVersion { major: u32, minor: u32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+
+        struct HolderV0 {
             managed: DLManagedTensor,
             shape: [i64; 2],
             strides: [i64; 2],
-            arr: DeviceArrayF32Aroonosc, // owns VRAM and Arc<Context>
+            arr: DeviceArrayF32Aroonosc,
+            pc: PrimaryCtxGuard,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32Aroonosc,
+            pc: PrimaryCtxGuard,
         }
 
-        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
-            if mt.is_null() { return; }
+        extern "C" fn deleter_v0(mt: *mut DLManagedTensor) {
+            if mt.is_null() {
+                return;
+            }
             unsafe {
-                let holder_ptr = (*mt).manager_ctx as *mut Holder;
-                if !holder_ptr.is_null() { drop(Box::from_raw(holder_ptr)); }
+                let holder_ptr = (*mt).manager_ctx as *mut HolderV0;
+                if !holder_ptr.is_null() {
+                    (*holder_ptr).pc.push_current();
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+        extern "C" fn deleter_v1(mt: *mut DLManagedTensorVersioned) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut HolderV1;
+                if !holder_ptr.is_null() {
+                    (*holder_ptr).pc.push_current();
+                    drop(Box::from_raw(holder_ptr));
+                }
             }
         }
 
-        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+        unsafe extern "C" fn capsule_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
             let name = b"dltensor\0";
             let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
             if !ptr.is_null() {
                 let mt = ptr as *mut DLManagedTensor;
-                if let Some(del) = (*mt).deleter { del(mt); }
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+        unsafe extern "C" fn capsule_destructor_versioned(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensorVersioned;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
                 pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
             }
         }
 
+        // Move VRAM handle + retain guard into the DLPack holder to guarantee lifetime
         let inner = self
             .inner
             .take()
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let moved_pc = std::mem::replace(
+            &mut self.pc_guard,
+            PrimaryCtxGuard::new(self.device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+        );
 
-        let mut holder = Box::new(Holder {
-            managed: DLManagedTensor {
-                dl_tensor: DLTensor {
-                    data: inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
-                    device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
-                    ndim: 2,
-                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                    shape: std::ptr::null_mut(),
-                    strides: std::ptr::null_mut(),
-                    byte_offset: 0,
+        let want_v1 = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    version: DLPackVersion { major: 1, minor: 0 },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_v1),
+                    flags: 0,
+                    dl_tensor: DLTensor {
+                        data: if inner.rows == 0 || inner.cols == 0 {
+                            std::ptr::null_mut()
+                        } else {
+                            inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+                        },
+                        device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                        ndim: 2,
+                        dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
                 },
-                manager_ctx: std::ptr::null_mut(),
-                deleter: Some(dl_managed_deleter),
-            },
-            shape: [inner.rows as i64, inner.cols as i64],
-            strides: [inner.cols as i64, 1],
-            arr: inner,
-        });
-        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
-        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
-        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
-        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
-        let _ = Box::into_raw(holder);
-        let name = b"dltensor\0";
-        let capsule = unsafe {
-            pyo3::ffi::PyCapsule_New(
-                mt_ptr as *mut std::ffi::c_void,
-                name.as_ptr() as *const c_char,
-                Some(capsule_destructor),
-            )
-        };
-        if capsule.is_null() {
-            unsafe { dl_managed_deleter(mt_ptr) };
-            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+                shape: [inner.rows as i64, inner.cols as i64],
+                strides: [inner.cols as i64, 1],
+                arr: inner,
+                pc: moved_pc,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            holder.managed.manager_ctx = &mut *holder as *mut HolderV1 as *mut std::ffi::c_void;
+            let _keep = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor_versioned),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { deleter_v1(mt_ptr) };
+                return Err(PyValueError::new_err("failed to create DLPack v1.x capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mut holder = Box::new(HolderV0 {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: if inner.rows == 0 || inner.cols == 0 {
+                            std::ptr::null_mut()
+                        } else {
+                            inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+                        },
+                        device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                        ndim: 2,
+                        dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_v0),
+                },
+                shape: [inner.rows as i64, inner.cols as i64],
+                strides: [inner.cols as i64, 1],
+                arr: inner,
+                pc: moved_pc,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            holder.managed.manager_ctx = &mut *holder as *mut HolderV0 as *mut std::ffi::c_void;
+            let _keep = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor_legacy),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { deleter_v0(mt_ptr) };
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl Drop for AroonOscDeviceArrayF32Py {
+    fn drop(&mut self) {
+        unsafe { self.pc_guard.push_current(); }
     }
 }
 
@@ -2139,7 +2346,9 @@ pub fn aroonosc_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(AroonOscDeviceArrayF32Py { inner: Some(inner), device_id: device_id as u32 })
+    let guard = PrimaryCtxGuard::new(device_id as u32)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(AroonOscDeviceArrayF32Py { inner: Some(inner), device_id: device_id as u32, pc_guard: guard })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2174,7 +2383,9 @@ pub fn aroonosc_cuda_many_series_one_param_dev_py(
         cuda.aroonosc_many_series_one_param_time_major_dev(h, l, cols, rows, length)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(AroonOscDeviceArrayF32Py { inner: Some(inner), device_id: device_id as u32 })
+    let guard = PrimaryCtxGuard::new(device_id as u32)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(AroonOscDeviceArrayF32Py { inner: Some(inner), device_id: device_id as u32, pc_guard: guard })
 }
 
 #[cfg(feature = "wasm")]
@@ -2386,7 +2597,9 @@ pub fn aroonosc_batch_into(
 
         let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
-        let expected_len = rows * len;
+        let expected_len = rows
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("aroonosc: length range too large"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, expected_len);
 
         // Check for aliasing - if any input overlaps with output, use temp buffer

@@ -14,9 +14,11 @@
 //! - **lips_offset** (default = 3): forward shift for lips
 //!
 //! ## Errors
-//! - **AllValuesNaN**: all data is NaN
-//! - **InvalidPeriod**: period is zero or too large
-//! - **InvalidOffset**: offset is too large
+//! - **EmptyInputData**: input slice is empty.
+//! - **AllValuesNaN**: all data is NaN.
+//! - **Invalid*Period / Invalid*Offset**: period or offset is out of range for the input length.
+//! - **NotEnoughValidData**: not enough non-NaN samples after the first valid point.
+//! - **OutputLengthMismatch**: caller-provided output buffers have unexpected length.
 //!
 //! ## Returns
 //! - **Ok(AlligatorOutput)** on success, with jaw/teeth/lips vectors (shifted)
@@ -2797,10 +2799,13 @@ pub fn alligator_batch_py<'py>(
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("alligator_batch_py: rows*cols overflow"))?;
 
-    let jaw_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let teeth_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let lips_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let jaw_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let teeth_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let lips_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let jaw_out = unsafe { jaw_arr.as_slice_mut()? };
     let teeth_out = unsafe { teeth_arr.as_slice_mut()? };
     let lips_out = unsafe { lips_arr.as_slice_mut()? };
@@ -2897,10 +2902,22 @@ pub fn alligator_into_slice(
     let len = data.len();
 
     // Validate destination slice lengths
-    if jaw_dst.len() != len || teeth_dst.len() != len || lips_dst.len() != len {
-        return Err(AlligatorError::InvalidJawPeriod {
-            period: jaw_dst.len(),
-            data_len: len,
+    if jaw_dst.len() != len {
+        return Err(AlligatorError::OutputLengthMismatch {
+            expected: len,
+            got: jaw_dst.len(),
+        });
+    }
+    if teeth_dst.len() != len {
+        return Err(AlligatorError::OutputLengthMismatch {
+            expected: len,
+            got: teeth_dst.len(),
+        });
+    }
+    if lips_dst.len() != len {
+        return Err(AlligatorError::OutputLengthMismatch {
+            expected: len,
+            got: lips_dst.len(),
         });
     }
 
@@ -2991,7 +3008,7 @@ pub fn alligator_into_slice(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaAlligator};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3067,9 +3084,12 @@ pub fn alligator_cuda_batch_dev_py<'py>(
         })?;
     use numpy::IntoPyArray;
     let d = PyDict::new(py);
-    d.set_item("jaw", Py::new(py, DeviceArrayF32Py { inner: jaw })?)?;
-    d.set_item("teeth", Py::new(py, DeviceArrayF32Py { inner: teeth })?)?;
-    d.set_item("lips", Py::new(py, DeviceArrayF32Py { inner: lips })?)?;
+    let jaw_py = make_device_array_py(guard_dev as usize, jaw)?;
+    let teeth_py = make_device_array_py(guard_dev as usize, teeth)?;
+    let lips_py = make_device_array_py(guard_dev as usize, lips)?;
+    d.set_item("jaw", Py::new(py, jaw_py)?)?;
+    d.set_item("teeth", Py::new(py, teeth_py)?)?;
+    d.set_item("lips", Py::new(py, lips_py)?)?;
     d.set_item("rows", rows)?;
     d.set_item("cols", cols)?;
     d.set_item("jaw_periods", jp.into_pyarray(py))?;
@@ -3133,9 +3153,12 @@ pub fn alligator_cuda_many_series_one_param_dev_py<'py>(
         Ok::<_, PyErr>((out.jaw, out.teeth, out.lips, cuda.device_id(), cuda.context_arc()))
     })?;
     let d = PyDict::new(py);
-    d.set_item("jaw", Py::new(py, DeviceArrayF32Py { inner: jaw })?)?;
-    d.set_item("teeth", Py::new(py, DeviceArrayF32Py { inner: teeth })?)?;
-    d.set_item("lips", Py::new(py, DeviceArrayF32Py { inner: lips })?)?;
+    let jaw_py = make_device_array_py(guard_dev as usize, jaw)?;
+    let teeth_py = make_device_array_py(guard_dev as usize, teeth)?;
+    let lips_py = make_device_array_py(guard_dev as usize, lips)?;
+    d.set_item("jaw", Py::new(py, jaw_py)?)?;
+    d.set_item("teeth", Py::new(py, teeth_py)?)?;
+    d.set_item("lips", Py::new(py, lips_py)?)?;
     d.set_item("rows", rows)?;
     d.set_item("cols", cols)?;
     d.set_item(
@@ -3164,10 +3187,22 @@ pub fn alligator_into_slices(
     if len == 0 {
         return Err(AlligatorError::EmptyInputData);
     }
-    if jaw_out.len() != len || teeth_out.len() != len || lips_out.len() != len {
-        return Err(AlligatorError::InvalidJawPeriod {
-            period: len,
-            data_len: len,
+    if jaw_out.len() != len {
+        return Err(AlligatorError::OutputLengthMismatch {
+            expected: len,
+            got: jaw_out.len(),
+        });
+    }
+    if teeth_out.len() != len {
+        return Err(AlligatorError::OutputLengthMismatch {
+            expected: len,
+            got: teeth_out.len(),
+        });
+    }
+    if lips_out.len() != len {
+        return Err(AlligatorError::OutputLengthMismatch {
+            expected: len,
+            got: lips_out.len(),
         });
     }
 
@@ -3303,7 +3338,11 @@ pub fn alligator_js(
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     // Return flattened array: [jaw, teeth, lips]
-    let mut result = Vec::with_capacity(data.len() * 3);
+    let total = data
+        .len()
+        .checked_mul(3)
+        .ok_or_else(|| JsValue::from_str("alligator_js: data length overflow"))?;
+    let mut result = Vec::with_capacity(total);
     result.extend_from_slice(&out.jaw);
     result.extend_from_slice(&out.teeth);
     result.extend_from_slice(&out.lips);
@@ -3538,9 +3577,12 @@ pub fn alligator_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsVal
         .map_err(|e| JsValue::from_str(&e.to_string()))?
         .len();
     let cols = data.len();
-    let mut jaw = vec![f64::NAN; rows * cols];
-    let mut teeth = vec![f64::NAN; rows * cols];
-    let mut lips = vec![f64::NAN; rows * cols];
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("alligator_batch_unified_js: rows*cols overflow"))?;
+    let mut jaw = vec![f64::NAN; total];
+    let mut teeth = vec![f64::NAN; total];
+    let mut lips = vec![f64::NAN; total];
 
     let combos = alligator_batch_inner_into(
         data,
@@ -3611,13 +3653,16 @@ pub fn alligator_batch_into(
             lips_period: (lp_s, lp_e, lp_step),
             lips_offset: (lo_s, lo_e, lo_step),
         };
-    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("alligator_batch_into: rows*cols overflow"))?;
 
-        let jaw = std::slice::from_raw_parts_mut(jaw_out_ptr, rows * cols);
-        let teeth = std::slice::from_raw_parts_mut(teeth_out_ptr, rows * cols);
-        let lips = std::slice::from_raw_parts_mut(lips_out_ptr, rows * cols);
+        let jaw = std::slice::from_raw_parts_mut(jaw_out_ptr, total);
+        let teeth = std::slice::from_raw_parts_mut(teeth_out_ptr, total);
+        let lips = std::slice::from_raw_parts_mut(lips_out_ptr, total);
 
         alligator_batch_inner_into(data, &sweep, Kernel::ScalarBatch, false, jaw, teeth, lips)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

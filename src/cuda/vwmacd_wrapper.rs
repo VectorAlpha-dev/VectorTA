@@ -19,7 +19,6 @@ use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
-use std::fmt;
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -47,22 +46,27 @@ impl Default for CudaVwmacdPolicy {
     }
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CudaVwmacdError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
-    Unsupported(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error(
+        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
+    )]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaVwmacdError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaVwmacdError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaVwmacdError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-            CudaVwmacdError::Unsupported(e) => write!(f, "Unsupported: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaVwmacdError {}
 
 /// Triplet of VRAM-backed arrays produced by the VWMACD kernels (macd, signal, hist).
 pub struct DeviceVwmacdTriplet {
@@ -90,10 +94,9 @@ pub struct CudaVwmacd {
 
 impl CudaVwmacd {
     pub fn new(device_id: usize) -> Result<Self, CudaVwmacdError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vwmacd_kernel.ptx"));
         let jit_opts = &[
@@ -107,12 +110,11 @@ impl CudaVwmacd {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -132,9 +134,24 @@ impl CudaVwmacd {
     }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaVwmacdError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaVwmacdError> {
+        if let Ok((free, _)) = mem_get_info() {
+            let required = required_bytes
+                .checked_add(headroom_bytes)
+                .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+            if required > free {
+                return Err(CudaVwmacdError::OutOfMemory {
+                    required,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
+        }
+        Ok(())
     }
 
     // ------------- Batch (one series × many params) -------------
@@ -155,18 +172,12 @@ impl CudaVwmacd {
             || !sweep.slow_ma_type.eq_ignore_ascii_case("sma")
             || !sweep.signal_ma_type.eq_ignore_ascii_case("ema")
         {
-            return Err(CudaVwmacdError::Unsupported(
-                "CUDA VWMACD currently supports fast=\"sma\", slow=\"sma\", signal=\"ema\" only"
-                    .into(),
+            return Err(CudaVwmacdError::InvalidPolicy(
+                "CUDA VWMACD supports fast=\"sma\", slow=\"sma\", signal=\"ema\" only",
             ));
         }
 
-        let combos = expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaVwmacdError::InvalidInput(
-                "empty parameter sweep".into(),
-            ));
-        }
+        let combos = expand_grid(sweep)?;
 
         let first_valid = first_valid_pair_f32(prices_f32, volumes_f32)
             .ok_or_else(|| CudaVwmacdError::InvalidInput("all values are NaN".into()))?;
@@ -205,46 +216,53 @@ impl CudaVwmacd {
             .map(|c| c.signal_period.unwrap() as i32)
             .collect();
 
-        // VRAM check
-        let bytes = pv_prefix.len() * 8
-            + vol_prefix.len() * 8
-            + (fasts.len() + slows.len() + sigs.len()) * 4
-            + 3 * rows * len * 4;
-        if let Ok((free, _)) = mem_get_info() {
-            if bytes.saturating_add(64 * 1024 * 1024) > free {
-                return Err(CudaVwmacdError::InvalidInput(
-                    "insufficient device memory".into(),
-                ));
-            }
-        }
+        // VRAM check (prefixes + params + outputs)
+        let f64_sz = std::mem::size_of::<f64>();
+        let f32_sz = std::mem::size_of::<f32>();
+        let i32_sz = std::mem::size_of::<i32>();
+        let prefix_bytes = pv_prefix
+            .len()
+            .checked_mul(f64_sz)
+            .and_then(|b| b.checked_add(vol_prefix.len().checked_mul(f64_sz)?))
+            .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+        let param_len = fasts
+            .len()
+            .checked_add(slows.len())
+            .and_then(|n| n.checked_add(sigs.len()))
+            .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+        let param_bytes = param_len
+            .checked_mul(i32_sz)
+            .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+        let elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(3)
+            .and_then(|n| n.checked_mul(f32_sz))
+            .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+        let bytes = prefix_bytes
+            .checked_add(param_bytes)
+            .and_then(|b| b.checked_add(out_bytes))
+            .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+        CudaVwmacd::will_fit(bytes, 64 * 1024 * 1024)?;
 
         // Stage to device (pinned + async for large spans)
-        let h_pv = LockedBuffer::from_slice(&pv_prefix)
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let h_vol = LockedBuffer::from_slice(&vol_prefix)
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let h_pv = LockedBuffer::from_slice(&pv_prefix)?;
+        let h_vol = LockedBuffer::from_slice(&vol_prefix)?;
         let d_pv: DeviceBuffer<f64> =
-            unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }
-                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }?;
         let d_vol: DeviceBuffer<f64> =
-            unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }
-                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let d_fasts =
-            DeviceBuffer::from_slice(&fasts).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let d_slows =
-            DeviceBuffer::from_slice(&slows).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let d_sigs =
-            DeviceBuffer::from_slice(&sigs).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }?;
+        let d_fasts = DeviceBuffer::from_slice(&fasts)?;
+        let d_slows = DeviceBuffer::from_slice(&slows)?;
+        let d_sigs = DeviceBuffer::from_slice(&sigs)?;
 
         let mut d_macd: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
-                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
         let mut d_signal: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
-                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
         let mut d_hist: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
-                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         self.launch_batch(
             &d_pv,
@@ -290,11 +308,10 @@ impl CudaVwmacd {
         rows: usize,
         params: &VwmacdParams,
     ) -> Result<DeviceVwmacdTriplet, CudaVwmacdError> {
-        if cols == 0
-            || rows == 0
-            || prices_tm_f32.len() != cols * rows
-            || volumes_tm_f32.len() != cols * rows
-        {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+        if cols == 0 || rows == 0 || prices_tm_f32.len() != expected || volumes_tm_f32.len() != expected {
             return Err(CudaVwmacdError::InvalidInput(
                 "invalid time-major inputs".into(),
             ));
@@ -321,8 +338,8 @@ impl CudaVwmacd {
                 .unwrap_or("ema")
                 .eq_ignore_ascii_case("ema")
         {
-            return Err(CudaVwmacdError::Unsupported(
-                "only SMA/SMA + EMA supported in CUDA path".into(),
+            return Err(CudaVwmacdError::InvalidPolicy(
+                "CUDA VWMACD supports fast=\"sma\", slow=\"sma\", signal=\"ema\" only",
             ));
         }
 
@@ -350,40 +367,45 @@ impl CudaVwmacd {
         );
 
         // VRAM check
-        let bytes = pv_prefix_tm.len() * 8
-            + vol_prefix_tm.len() * 8
-            + first_valids.len() * 4
-            + 3 * cols * rows * 4;
-        if let Ok((free, _)) = mem_get_info() {
-            if bytes.saturating_add(64 * 1024 * 1024) > free {
-                return Err(CudaVwmacdError::InvalidInput(
-                    "insufficient device memory".into(),
-                ));
-            }
-        }
+        let f64_sz = std::mem::size_of::<f64>();
+        let f32_sz = std::mem::size_of::<f32>();
+        let i32_sz = std::mem::size_of::<i32>();
+        let prefix_bytes = pv_prefix_tm
+            .len()
+            .checked_mul(f64_sz)
+            .and_then(|b| b.checked_add(vol_prefix_tm.len().checked_mul(f64_sz)?))
+            .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+        let param_bytes = first_valids
+            .len()
+            .checked_mul(i32_sz)
+            .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(3)
+            .and_then(|n| n.checked_mul(f32_sz))
+            .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+        let bytes = prefix_bytes
+            .checked_add(param_bytes)
+            .and_then(|b| b.checked_add(out_bytes))
+            .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+        CudaVwmacd::will_fit(bytes, 64 * 1024 * 1024)?;
 
-        let h_pv = LockedBuffer::from_slice(&pv_prefix_tm)
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let h_vol = LockedBuffer::from_slice(&vol_prefix_tm)
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let h_pv = LockedBuffer::from_slice(&pv_prefix_tm)?;
+        let h_vol = LockedBuffer::from_slice(&vol_prefix_tm)?;
         let d_pv: DeviceBuffer<f64> =
-            unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }
-                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }?;
         let d_vol: DeviceBuffer<f64> =
-            unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }
-                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let d_first: DeviceBuffer<i32> = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }?;
+        let d_first: DeviceBuffer<i32> = DeviceBuffer::from_slice(&first_valids)?;
 
         let mut d_macd: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
         let mut d_signal: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
         let mut d_hist: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         self.launch_many_series(
             &d_pv,
@@ -438,7 +460,9 @@ impl CudaVwmacd {
         let func = self
             .module
             .get_function("vwmacd_batch_f32")
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVwmacdError::MissingKernelSymbol {
+                name: "vwmacd_batch_f32",
+            })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             _ => 256,
@@ -472,9 +496,7 @@ impl CudaVwmacd {
                 &mut sig_ptr as *mut _ as *mut c_void,
                 &mut hist_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -497,7 +519,9 @@ impl CudaVwmacd {
         let func = self
             .module
             .get_function("vwmacd_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVwmacdError::MissingKernelSymbol {
+                name: "vwmacd_many_series_one_param_time_major_f32",
+            })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => 256,
@@ -531,9 +555,7 @@ impl CudaVwmacd {
                 &mut signal_ptr as *mut _ as *mut c_void,
                 &mut hist_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -630,17 +652,64 @@ fn first_valids_time_major_f32(
     out
 }
 
-fn expand_grid(r: &VwmacdBatchRange) -> Vec<VwmacdParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &VwmacdBatchRange) -> Result<Vec<VwmacdParams>, CudaVwmacdError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, CudaVwmacdError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let st = step.max(1);
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                let next = cur.saturating_add(st);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+            }
+            if v.is_empty() {
+                return Err(CudaVwmacdError::InvalidInput(format!(
+                    "invalid range: start={start}, end={end}, step={step}"
+                )));
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(CudaVwmacdError::InvalidInput(format!(
+                "invalid range: start={start}, end={end}, step={step}"
+            )));
+        }
+        Ok(v)
     }
-    let fasts = axis(r.fast);
-    let slows = axis(r.slow);
-    let signals = axis(r.signal);
-    let mut out = Vec::with_capacity(fasts.len() * slows.len() * signals.len());
+
+    let fasts = axis_usize(r.fast)?;
+    let slows = axis_usize(r.slow)?;
+    let signals = axis_usize(r.signal)?;
+
+    let cap = fasts
+        .len()
+        .checked_mul(slows.len())
+        .and_then(|x| x.checked_mul(signals.len()))
+        .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
+    if cap == 0 {
+        return Err(CudaVwmacdError::InvalidInput(
+            "empty parameter sweep".into(),
+        ));
+    }
+
+    let mut out = Vec::with_capacity(cap);
     for &f in &fasts {
         for &s in &slows {
             for &g in &signals {
@@ -655,7 +724,7 @@ fn expand_grid(r: &VwmacdBatchRange) -> Vec<VwmacdParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 // ---------- Minimal benches ----------

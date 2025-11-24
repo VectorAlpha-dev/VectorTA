@@ -14,13 +14,12 @@
 //! - **`Err(VlmaError)`** on invalid parameters or insufficient data.
 //!
 //! ## Developer Notes
-//! - SIMD: AVX2/AVX512 remain stubs (delegate to scalar). VLMA is sequential and branchy; time-wise SIMD offers no clear win, so selection short-circuits to scalar.
-//! - Scalar: hot loop optimized with branch-reduced period updates and a LUT for smoothing constants; preserves warmup/outputs.
-//! - Streaming: O(1) for default case (matype="sma", devtype=0) via rolling sums/sumsq and a LUT of smoothing
-//!   constants; other matypes/devtypes retain the correct O(n) fallback. Matches batch semantics exactly.
-//! - Memory: uses `alloc_with_nan_prefix` and avoids O(N) temporaries beyond required reference series.
-//! - Batch: parallel per-row sweep. Added row-optimized fast path for SMA + stddev using shared prefix sums
-//!   to compute mean/stddev in O(1) per index; other matypes/devtypes fall back to scalar per row.
+//! - SIMD: AVX2/AVX512 remain stubs (delegate to scalar). VLMA is sequential and branchy; runtime selection
+//!   short-circuits to the scalar path for portability and simplicity.
+//! - CUDA: wrapper provides one-series × many-params and many-series × one-param kernels, returning VRAM
+//!   handles compatible with Python CAI v3 and DLPack v1.x. Numerical outputs match the scalar path.
+//! - Scalar/Batch: hot loops reuse ALMA-style helpers (warmup handling, uninitialized matrices, prefix sums)
+//!   and keep all error/parameter validation on the CPU side; reference outputs and tests remain unchanged.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -41,7 +40,7 @@ use wasm_bindgen::prelude::*;
 use crate::cuda::{cuda_available, CudaVlma};
 use crate::indicators::deviation::{deviation, DevInput, DevParams};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -270,23 +269,25 @@ impl VlmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum VlmaError {
-    #[error("vlma: Empty data provided.")]
-    EmptyData,
+    #[error("vlma: Input data slice is empty.")]
+    EmptyInputData,
     #[error("vlma: min_period={min_period} is greater than max_period={max_period}.")]
     InvalidPeriodRange {
         min_period: usize,
         max_period: usize,
     },
-    #[error("vlma: Invalid period: min_period={min_period}, max_period={max_period}, data length={data_len}.")]
-    InvalidPeriod {
-        min_period: usize,
-        max_period: usize,
-        data_len: usize,
-    },
     #[error("vlma: All values are NaN.")]
     AllValuesNaN,
     #[error("vlma: Not enough valid data: needed={needed}, valid={valid}.")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("vlma: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("vlma: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("vlma: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("vlma: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
     #[error("vlma: Error in MA calculation: {0}")]
     MaError(String),
     #[error("vlma: Error in Deviation calculation: {0}")]
@@ -321,10 +322,9 @@ pub fn vlma_into(input: &VlmaInput, out: &mut [f64]) -> Result<(), VlmaError> {
 pub fn vlma_into_slice(dst: &mut [f64], input: &VlmaInput, kern: Kernel) -> Result<(), VlmaError> {
     let (data, min_p, max_p, matype, devtype, first, chosen) = vlma_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(VlmaError::InvalidPeriod {
-            min_period: 0,
-            max_period: 0,
-            data_len: data.len(),
+        return Err(VlmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
     vlma_compute_into(data, min_p, max_p, &matype, devtype, first, chosen, dst)?;
@@ -347,7 +347,7 @@ fn vlma_prepare<'a>(
     let data: &[f64] = input.as_ref();
 
     if data.is_empty() {
-        return Err(VlmaError::EmptyData);
+        return Err(VlmaError::EmptyInputData);
     }
 
     let min_period = input.get_min_period();
@@ -361,8 +361,7 @@ fn vlma_prepare<'a>(
 
     if max_period == 0 || max_period > data.len() {
         return Err(VlmaError::InvalidPeriod {
-            min_period,
-            max_period,
+            period: max_period,
             data_len: data.len(),
         });
     }
@@ -1066,8 +1065,7 @@ impl VlmaStream {
         }
         if max_period == 0 {
             return Err(VlmaError::InvalidPeriod {
-                min_period,
-                max_period,
+                period: max_period,
                 data_len: 0,
             });
         }
@@ -1352,7 +1350,7 @@ impl VlmaBatchOutput {
     }
     pub fn values_for(&self, p: &VlmaParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
-            let start = row * self.cols;
+            let start = row.checked_mul(self.cols).unwrap_or(0);
             &self.values[start..start + self.cols]
         })
     }
@@ -1362,7 +1360,19 @@ fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
     if step == 0 || start == end {
         return vec![start];
     }
-    (start..=end).step_by(step).collect()
+    if start < end {
+        (start..=end).step_by(step.max(1)).collect()
+    } else {
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        v
+    }
 }
 fn axis_string((start, end, _): (String, String, String)) -> Vec<String> {
     if start == end {
@@ -1372,27 +1382,39 @@ fn axis_string((start, end, _): (String, String, String)) -> Vec<String> {
     }
 }
 fn axis_usize_step((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-    if step == 0 || start == end {
-        vec![start]
-    } else {
-        (start..=end).step_by(step).collect()
-    }
+    axis_usize((start, end, step))
 }
 fn axis_devtype((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-    if step == 0 || start == end {
-        vec![start]
-    } else {
-        (start..=end).step_by(step).collect()
-    }
+    axis_usize((start, end, step))
 }
 
-fn expand_grid(r: &VlmaBatchRange) -> Vec<VlmaParams> {
+fn expand_grid(r: &VlmaBatchRange) -> Result<Vec<VlmaParams>, VlmaError> {
     let min_periods = axis_usize(r.min_period);
     let max_periods = axis_usize(r.max_period);
     let matypes = axis_string(r.matype.clone());
     let devtypes = axis_devtype(r.devtype);
-    let mut out =
-        Vec::with_capacity(min_periods.len() * max_periods.len() * matypes.len() * devtypes.len());
+
+    if min_periods.is_empty() || max_periods.is_empty() || matypes.is_empty() || devtypes.is_empty()
+    {
+        return Err(VlmaError::InvalidRange {
+            start: format!("{:?}", r.min_period),
+            end: format!("{:?}", r.max_period),
+            step: format!("{:?}", r.devtype),
+        });
+    }
+
+    let cap = min_periods
+        .len()
+        .checked_mul(max_periods.len())
+        .and_then(|x| x.checked_mul(matypes.len()))
+        .and_then(|x| x.checked_mul(devtypes.len()))
+        .ok_or_else(|| VlmaError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &mn in &min_periods {
         for &mx in &max_periods {
             for mt in &matypes {
@@ -1407,7 +1429,7 @@ fn expand_grid(r: &VlmaBatchRange) -> Vec<VlmaParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1420,11 +1442,7 @@ pub fn vlma_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(VlmaError::InvalidPeriod {
-                min_period: 0,
-                max_period: 0,
-                data_len: 0,
-            })
+            return Err(VlmaError::InvalidKernelForBatch(k));
         }
     };
     let simd = match kernel {
@@ -1460,14 +1478,7 @@ fn vlma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<VlmaBatchOutput, VlmaError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(VlmaError::InvalidPeriod {
-            min_period: 0,
-            max_period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -1543,14 +1554,7 @@ pub fn vlma_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<VlmaParams>, VlmaError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(VlmaError::InvalidPeriod {
-            min_period: 0,
-            max_period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1687,7 +1691,7 @@ pub fn vlma_batch_inner_into(
 }
 
 #[inline(always)]
-pub fn expand_grid_vlma(r: &VlmaBatchRange) -> Vec<VlmaParams> {
+pub fn expand_grid_vlma(r: &VlmaBatchRange) -> Result<Vec<VlmaParams>, VlmaError> {
     expand_grid(r)
 }
 
@@ -1773,7 +1777,7 @@ pub fn vlma_batch_py<'py>(
         devtype: devtype_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -1882,7 +1886,7 @@ pub fn vlma_cuda_batch_dev_py(
         cuda.vlma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1915,7 +1919,7 @@ pub fn vlma_cuda_many_series_one_param_dev_py(
         cuda.vlma_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 // WASM bindings following ALMA pattern
@@ -2076,8 +2080,11 @@ pub fn vlma_batch_into(
             devtype: (devtype_start, devtype_end, devtype_step),
         };
 
-        let combos = expand_grid(&sweep);
-        let total_len = combos.len() * len;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let total_len = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("vlma_batch_into: output size overflow"))?;
         let out_slice = std::slice::from_raw_parts_mut(out_ptr, total_len);
 
         let _ = vlma_batch_inner_into(data, &sweep, Kernel::Scalar, false, out_slice)

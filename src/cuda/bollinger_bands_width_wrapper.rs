@@ -23,6 +23,8 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
 // ---------- Float-float host POD to mirror CUDA float2 ----------
 #[repr(C)]
@@ -63,20 +65,25 @@ fn ff_prod_fma(x: f32, y: f32) -> Float2 {
     Float2 { hi: t, lo: e2 }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaBbwError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device mismatch: buffer device {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaBbwError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaBbwError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaBbwError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaBbwError {}
 
 #[derive(Clone, Debug)]
 struct BbwCombo {
@@ -137,7 +144,8 @@ fn should_use_grouped(n_combos: usize, unique_periods: usize) -> bool {
 pub struct CudaBbw {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
+    device_id: u32,
     // simple policy hooks to mirror ALMA shape (kept plain for now)
     batch_policy: BatchKernelPolicy,
     many_policy: ManySeriesKernelPolicy,
@@ -146,10 +154,9 @@ pub struct CudaBbw {
 
 impl CudaBbw {
     pub fn new(device_id: usize) -> Result<Self, CudaBbwError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(
             env!("OUT_DIR"),
@@ -161,20 +168,37 @@ impl CudaBbw {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
             batch_policy: BatchKernelPolicy::Auto,
             many_policy: ManySeriesKernelPolicy::Auto,
             debug_logged: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+
+    #[inline]
+    fn will_fit(&self, required: usize, headroom: usize) -> Result<(), CudaBbwError> {
+        match mem_get_info() {
+            Ok((free, _)) => {
+                if required.saturating_add(headroom) > free {
+                    return Err(CudaBbwError::OutOfMemory { required, free, headroom });
+                }
+                Ok(())
+            }
+            Err(e) => Err(CudaBbwError::Cuda(e)),
+        }
     }
 
     pub fn set_policies(&mut self, batch: BatchKernelPolicy, many: ManySeriesKernelPolicy) {
@@ -191,6 +215,7 @@ impl CudaBbw {
     ) -> Result<(DeviceArrayF32, Vec<(usize, f32)>), CudaBbwError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let arr = self.run_batch_kernel(data_f32, &combos, first_valid)?;
+        self.stream.synchronize()?;
         let meta = combos.iter().map(|c| (c.period, c.u_plus_d)).collect();
         Ok((arr, meta))
     }
@@ -202,7 +227,10 @@ impl CudaBbw {
         out: &mut [f32],
     ) -> Result<(usize, usize, Vec<(usize, f32)>), CudaBbwError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        let expected = combos.len() * len;
+        let expected = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaBbwError::InvalidInput("output too large".into()))?;
         if out.len() != expected {
             return Err(CudaBbwError::InvalidInput(format!(
                 "output slice length mismatch (expected {}, got {})",
@@ -211,9 +239,7 @@ impl CudaBbw {
             )));
         }
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid)?;
-        dev.buf
-            .copy_to(out)
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+        dev.buf.copy_to(out).map_err(CudaBbwError::Cuda)?;
         let meta = combos.iter().map(|c| (c.period, c.u_plus_d)).collect();
         Ok((combos.len(), len, meta))
     }
@@ -236,37 +262,54 @@ impl CudaBbw {
         let (ps, pe, pst) = sweep.period;
         if pst == 0 || ps == pe {
             periods.push(ps);
-        } else {
+        } else if ps < pe {
             let mut p = ps;
             while p <= pe {
                 periods.push(p);
-                p += pst;
+                match p.checked_add(pst) { Some(n) => p = n, None => break }
+            }
+        } else {
+            // reversed bounds supported
+            let mut p = ps as i64;
+            let step_i = pst as i64;
+            while p >= pe as i64 {
+                periods.push(p as usize);
+                p -= step_i;
             }
         }
         let mut devups = Vec::new();
         let (us, ue, ust) = sweep.devup;
         if ust.abs() < 1e-12 || (us - ue).abs() < 1e-12 {
             devups.push(us);
-        } else {
+        } else if ust > 0.0 && us <= ue {
             let mut u = us;
-            while u <= ue + 1e-12 {
-                devups.push(u);
-                u += ust;
-            }
+            while u <= ue + 1e-12 { devups.push(u); u += ust; }
+        } else if ust < 0.0 && us >= ue {
+            let mut u = us;
+            while u >= ue - 1e-12 { devups.push(u); u += ust; }
         }
         let mut devdns = Vec::new();
         let (ds, de, dst) = sweep.devdn;
         if dst.abs() < 1e-12 || (ds - de).abs() < 1e-12 {
             devdns.push(ds);
-        } else {
+        } else if dst > 0.0 && ds <= de {
             let mut d = ds;
-            while d <= de + 1e-12 {
-                devdns.push(d);
-                d += dst;
-            }
+            while d <= de + 1e-12 { devdns.push(d); d += dst; }
+        } else if dst < 0.0 && ds >= de {
+            let mut d = ds;
+            while d >= de - 1e-12 { devdns.push(d); d += dst; }
         }
 
-        let mut combos = Vec::with_capacity(periods.len() * devups.len() * devdns.len());
+        if periods.is_empty() || devups.is_empty() || devdns.is_empty() {
+            return Err(CudaBbwError::InvalidInput("invalid range (empty expansion)".into()));
+        }
+
+        let cap = periods
+            .len()
+            .checked_mul(devups.len())
+            .and_then(|v| v.checked_mul(devdns.len()))
+            .ok_or_else(|| CudaBbwError::InvalidInput("range too large".into()))?;
+        let mut combos = Vec::with_capacity(cap);
         let mut max_period = 0usize;
         for &p in &periods {
             for &u in &devups {
@@ -323,37 +366,48 @@ impl CudaBbw {
 
         // Build float-float prefixes and estimate VRAM before output alloc
         let (ps, ps2, pn) = Self::build_prefixes(data_f32);
-        let in_bytes = ps.len() * std::mem::size_of::<Float2>()
-            + ps2.len() * std::mem::size_of::<Float2>()
-            + pn.len() * std::mem::size_of::<i32>();
+        let sz_f2 = std::mem::size_of::<Float2>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let in_bytes_ps = ps
+            .len()
+            .checked_mul(sz_f2)
+            .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+        let in_bytes_ps2 = ps2
+            .len()
+            .checked_mul(sz_f2)
+            .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+        let in_bytes_pn = pn
+            .len()
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+        let in_bytes = in_bytes_ps
+            .checked_add(in_bytes_ps2)
+            .and_then(|v| v.checked_add(in_bytes_pn))
+            .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
 
         let out_elems = len
             .checked_mul(combos.len())
             .ok_or_else(|| CudaBbwError::InvalidInput("output too large".into()))?;
-        let out_bytes = out_elems * std::mem::size_of::<f32>();
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaBbwError::InvalidInput("output too large".into()))?;
+        let required = in_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
         let headroom = 64usize * 1024 * 1024;
-        if let Ok((free, _)) = mem_get_info() {
-            if in_bytes + out_bytes + headroom > free {
-                return Err(CudaBbwError::Cuda(format!(
-                    "insufficient VRAM (need ~{} MiB, free ~{} MiB)",
-                    (in_bytes + out_bytes + headroom) / (1024 * 1024),
-                    free / (1024 * 1024)
-                )));
-            }
-        }
+        self.will_fit(required, headroom)?;
 
         // Upload inputs
-        let d_ps = DeviceBuffer::from_slice(&ps).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-        let d_ps2 = DeviceBuffer::from_slice(&ps2).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-        let d_pn = DeviceBuffer::from_slice(&pn).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+        let d_ps = DeviceBuffer::from_slice(&ps)?;
+        let d_ps2 = DeviceBuffer::from_slice(&ps2)?;
+        let d_pn = DeviceBuffer::from_slice(&pn)?;
 
         let periods: Vec<i32> = combos.iter().map(|c| c.period as i32).collect();
         let uplusd: Vec<f32> = combos.iter().map(|c| c.u_plus_d).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-        let d_uplusd = DeviceBuffer::from_slice(&uplusd).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let d_uplusd = DeviceBuffer::from_slice(&uplusd)?;
 
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
         // One-time debug
         if !self
@@ -380,14 +434,10 @@ impl CudaBbw {
         };
 
         if let Some(g) = grouped {
-            let d_up = DeviceBuffer::from_slice(&g.unique_periods)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-            let d_offs = DeviceBuffer::from_slice(&g.offsets)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-            let d_uks = DeviceBuffer::from_slice(&g.uplusd_sorted)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-            let d_rows = DeviceBuffer::from_slice(&g.combo_index)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+            let d_up = DeviceBuffer::from_slice(&g.unique_periods)?;
+            let d_offs = DeviceBuffer::from_slice(&g.offsets)?;
+            let d_uks = DeviceBuffer::from_slice(&g.uplusd_sorted)?;
+            let d_rows = DeviceBuffer::from_slice(&g.combo_index)?;
 
             self.launch_grouped_batch_kernel(
                 &d_ps,
@@ -408,8 +458,7 @@ impl CudaBbw {
             let use_streaming = combos.len() <= 64;
             if use_streaming {
                 // upload price series once
-                let d_data = DeviceBuffer::from_slice(data_f32)
-                    .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+                let d_data = DeviceBuffer::from_slice(data_f32)?;
                 self.launch_batch_kernel_streaming(
                     &d_data,
                     len,
@@ -434,9 +483,7 @@ impl CudaBbw {
             }
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len })
     }
@@ -454,7 +501,7 @@ impl CudaBbw {
         let func = self
             .module
             .get_function("bbw_sma_streaming_f64")
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaBbwError::MissingKernelSymbol { name: "bbw_sma_streaming_f64" })?;
         if len > i32::MAX as usize || n_combos > i32::MAX as usize {
             return Err(CudaBbwError::InvalidInput("input too large".into()));
         }
@@ -479,7 +526,7 @@ impl CudaBbw {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+                .map_err(CudaBbwError::Cuda)?;
         }
         Ok(())
     }
@@ -499,7 +546,7 @@ impl CudaBbw {
         let func = self
             .module
             .get_function("bbw_sma_prefix_ff_f32")
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaBbwError::MissingKernelSymbol { name: "bbw_sma_prefix_ff_f32" })?;
 
         if len > i32::MAX as usize || n_combos > i32::MAX as usize {
             return Err(CudaBbwError::InvalidInput(
@@ -540,7 +587,7 @@ impl CudaBbw {
 
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+                .map_err(CudaBbwError::Cuda)?;
         }
         Ok(())
     }
@@ -562,7 +609,7 @@ impl CudaBbw {
         let func = self
             .module
             .get_function("bbw_sma_prefix_grouped_ff_f32")
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaBbwError::MissingKernelSymbol { name: "bbw_sma_prefix_grouped_ff_f32" })?;
 
         if len > i32::MAX as usize || num_unique > i32::MAX as usize {
             return Err(CudaBbwError::InvalidInput(
@@ -604,7 +651,7 @@ impl CudaBbw {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+                .map_err(CudaBbwError::Cuda)?;
         }
         Ok(())
     }
@@ -635,7 +682,10 @@ impl CudaBbw {
                 "matrix dims must be positive".into(),
             ));
         }
-        if data_tm_f32.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaBbwError::InvalidInput("matrix dims overflow".into()))?;
+        if data_tm_f32.len() != expected {
             return Err(CudaBbwError::InvalidInput("matrix shape mismatch".into()));
         }
         if period == 0 {
@@ -685,14 +735,37 @@ impl CudaBbw {
         period: usize,
         uplusd: f32,
     ) -> Result<DeviceArrayF32, CudaBbwError> {
-        let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+        let total = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaBbwError::InvalidInput("matrix dims overflow".into()))?;
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_f2 = std::mem::size_of::<Float2>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let headroom = 64usize * 1024 * 1024;
 
         if cols <= 64 {
-            let d_data_tm = DeviceBuffer::from_slice(&prep.data_tm)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-            let d_first = DeviceBuffer::from_slice(&prep.first_valids)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+            let out_bytes = total
+                .checked_mul(sz_f32)
+                .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+            let data_bytes = prep
+                .data_tm
+                .len()
+                .checked_mul(sz_f32)
+                .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+            let first_bytes = prep
+                .first_valids
+                .len()
+                .checked_mul(sz_i32)
+                .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+            let required = out_bytes
+                .checked_add(data_bytes)
+                .and_then(|v| v.checked_add(first_bytes))
+                .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+            self.will_fit(required, headroom)?;
+
+            let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(total) }?;
+            let d_data_tm = DeviceBuffer::from_slice(&prep.data_tm)?;
+            let d_first = DeviceBuffer::from_slice(&prep.first_valids)?;
             self.launch_many_series_kernel_streaming(
                 &d_data_tm,
                 period,
@@ -702,15 +775,51 @@ impl CudaBbw {
                 uplusd,
                 &mut d_out_tm,
             )?;
+
+            self.stream.synchronize()?;
+
+            return Ok(DeviceArrayF32 {
+                buf: d_out_tm,
+                rows,
+                cols,
+            });
         } else {
-            let d_ps_tm = DeviceBuffer::from_slice(&prep.ps_tm)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-            let d_ps2_tm = DeviceBuffer::from_slice(&prep.ps2_tm)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-            let d_pn_tm = DeviceBuffer::from_slice(&prep.pn_tm)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-            let d_first = DeviceBuffer::from_slice(&prep.first_valids)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+            let out_bytes = total
+                .checked_mul(sz_f32)
+                .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+            let ps_bytes = prep
+                .ps_tm
+                .len()
+                .checked_mul(sz_f2)
+                .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+            let ps2_bytes = prep
+                .ps2_tm
+                .len()
+                .checked_mul(sz_f2)
+                .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+            let pn_bytes = prep
+                .pn_tm
+                .len()
+                .checked_mul(sz_i32)
+                .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+            let first_bytes = prep
+                .first_valids
+                .len()
+                .checked_mul(sz_i32)
+                .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+            let required = out_bytes
+                .checked_add(ps_bytes)
+                .and_then(|v| v.checked_add(ps2_bytes))
+                .and_then(|v| v.checked_add(pn_bytes))
+                .and_then(|v| v.checked_add(first_bytes))
+                .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+            self.will_fit(required, headroom)?;
+
+            let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(total) }?;
+            let d_ps_tm = DeviceBuffer::from_slice(&prep.ps_tm)?;
+            let d_ps2_tm = DeviceBuffer::from_slice(&prep.ps2_tm)?;
+            let d_pn_tm = DeviceBuffer::from_slice(&prep.pn_tm)?;
+            let d_first = DeviceBuffer::from_slice(&prep.first_valids)?;
             self.launch_many_series_kernel(
                 &d_ps_tm,
                 &d_ps2_tm,
@@ -722,17 +831,15 @@ impl CudaBbw {
                 uplusd,
                 &mut d_out_tm,
             )?;
+
+            self.stream.synchronize()?;
+
+            Ok(DeviceArrayF32 {
+                buf: d_out_tm,
+                rows,
+                cols,
+            })
         }
-
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-
-        Ok(DeviceArrayF32 {
-            buf: d_out_tm,
-            rows,
-            cols,
-        })
     }
 
     fn launch_many_series_kernel(
@@ -750,7 +857,7 @@ impl CudaBbw {
         let func = self
             .module
             .get_function("bbw_multi_series_one_param_tm_ff_f32")
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaBbwError::MissingKernelSymbol { name: "bbw_multi_series_one_param_tm_ff_f32" })?;
         if period > i32::MAX as usize || cols > i32::MAX as usize || rows > i32::MAX as usize {
             return Err(CudaBbwError::InvalidInput(
                 "arguments exceed kernel limits".into(),
@@ -787,7 +894,7 @@ impl CudaBbw {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+                .map_err(CudaBbwError::Cuda)?;
         }
         Ok(())
     }
@@ -805,7 +912,7 @@ impl CudaBbw {
         let func = self
             .module
             .get_function("bbw_multi_series_one_param_tm_streaming_f64")
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaBbwError::MissingKernelSymbol { name: "bbw_multi_series_one_param_tm_streaming_f64" })?;
         if period > i32::MAX as usize || cols > i32::MAX as usize || rows > i32::MAX as usize {
             return Err(CudaBbwError::InvalidInput("arguments exceed kernel limits".into()));
         }
@@ -830,7 +937,7 @@ impl CudaBbw {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+                .map_err(CudaBbwError::Cuda)?;
         }
         Ok(())
     }
@@ -858,12 +965,12 @@ struct ManySeriesPrepared {
     data_tm: Vec<f32>,
 }
 
-fn compute_prefix_sums_time_major_ff(
-    data_tm: &[f32],
-    cols: usize,
-    rows: usize,
-    first_valids: &[i32],
-) -> (Vec<Float2>, Vec<Float2>, Vec<i32>) {
+    fn compute_prefix_sums_time_major_ff(
+        data_tm: &[f32],
+        cols: usize,
+        rows: usize,
+        first_valids: &[i32],
+    ) -> (Vec<Float2>, Vec<Float2>, Vec<i32>) {
     let total = data_tm.len();
     let mut ps = vec![Float2::default(); total + 1];
     let mut ps2 = vec![Float2::default(); total + 1];

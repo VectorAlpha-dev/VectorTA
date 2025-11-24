@@ -21,6 +21,7 @@
 //! - **Streaming Update**: O(1) - efficient with maintained EMA states and trend tracking
 //! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
 //! - **Batch Operations**: Optimized row path by precomputing the shared VF series once (O(N)), then running per-row EMA updates over VF; uses `make_uninit_matrix` and `init_matrix_prefixes`
+//! - **Decision log**: SIMD remains stubbed (scalar path fastest for this IIR structure); CUDA batch and many-series kernels enabled with VRAM checks and synchronized launches, matching scalar within f32 tolerance.
 //!
 //! ### TODO - Performance Improvements
 //! - [ ] Implement actual AVX2/AVX512 batch SIMD (rows-in-lanes) over shared VF if/when beneficial
@@ -43,7 +44,7 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -219,16 +220,20 @@ impl KvoBuilder {
 
 #[derive(Debug, Error)]
 pub enum KvoError {
-    #[error("kvo: Empty data provided.")]
-    EmptyData,
-    #[error("kvo: Invalid period settings: short={short}, long={long}")]
-    InvalidPeriod { short: usize, long: usize },
-    #[error("kvo: Not enough valid data: found {valid} valid points after the first valid index.")]
-    NotEnoughValidData { valid: usize },
+    #[error("kvo: Input data slice is empty.")]
+    EmptyInputData,
     #[error("kvo: All values are NaN.")]
     AllValuesNaN,
-    #[error("kvo: Output buffer length mismatch: got={got}, expected={expected}")]
-    OutputLenMismatch { got: usize, expected: usize },
+    #[error("kvo: Invalid period settings: short={short}, long={long}")]
+    InvalidPeriod { short: usize, long: usize },
+    #[error("kvo: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("kvo: Output buffer length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("kvo: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("kvo: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -253,7 +258,7 @@ pub fn kvo_with_kernel(input: &KvoInput, kernel: Kernel) -> Result<KvoOutput, Kv
     };
 
     if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
-        return Err(KvoError::EmptyData);
+        return Err(KvoError::EmptyInputData);
     }
 
     let short_period = input.get_short_period();
@@ -276,10 +281,9 @@ pub fn kvo_with_kernel(input: &KvoInput, kernel: Kernel) -> Result<KvoOutput, Kv
         None => return Err(KvoError::AllValuesNaN),
     };
 
-    if (high.len() - first_valid_idx) < 2 {
-        return Err(KvoError::NotEnoughValidData {
-            valid: high.len() - first_valid_idx,
-        });
+    let valid = high.len() - first_valid_idx;
+    if valid < 2 {
+        return Err(KvoError::NotEnoughValidData { needed: 2, valid });
     }
 
     let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + 1);
@@ -347,14 +351,14 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
     };
 
     if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
-        return Err(KvoError::EmptyData);
+        return Err(KvoError::EmptyInputData);
     }
 
     // Validate output buffer length matches input length
     if out.len() != high.len() {
-        return Err(KvoError::OutputLenMismatch {
-            got: out.len(),
+        return Err(KvoError::OutputLengthMismatch {
             expected: high.len(),
+            got: out.len(),
         });
     }
 
@@ -378,10 +382,9 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
         None => return Err(KvoError::AllValuesNaN),
     };
 
-    if (high.len() - first_valid_idx) < 2 {
-        return Err(KvoError::NotEnoughValidData {
-            valid: high.len() - first_valid_idx,
-        });
+    let valid = high.len() - first_valid_idx;
+    if valid < 2 {
+        return Err(KvoError::NotEnoughValidData { needed: 2, valid });
     }
 
     let chosen = match kernel {
@@ -740,7 +743,7 @@ pub fn kvo_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(KvoError::InvalidPeriod { short: 0, long: 0 }),
+        other => return Err(KvoError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -774,16 +777,56 @@ impl KvoBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &KvoBatchRange) -> Vec<KvoParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &KvoBatchRange) -> Result<Vec<KvoParams>, KvoError> {
+    fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, KvoError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            loop {
+                out.push(v);
+                let next = v
+                    .checked_add(step)
+                    .ok_or(KvoError::InvalidRange { start, end, step })?;
+                if next > end {
+                    break;
+                }
+                v = next;
+            }
+        } else {
+            let mut v = start;
+            loop {
+                out.push(v);
+                if v == end {
+                    break;
+                }
+                if v < step {
+                    break;
+                }
+                let next = v
+                    .checked_sub(step)
+                    .ok_or(KvoError::InvalidRange { start, end, step })?;
+                if next < end {
+                    break;
+                }
+                v = next;
+            }
+        }
+        Ok(out)
     }
-    let shorts = axis(r.short_period);
-    let longs = axis(r.long_period);
-    let mut out = Vec::with_capacity(shorts.len() * longs.len());
+    let shorts = axis(r.short_period)?;
+    let longs = axis(r.long_period)?;
+    let cap = shorts
+        .len()
+        .checked_mul(longs.len())
+        .ok_or(KvoError::InvalidRange {
+            start: r.short_period.0,
+            end: r.long_period.1,
+            step: r.short_period.2.max(r.long_period.2),
+        })?;
+    let mut out = Vec::with_capacity(cap);
     for &s in &shorts {
         for &l in &longs {
             if s >= 1 && l >= s {
@@ -794,7 +837,14 @@ fn expand_grid(r: &KvoBatchRange) -> Vec<KvoParams> {
             }
         }
     }
-    out
+    if out.is_empty() {
+        return Err(KvoError::InvalidRange {
+            start: r.short_period.0,
+            end: r.long_period.1,
+            step: r.short_period.2.max(r.long_period.2),
+        });
+    }
+    Ok(out)
 }
 
 #[inline(always)]
@@ -837,20 +887,27 @@ pub fn kvo_batch_into_slice(
     // Validate that all input slices have the same length
     let len = high.len();
     if low.len() != len || close.len() != len || volume.len() != len {
-        return Err(KvoError::OutputLenMismatch {
-            got: out.len(),
+        return Err(KvoError::OutputLengthMismatch {
             expected: len,
+            got: out.len(),
         });
     }
 
     // Calculate expected output size
-    let combos = expand_grid(sweep);
-    let expected_size = combos.len() * len;
+    let combos = expand_grid(sweep)?;
+    let expected_size = combos
+        .len()
+        .checked_mul(len)
+        .ok_or(KvoError::InvalidRange {
+            start: sweep.short_period.0,
+            end: sweep.long_period.1,
+            step: sweep.short_period.2.max(sweep.long_period.2),
+        })?;
 
     if out.len() != expected_size {
-        return Err(KvoError::OutputLenMismatch {
-            got: out.len(),
+        return Err(KvoError::OutputLengthMismatch {
             expected: expected_size,
+            got: out.len(),
         });
     }
 
@@ -867,10 +924,7 @@ fn kvo_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<KvoBatchOutput, KvoError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(KvoError::InvalidPeriod { short: 0, long: 0 });
-    }
+    let combos = expand_grid(sweep)?;
     let cols = high.len();
     let rows = combos.len();
 
@@ -2132,12 +2186,16 @@ pub fn kvo_batch_py<'py>(
         short_period: short_range,
         long_period: long_range,
     };
-    let combos = expand_grid(&sweep);
+    let combos =
+        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = h.len();
 
     // pre-allocate the exact target buffer in NumPy
-    let arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
+    let arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_flat: &mut [f64] = unsafe { arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?; // expect batch-ish
@@ -2209,6 +2267,7 @@ pub fn kvo_cuda_batch_dev_py<'py>(
         cuda.kvo_batch_dev(h, l, c, v, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
+    let dev = make_device_array_py(device_id, inner)?;
 
     let dict = PyDict::new(py);
     dict.set_item(
@@ -2228,7 +2287,7 @@ pub fn kvo_cuda_batch_dev_py<'py>(
             .into_pyarray(py),
     )?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((dev, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2260,7 +2319,10 @@ pub fn kvo_cuda_many_series_one_param_dev_py<'py>(
     if h.len() != l.len() || h.len() != c.len() || h.len() != v.len() {
         return Err(PyValueError::new_err("inputs must have equal length"));
     }
-    if cols * rows != h.len() {
+    let elems = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("cols * rows overflow"))?;
+    if elems != h.len() {
         return Err(PyValueError::new_err("cols*rows must equal data length"));
     }
 
@@ -2273,8 +2335,9 @@ pub fn kvo_cuda_many_series_one_param_dev_py<'py>(
         cuda.kvo_many_series_one_param_time_major_dev(h, l, c, v, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
+    let dev = make_device_array_py(device_id, inner)?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(dev)
 }
 
 // Helper function for batch processing that writes directly into the provided slice
@@ -2289,10 +2352,7 @@ fn kvo_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<KvoParams>, KvoError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(KvoError::InvalidPeriod { short: 0, long: 0 });
-    }
+    let combos = expand_grid(sweep)?;
 
     // First valid index across all inputs
     let first = high
@@ -2303,15 +2363,26 @@ fn kvo_batch_inner_into(
         .position(|(((h, l), c), v)| !h.is_nan() && !l.is_nan() && !c.is_nan() && !v.is_nan())
         .ok_or(KvoError::AllValuesNaN)?;
 
-    if high.len() - first < 2 {
-        return Err(KvoError::NotEnoughValidData {
-            valid: high.len() - first,
-        });
+    let valid = high.len() - first;
+    if valid < 2 {
+        return Err(KvoError::NotEnoughValidData { needed: 2, valid });
     }
 
     let rows = combos.len();
     let cols = high.len();
-    assert_eq!(out.len(), rows * cols, "out buffer has wrong length");
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(KvoError::InvalidRange {
+            start: sweep.short_period.0,
+            end: sweep.long_period.1,
+            step: sweep.short_period.2.max(sweep.long_period.2),
+        })?;
+    if out.len() != expected {
+        return Err(KvoError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Initialize warm prefixes as NaN per row without extra copies
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
@@ -2467,7 +2538,10 @@ fn kvo_wasm_into_slice(
         || dst.len() != close.len()
         || dst.len() != volume.len()
     {
-        return Err(KvoError::InvalidPeriod { short: 0, long: 0 });
+        return Err(KvoError::OutputLengthMismatch {
+            expected: high.len(),
+            got: dst.len(),
+        });
     }
 
     // Create input
@@ -2736,9 +2810,12 @@ pub fn kvo_batch_into(
             Ok(output.rows)
         } else {
             // Calculate number of rows
-            let combos = expand_grid(&sweep);
+            let combos =
+                expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
             let rows = combos.len();
-            let total_size = rows * len;
+            let total_size = rows
+                .checked_mul(len)
+                .ok_or_else(|| JsValue::from_str("rows * len overflow"))?;
 
             // Get output slice
             let out = std::slice::from_raw_parts_mut(out_ptr, total_size);

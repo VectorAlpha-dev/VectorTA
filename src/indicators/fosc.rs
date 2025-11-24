@@ -11,6 +11,7 @@
 //! - **`Ok(FoscOutput)`** containing a `Vec<f64>` of oscillator values as percentages
 //!
 //! ## Developer Notes
+//! Decision log: scalar path is reference; SIMD stubs exist but `Kernel::Auto` short-circuits to Scalar for perf; CUDA wrapper + Python bindings return VRAM handles with CAI v3 + DLPack v1.x semantics.
 //! ### Implementation Status
 //! - SIMD implemented (AVX2/AVX512) with vectorized initializer and FMA in scalar loop.
 //! - Runtime selection short-circuits to Scalar for `Kernel::Auto` because SIMD underperforms on
@@ -43,7 +44,7 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -201,10 +202,12 @@ pub enum FoscError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("fosc: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("fosc: Output slice wrong length: dst_len = {dst_len}, data_len = {data_len}")]
-    OutputSliceWrongLen { dst_len: usize, data_len: usize },
-    #[error("fosc: Invalid kernel for batch operation")]
-    InvalidKernelForBatch,
+    #[error("fosc: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("fosc: Invalid kernel for batch operation: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
+    #[error("fosc: Invalid range expansion: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
 }
 
 // --------- Main Dispatchers ---------
@@ -268,10 +271,7 @@ pub fn fosc_into_slice(dst: &mut [f64], input: &FoscInput, kern: Kernel) -> Resu
     }
 
     if dst.len() != len {
-        return Err(FoscError::OutputSliceWrongLen {
-            dst_len: dst.len(),
-            data_len: len,
-        });
+        return Err(FoscError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
     let first = data
@@ -722,19 +722,54 @@ impl FoscBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &FoscBatchRange) -> Vec<FoscParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &FoscBatchRange) -> Result<Vec<FoscParams>, FoscError> {
+    #[inline]
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, FoscError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step).collect();
+            return if v.is_empty() {
+                Err(FoscError::InvalidRange { start, end, step })
+            } else {
+                Ok(v)
+            };
+        } else {
+            // reversed bounds: include both ends
+            let mut v = Vec::new();
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                if cur <= end { break; }
+                match cur.checked_sub(step) {
+                    Some(next) => cur = next,
+                    None => break,
+                }
+                if cur == usize::MAX { break; }
+                if cur <= end { break; }
+            }
+            if v.is_empty() {
+                Err(FoscError::InvalidRange { start, end, step })
+            } else {
+                Ok(v)
+            }
+        }
     }
-    let periods = axis_usize(r.period);
+
+    let periods = axis_usize(r.period)?;
+    if periods.is_empty() {
+        return Err(FoscError::InvalidRange {
+            start: r.period.0,
+            end: r.period.1,
+            step: r.period.2,
+        });
+    }
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(FoscParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -763,7 +798,7 @@ pub fn fosc_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(FoscError::InvalidKernelForBatch),
+        other => return Err(FoscError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -781,13 +816,7 @@ fn fosc_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<FoscBatchOutput, FoscError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(FoscError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -894,13 +923,7 @@ fn fosc_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<FoscParams>, FoscError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(FoscError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -914,6 +937,20 @@ fn fosc_batch_inner_into(
     }
 
     let cols = data.len();
+    let rows = combos.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(FoscError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(FoscError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Work with MaybeUninit until fully written, like ALMA
     let out_uninit: &mut [MaybeUninit<f64>] = unsafe {
@@ -1061,12 +1098,15 @@ pub fn fosc_batch_py<'py>(
     };
 
     // Precompute shape from sweep (no compute yet)
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
     // Preallocate output buffer exposed to Python
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyErr::new::<PyValueError, _>("rows*cols overflow in fosc_batch_py"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -1131,7 +1171,8 @@ pub fn fosc_cuda_batch_dev_py<'py>(
         cuda.fosc_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1161,7 +1202,8 @@ pub fn fosc_cuda_many_series_one_param_dev_py(
         cuda.fosc_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 #[cfg(feature = "python")]

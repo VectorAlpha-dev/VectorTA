@@ -1,6 +1,7 @@
 //! # Jurik Moving Average (JMA)
 //!
 //! Decision: Streaming kernel precomputes (1-α), (1-β), α², (1-α)² and clamps phase at init; parity with scalar/batch retained.
+//! CUDA: Enabled (RAII primary-context via cust::Context, per-handle Arc). Interop: CAI v3 (byte-strides, no stream) + DLPack v1.x negotiation (versioned/legacy capsules).
 //!
 //! A minimal-lag smoothing methodology developed by Mark Jurik. JMA adapts quickly
 //! to market moves while reducing noise. Parameters (`period`, `phase`, `power`)
@@ -2231,7 +2232,7 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::types::PyDict;
+use pyo3::types::{PyAny, PyDict};
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "jma")]
@@ -2461,7 +2462,15 @@ impl JmaDeviceArrayF32Py {
         (2, dev)
     }
 
-    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<&PyAny>,
+        max_version: Option<&PyAny>,
+        dl_device: Option<&PyAny>,
+        copy: Option<&PyAny>,
+    ) -> PyResult<PyObject> {
         use std::os::raw::c_char;
         use std::ptr::null_mut;
 
@@ -2513,8 +2522,14 @@ impl JmaDeviceArrayF32Py {
         }
 
         unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
-            let name = b"dltensor\0";
-            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
+            // Try legacy first; if renamed to "used_*" pointer lookup returns null and we do nothing
+            let name_legacy = b"dltensor\0";
+            let mut ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name_legacy.as_ptr() as *const c_char);
+            if ptr.is_null() {
+                // Try versioned variant
+                let name_v = b"dltensor_versioned\0";
+                ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name_v.as_ptr() as *const c_char);
+            }
             if !ptr.is_null() {
                 let mt = ptr as *mut DLManagedTensor;
                 if let Some(del) = (*mt).deleter {
@@ -2529,10 +2544,46 @@ impl JmaDeviceArrayF32Py {
             .take()
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
 
+        // Parse optional parameters per Array API / DLPack v1.x
+        // stream: we deliberately ignore for sync producer; non-NULL means consumer stream
+        let _consumer_stream: Option<u64> = stream
+            .and_then(|obj| obj.extract::<i64>().ok())
+            .map(|v| v as u64);
+
+        // dl_device: (device_type, device_id)
+        if let Some(dev) = dl_device {
+            if let Ok((dt, did)) = dev.extract::<(i32, i32)>() {
+                if dt == 2 && did != inner.device_id as i32 {
+                    return Err(PyValueError::new_err("requested dl_device does not match allocation device"));
+                }
+            }
+        }
+
+        // copy: unsupported (we export zero-copy views only)
+        if let Some(c) = copy {
+            if let Ok(true) = c.extract::<bool>() {
+                return Err(PyValueError::new_err("copy=True not supported by producer"));
+            }
+        }
+
+        // Decide capsule name according to max_version negotiation
+        // Default to legacy if unspecified or < (1,0)
+        let mut use_versioned = false;
+        if let Some(ver_any) = max_version {
+            if let Ok((maj, min)) = ver_any.extract::<(u32, u32)>() {
+                if maj >= 1 { use_versioned = true; }
+                // minor currently ignored for producer
+            }
+        }
+
         let mut holder = Box::new(Holder {
             managed: DLManagedTensor {
                 dl_tensor: DLTensor {
-                    data: inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
+                    data: if inner.rows == 0 || inner.cols == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+                    },
                     device: DLDevice {
                         device_type: 2,
                         device_id: inner.device_id as i32,
@@ -2562,13 +2613,23 @@ impl JmaDeviceArrayF32Py {
 
         let _leaked = Box::into_raw(holder);
 
-        let name = b"dltensor\0";
+        // Create either legacy or versioned capsule
         let capsule = unsafe {
-            pyo3::ffi::PyCapsule_New(
-                mt_ptr as *mut std::ffi::c_void,
-                name.as_ptr() as *const c_char,
-                Some(capsule_destructor),
-            )
+            if use_versioned {
+                let name_v = b"dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name_v.as_ptr() as *const c_char,
+                    Some(capsule_destructor),
+                )
+            } else {
+                let name = b"dltensor\0";
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor),
+                )
+            }
         };
         if capsule.is_null() {
             unsafe { dl_managed_deleter(mt_ptr) };

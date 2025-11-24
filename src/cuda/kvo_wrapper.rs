@@ -16,27 +16,33 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
-use cust::module::{Module, ModuleJitOption};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaKvoError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaKvoError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaKvoError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaKvoError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaKvoError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -67,38 +73,38 @@ impl Default for CudaKvoPolicy {
 pub struct CudaKvo {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaKvoPolicy,
 }
 
 impl CudaKvo {
     pub fn new(device_id: usize) -> Result<Self, CudaKvoError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/kvo_kernel.ptx"));
-        // Prefer default JIT optimization level (O4) and target from context.
-        let module = Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                // If register pressure becomes a limit, consider:
-                // ModuleJitOption::MaxRegisters(128),
-            ],
-        )
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
+        // Prefer target from current context + moderate JIT opt level for stability.
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])?,
+            },
+        };
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaKvoPolicy::default(),
         })
     }
@@ -108,6 +114,64 @@ impl CudaKvo {
     }
     pub fn policy(&self) -> &CudaKvoPolicy {
         &self.policy
+    }
+
+    #[inline]
+    fn headroom_bytes() -> usize {
+        env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024)
+    }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn will_fit(bytes: usize, headroom: usize) -> Result<(), CudaKvoError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Ok((free, _)) = mem_get_info() {
+            if bytes.saturating_add(headroom) <= free {
+                Ok(())
+            } else {
+                Err(CudaKvoError::OutOfMemory {
+                    required: bytes,
+                    free,
+                    headroom,
+                })
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    fn validate_launch(grid: GridSize, block: BlockSize) -> Result<(), CudaKvoError> {
+        let (gx, gy, gz) = (grid.x, grid.y, grid.z);
+        let (bx, by, bz) = (block.x, block.y, block.z);
+        if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 {
+            return Err(CudaKvoError::InvalidInput(
+                "zero grid/block dimension".into(),
+            ));
+        }
+        if (gy as usize) > 65_535 {
+            return Err(CudaKvoError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
     }
 
     // -------------------- Batch: one series × many params --------------------
@@ -136,12 +200,7 @@ impl CudaKvo {
             ));
         }
 
-        let combos = expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaKvoError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = expand_grid(sweep)?;
         let mut shorts = Vec::with_capacity(combos.len());
         let mut longs = Vec::with_capacity(combos.len());
         for c in &combos {
@@ -157,26 +216,29 @@ impl CudaKvo {
         // Precompute VF once (f32) for device, matching scalar semantics
         let vf = precompute_vf_f32(high, low, close, volume, first);
 
-        // VRAM estimate: vf + shorts + longs + outputs + headroom
-        let bytes = len * 4 + combos.len() * 4 * 2 + combos.len() * len * 4 + 64 * 1024 * 1024;
-        if let Ok((free, _)) = mem_get_info() {
-            if bytes > free {
-                return Err(CudaKvoError::InvalidInput(format!(
-                    "estimated device memory {:.2} MB exceeds free VRAM",
-                    (bytes as f64) / (1024.0 * 1024.0)
-                )));
-            }
-        }
+        // VRAM estimate: vf + shorts + longs + outputs (bytes)
+        let combos_len = combos.len();
+        let size_overflow = || CudaKvoError::InvalidInput("size overflow".into());
+        let vf_bytes = len.checked_mul(4).ok_or_else(size_overflow)?;
+        let shorts_bytes = combos_len.checked_mul(4).ok_or_else(size_overflow)?;
+        let longs_bytes = combos_len.checked_mul(4).ok_or_else(size_overflow)?;
+        let out_elems = len
+            .checked_mul(combos_len)
+            .ok_or_else(size_overflow)?;
+        let out_bytes = out_elems.checked_mul(4).ok_or_else(size_overflow)?;
+        let bytes = vf_bytes
+            .checked_add(shorts_bytes)
+            .and_then(|b| b.checked_add(longs_bytes))
+            .and_then(|b| b.checked_add(out_bytes))
+            .ok_or_else(size_overflow)?;
+        Self::will_fit(bytes, Self::headroom_bytes())?;
 
         // H2D
-        let d_vf = DeviceBuffer::from_slice(&vf).map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
-        let d_shorts =
-            DeviceBuffer::from_slice(&shorts).map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
-        let d_longs =
-            DeviceBuffer::from_slice(&longs).map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
+        let d_vf = DeviceBuffer::from_slice(&vf).map_err(Into::into)?;
+        let d_shorts = DeviceBuffer::from_slice(&shorts).map_err(Into::into)?;
+        let d_longs = DeviceBuffer::from_slice(&longs).map_err(Into::into)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len * combos.len())
-                .map_err(|e| CudaKvoError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(out_elems).map_err(Into::into)?
         };
 
         self.launch_batch_kernel(
@@ -188,6 +250,7 @@ impl CudaKvo {
             combos.len() as i32,
             &mut d_out,
         )?;
+        self.stream.synchronize().map_err(Into::into)?;
 
         Ok((
             DeviceArrayF32 {
@@ -216,7 +279,7 @@ impl CudaKvo {
         let func = self
             .module
             .get_function("kvo_batch_f32")
-            .map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaKvoError::MissingKernelSymbol { name: "kvo_batch_f32" })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
@@ -227,6 +290,7 @@ impl CudaKvo {
         let blocks = ((n_combos as u32) + threads - 1) / threads;
         let grid: GridSize = (blocks.max(1), 1, 1).into();
         let block: BlockSize = (threads, 1, 1).into();
+        Self::validate_launch(grid, block)?;
         unsafe {
             let mut p_vf = d_vf.as_device_ptr().as_raw();
             let mut p_len = len;
@@ -244,9 +308,7 @@ impl CudaKvo {
                 &mut p_n as *mut _ as *mut c_void,
                 &mut p_out as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args).map_err(Into::into)?;
         }
         Ok(())
     }
@@ -265,9 +327,10 @@ impl CudaKvo {
         if cols == 0 || rows == 0 {
             return Err(CudaKvoError::InvalidInput("empty matrix".into()));
         }
+        let size_overflow = || CudaKvoError::InvalidInput("size overflow".into());
         let elems = cols
             .checked_mul(rows)
-            .ok_or_else(|| CudaKvoError::InvalidInput("overflow".into()))?;
+            .ok_or_else(size_overflow)?;
         if high_tm.len() != elems
             || low_tm.len() != elems
             || close_tm.len() != elems
@@ -288,30 +351,27 @@ impl CudaKvo {
         let first_valids =
             first_valids_time_major(high_tm, low_tm, close_tm, volume_tm, cols, rows);
 
-        // VRAM estimate: inputs + first_valids + outputs + headroom
-        let bytes = (elems * 4) * 4 + cols * 4 + elems * 4 + 64 * 1024 * 1024;
-        if let Ok((free, _)) = mem_get_info() {
-            if bytes > free {
-                return Err(CudaKvoError::InvalidInput(format!(
-                    "estimated device memory {:.2} MB exceeds free VRAM",
-                    (bytes as f64) / (1024.0 * 1024.0)
-                )));
-            }
-        }
+        // VRAM estimate: inputs (4 * elems * 4) + first_valids + outputs
+        let in_bytes = elems
+            .checked_mul(4)
+            .and_then(|b| b.checked_mul(4))
+            .ok_or_else(size_overflow)?;
+        let fv_bytes = cols.checked_mul(4).ok_or_else(size_overflow)?;
+        let out_bytes = elems.checked_mul(4).ok_or_else(size_overflow)?;
+        let bytes = in_bytes
+            .checked_add(fv_bytes)
+            .and_then(|b| b.checked_add(out_bytes))
+            .ok_or_else(size_overflow)?;
+        Self::will_fit(bytes, Self::headroom_bytes())?;
 
         // H2D
-        let d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
-        let d_vol =
-            DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high_tm).map_err(Into::into)?;
+        let d_low = DeviceBuffer::from_slice(low_tm).map_err(Into::into)?;
+        let d_close = DeviceBuffer::from_slice(close_tm).map_err(Into::into)?;
+        let d_vol = DeviceBuffer::from_slice(volume_tm).map_err(Into::into)?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids).map_err(Into::into)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(elems).map_err(|e| CudaKvoError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(elems).map_err(Into::into)?
         };
 
         self.launch_many_series_kernel(
@@ -326,6 +386,7 @@ impl CudaKvo {
             l as i32,
             &mut d_out,
         )?;
+        self.stream.synchronize().map_err(Into::into)?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -354,7 +415,9 @@ impl CudaKvo {
         let func = self
             .module
             .get_function("kvo_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaKvoError::MissingKernelSymbol {
+                name: "kvo_many_series_one_param_time_major_f32",
+            })?;
 
         // 1-D over columns; ignore block_y in policy for API compatibility
         let (block_x, _ignore) = match self.policy.many_series {
@@ -365,6 +428,7 @@ impl CudaKvo {
         let blocks = ((cols as u32) + threads - 1) / threads;
         let grid: GridSize = (blocks.max(1), 1, 1).into();
         let block: BlockSize = (threads, 1, 1).into();
+        Self::validate_launch(grid, block)?;
 
         unsafe {
             let mut p_high = d_high.as_device_ptr().as_raw();
@@ -389,9 +453,7 @@ impl CudaKvo {
                 &mut p_lp as *mut _ as *mut c_void,
                 &mut p_out as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args).map_err(Into::into)?;
         }
         Ok(())
     }
@@ -478,19 +540,56 @@ fn first_valids_time_major(
     fv
 }
 
-fn expand_grid(r: &KvoBatchRange) -> Vec<KvoParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &KvoBatchRange) -> Result<Vec<KvoParams>, CudaKvoError> {
+    fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaKvoError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        if start > end {
-            return Vec::new();
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            loop {
+                out.push(v);
+                let next = v.checked_add(step).ok_or_else(|| {
+                    CudaKvoError::InvalidInput(format!(
+                        "range overflow: start={start}, end={end}, step={step}"
+                    ))
+                })?;
+                if next > end {
+                    break;
+                }
+                v = next;
+            }
+        } else {
+            let mut v = start;
+            loop {
+                out.push(v);
+                if v == end {
+                    break;
+                }
+                if v < step {
+                    break;
+                }
+                let next = v.checked_sub(step).ok_or_else(|| {
+                    CudaKvoError::InvalidInput(format!(
+                        "range overflow: start={start}, end={end}, step={step}"
+                    ))
+                })?;
+                if next < end {
+                    break;
+                }
+                v = next;
+            }
         }
-        (start..=end).step_by(step).collect()
+        Ok(out)
     }
-    let shorts = axis(r.short_period);
-    let longs = axis(r.long_period);
-    let mut out = Vec::with_capacity(shorts.len() * longs.len());
+    let shorts = axis(r.short_period)?;
+    let longs = axis(r.long_period)?;
+    let cap = shorts
+        .len()
+        .checked_mul(longs.len())
+        .ok_or_else(|| CudaKvoError::InvalidInput("range size overflow".into()))?;
+    let mut out = Vec::with_capacity(cap);
     for &s in &shorts {
         for &l in &longs {
             if s >= 1 && l >= s {
@@ -501,7 +600,12 @@ fn expand_grid(r: &KvoBatchRange) -> Vec<KvoParams> {
             }
         }
     }
-    out
+    if out.is_empty() {
+        return Err(CudaKvoError::InvalidInput(
+            "no parameter combinations".into(),
+        ));
+    }
+    Ok(out)
 }
 
 #[inline(always)]

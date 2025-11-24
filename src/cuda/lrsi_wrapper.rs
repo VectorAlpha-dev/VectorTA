@@ -20,22 +20,28 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaLrsiError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaLrsiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaLrsiError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaLrsiError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaLrsiError {}
 
 #[derive(Clone, Copy, Debug)]
 pub struct CudaLrsiPolicy {
@@ -52,7 +58,8 @@ impl Default for CudaLrsiPolicy {
 pub struct CudaLrsi {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaLrsiPolicy,
     // For launch heuristics
     sm_count: u32,
@@ -64,13 +71,10 @@ pub struct CudaLrsi {
 
 impl CudaLrsi {
     pub fn new(device_id: usize) -> Result<Self, CudaLrsiError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
-        let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaLrsiError::Cuda(e.to_string()))? as u32;
-        let context = Context::new(device).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/lrsi_kernel.ptx"));
         let jit_opts = &[
@@ -80,22 +84,21 @@ impl CudaLrsi {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaLrsiPolicy::default(),
             sm_count,
             last_batch: None,
@@ -103,6 +106,20 @@ impl CudaLrsi {
             debug_batch_logged: false,
             debug_many_logged: false,
         })
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
 
     #[inline]
@@ -153,10 +170,19 @@ impl CudaLrsi {
     }
 
     #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
     pub fn synchronize(&self) -> Result<(), CudaLrsiError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaLrsiError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
     }
 
     // -------- One-series × many-params (batch) --------
@@ -171,7 +197,7 @@ impl CudaLrsi {
                 "high/low empty or length mismatch".into(),
             ));
         }
-        let combos = expand_grid(sweep);
+        let combos = expand_grid(sweep)?;
         if combos.is_empty() {
             return Err(CudaLrsiError::InvalidInput("no alpha values".into()));
         }
@@ -222,20 +248,28 @@ impl CudaLrsi {
             .checked_add(param_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaLrsiError::InvalidInput("size overflow".into()))?;
-        if let Ok((free, _)) = mem_get_info() {
-            let headroom = 64usize * 1024 * 1024;
-            if required.saturating_add(headroom) > free {
+        let headroom = 64usize * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaLrsiError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
                 return Err(CudaLrsiError::InvalidInput("insufficient VRAM".into()));
             }
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(&prices).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
-        let d_alphas =
-            DeviceBuffer::from_slice(&alphas).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(&prices)?;
+        let d_alphas = DeviceBuffer::from_slice(&alphas)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len * combos.len())
-                .map_err(|e| CudaLrsiError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(
+                combos
+                    .len()
+                    .checked_mul(len)
+                    .ok_or_else(|| CudaLrsiError::InvalidInput("output size overflow".into()))?,
+            )?
         };
 
         self.launch_batch_kernel(&d_prices, &d_alphas, len, first, combos.len(), &mut d_out)?;
@@ -255,13 +289,7 @@ impl CudaLrsi {
         if len == 0 || n_combos == 0 {
             return Ok(());
         }
-        if len == 0 || n_combos == 0 {
-            return Ok(());
-        }
         if len > i32::MAX as usize || n_combos > i32::MAX as usize || first > i32::MAX as usize {
-            return Err(CudaLrsiError::InvalidInput(
-                "inputs exceed kernel limits".into(),
-            ));
             return Err(CudaLrsiError::InvalidInput(
                 "inputs exceed kernel limits".into(),
             ));
@@ -277,13 +305,23 @@ impl CudaLrsi {
 
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        if grid_x == 0 || block_x == 0 {
+            return Err(CudaLrsiError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
         self.last_batch = Some(BatchKernelSelected::Plain { block_x });
         self.maybe_log_batch_debug();
 
         let func = self
             .module
             .get_function("lrsi_batch_f32")
-            .map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaLrsiError::MissingKernelSymbol { name: "lrsi_batch_f32" })?;
 
         unsafe {
             let mut p_ptr = d_prices.as_device_ptr().as_raw();
@@ -300,9 +338,7 @@ impl CudaLrsi {
                 &mut combos_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -338,11 +374,11 @@ impl CudaLrsi {
             return Err(CudaLrsiError::InvalidInput(
                 "cols/rows must be positive".into(),
             ));
-            return Err(CudaLrsiError::InvalidInput(
-                "cols/rows must be positive".into(),
-            ));
         }
-        if high_tm_f32.len() != cols * rows || low_tm_f32.len() != cols * rows {
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaLrsiError::InvalidInput("cols*rows overflow".into()))?;
+        if high_tm_f32.len() != elems || low_tm_f32.len() != elems {
             return Err(CudaLrsiError::InvalidInput("matrix shape mismatch".into()));
         }
         if !(alpha > 0.0 && alpha < 1.0) {
@@ -350,7 +386,7 @@ impl CudaLrsi {
         }
 
         // Build time-major mid-price and per-series first_valids
-        let mut prices_tm = vec![f32::NAN; cols * rows];
+        let mut prices_tm = vec![f32::NAN; elems];
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv: Option<usize> = None;
@@ -374,31 +410,37 @@ impl CudaLrsi {
         }
 
         // VRAM estimate (inputs + fv + out)
-        let elems = cols
-            .checked_mul(rows)
-            .ok_or_else(|| CudaLrsiError::InvalidInput("overflow".into()))?;
-        let elems = cols
-            .checked_mul(rows)
-            .ok_or_else(|| CudaLrsiError::InvalidInput("overflow".into()))?;
-        let in_bytes = elems * std::mem::size_of::<f32>();
-        let fv_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = elems * std::mem::size_of::<f32>();
-        let required = in_bytes + fv_bytes + out_bytes;
-        if let Ok((free, _)) = mem_get_info() {
-            let head = 64usize * 1024 * 1024;
-            if required.saturating_add(head) > free {
+        let in_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaLrsiError::InvalidInput("prices byte size overflow".into()))?;
+        let fv_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaLrsiError::InvalidInput("first_valid byte size overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaLrsiError::InvalidInput("output byte size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(fv_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaLrsiError::InvalidInput("required VRAM size overflow".into()))?;
+        let head = 64usize * 1024 * 1024;
+        if !Self::will_fit(required, head) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaLrsiError::OutOfMemory {
+                    required,
+                    free,
+                    headroom: head,
+                });
+            } else {
                 return Err(CudaLrsiError::InvalidInput("insufficient VRAM".into()));
             }
         }
 
-        let d_prices_tm =
-            DeviceBuffer::from_slice(&prices_tm).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
-        let d_prices_tm =
-            DeviceBuffer::from_slice(&prices_tm).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
+        let d_prices_tm = DeviceBuffer::from_slice(&prices_tm)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(elems).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(elems)
+                .map_err(CudaLrsiError::Cuda)?
         };
 
         self.launch_many_series_kernel(
@@ -422,11 +464,10 @@ impl CudaLrsi {
         d_first_valids: &DeviceBuffer<i32>,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaLrsiError> {
-        if cols == 0 || rows == 0 { return Ok(()); }
+        if cols == 0 || rows == 0 {
+            return Ok(());
+        }
         if cols > i32::MAX as usize || rows > i32::MAX as usize {
-            return Err(CudaLrsiError::InvalidInput(
-                "inputs exceed kernel limits".into(),
-            ));
             return Err(CudaLrsiError::InvalidInput(
                 "inputs exceed kernel limits".into(),
             ));
@@ -438,13 +479,25 @@ impl CudaLrsi {
         let (block_x, grid_x) = self.pick_block_grid(cols, policy_block, 256);
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        if grid_x == 0 || block_x == 0 {
+            return Err(CudaLrsiError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
         self.last_many = Some(ManySeriesKernelSelected::OneD { block_x });
         self.maybe_log_many_debug();
 
         let func = self
             .module
             .get_function("lrsi_many_series_one_param_f32")
-            .map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaLrsiError::MissingKernelSymbol {
+                name: "lrsi_many_series_one_param_f32",
+            })?;
 
         unsafe {
             let mut p_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -461,26 +514,53 @@ impl CudaLrsi {
                 &mut fv_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
 }
 
-fn expand_grid(r: &LrsiBatchRange) -> Vec<LrsiParams> {
-    let (start, end, step) = r.alpha;
-    if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-        return vec![LrsiParams { alpha: Some(start) }];
+fn expand_grid(r: &LrsiBatchRange) -> Result<Vec<LrsiParams>, CudaLrsiError> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaLrsiError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(CudaLrsiError::InvalidInput(format!(
+                    "invalid alpha range: start={start}, end={end}, step={step}"
+                )));
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
+        let mut x = start;
+        let st = step.abs();
+        while x + 1e-12 >= end {
+            v.push(x);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(CudaLrsiError::InvalidInput(format!(
+                "invalid alpha range: start={start}, end={end}, step={step}"
+            )));
+        }
+        Ok(v)
     }
-    let mut out = Vec::new();
-    let mut x = start;
-    while x <= end + 1e-12 {
-        out.push(LrsiParams { alpha: Some(x) });
-        x += step;
+
+    let alphas = axis_f64(r.alpha)?;
+    let mut out = Vec::with_capacity(alphas.len());
+    for &a in &alphas {
+        out.push(LrsiParams { alpha: Some(a) });
     }
-    out
+    Ok(out)
 }
 
 // ---------- Benches ----------

@@ -19,6 +19,7 @@
 //!   dependencies, lane-wise SIMD is not viable; expected gains are modest and workload-dependent.
 //! - **Batch status**: Row-specific batch kernels not attempted here. A future pass can precompute the ratio
 //!   and a prefix sum once, then fill rows via differences for multi-x speedups without changing outputs.
+//! - **CUDA status**: CUDA batch and many-series wrappers follow the scalar path exactly, synchronize their streams before returning VRAM handles, and expose Python interop via a shared `DeviceArrayF32Py` using CUDA Array Interface v3 and DLPack v1.x.
 //! - **Streaming**: O(1) updates with a mask-based ring buffer; exact division preserved. Matches scalar
 //!   path byte-for-byte. FMA-friendly updates; no unsafe in scalar logic.
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
@@ -28,7 +29,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::mass_wrapper::CudaMass;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -142,8 +143,8 @@ impl<'a> MassInput<'a> {
 
 #[derive(Debug, Error)]
 pub enum MassError {
-    #[error("mass: Empty data provided.")]
-    EmptyData,
+    #[error("mass: Input data slice is empty.")]
+    EmptyInputData,
     #[error("mass: High and low slices must have the same length.")]
     DifferentLengthHL,
     #[error("mass: Invalid period: period = {period}, data length = {data_len}")]
@@ -152,6 +153,12 @@ pub enum MassError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("mass: All values are NaN.")]
     AllValuesNaN,
+    #[error("mass: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("mass: Invalid range expansion: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("mass: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[derive(Clone, Debug)]
@@ -230,7 +237,7 @@ fn mass_prepare<'a>(
     };
 
     if high.is_empty() || low.is_empty() {
-        return Err(MassError::EmptyData);
+        return Err(MassError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MassError::DifferentLengthHL);
@@ -311,9 +318,9 @@ pub fn mass_into_slice(
 ) -> Result<(), MassError> {
     let (high, low, period, first, chosen) = mass_prepare(input, kernel)?;
     if dst.len() != high.len() {
-        return Err(MassError::InvalidPeriod {
-            period: dst.len(),
-            data_len: high.len(),
+        return Err(MassError::OutputLengthMismatch {
+            expected: high.len(),
+            got: dst.len(),
         });
     }
     mass_compute_into(high, low, period, first, chosen, dst);
@@ -723,12 +730,7 @@ pub fn mass_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(MassError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(MassError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -777,19 +779,57 @@ pub struct MassBatchJsOutput {
 }
 
 #[inline(always)]
-fn expand_grid_mass(r: &MassBatchRange) -> Vec<MassParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid_mass(r: &MassBatchRange) -> Result<Vec<MassParams>, MassError> {
+    #[inline]
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, MassError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step).collect();
+            if v.is_empty() {
+                return Err(MassError::InvalidRange { start, end, step });
+            }
+            Ok(v)
+        } else {
+            // Reversed bounds: walk downward including both ends.
+            let mut v = Vec::new();
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                if cur <= end {
+                    break;
+                }
+                match cur.checked_sub(step) {
+                    Some(next) => {
+                        cur = next;
+                    }
+                    None => break,
+                }
+            }
+            if v.is_empty() {
+                Err(MassError::InvalidRange { start, end, step })
+            } else {
+                Ok(v)
+            }
+        }
     }
-    let periods = axis_usize(r.period);
+
+    let periods = axis_usize(r.period)?;
+    if periods.is_empty() {
+        return Err(MassError::InvalidRange {
+            start: r.period.0,
+            end: r.period.1,
+            step: r.period.2,
+        });
+    }
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(MassParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -820,13 +860,7 @@ fn mass_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<MassBatchOutput, MassError> {
-    let combos = expand_grid_mass(sweep);
-    if combos.is_empty() {
-        return Err(MassError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_mass(sweep)?;
 
     if high.is_empty() || low.is_empty() || high.len() != low.len() {
         return Err(MassError::DifferentLengthHL);
@@ -846,6 +880,11 @@ fn mass_batch_inner(
 
     let rows = combos.len();
     let cols = high.len();
+    rows.checked_mul(cols).ok_or(MassError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
     // Use uninitialized memory with proper warmup calculation
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1828,11 +1867,16 @@ pub fn mass_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid_mass(&sweep);
+    let combos =
+        expand_grid_mass(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("mass_batch: output size overflow"))?;
+
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -1902,7 +1946,8 @@ pub fn mass_cuda_batch_dev_py<'py>(
         .collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok((handle, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1940,7 +1985,7 @@ pub fn mass_cuda_many_series_one_param_dev_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(make_device_array_py(device_id, inner)?)
 }
 
 #[cfg(feature = "python")]
@@ -1965,13 +2010,7 @@ fn mass_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<MassParams>, MassError> {
-    let combos = expand_grid_mass(sweep);
-    if combos.is_empty() {
-        return Err(MassError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_mass(sweep)?;
 
     if high.is_empty() || low.is_empty() || high.len() != low.len() {
         return Err(MassError::DifferentLengthHL);
@@ -1990,6 +2029,20 @@ fn mass_batch_inner_into(
     }
 
     let cols = high.len();
+    let rows = combos.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(MassError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(MassError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Initialize NaN prefixes for each row based on warmup period
     // This is necessary because the buffer comes from Python/WASM and wasn't created by our helpers
@@ -2175,11 +2228,16 @@ pub fn mass_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid_mass(&sweep);
+        let combos = expand_grid_mass(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("mass_batch_into: rows*cols overflow"))?;
+
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         mass_batch_inner_into(high, low, &sweep, Kernel::Auto, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

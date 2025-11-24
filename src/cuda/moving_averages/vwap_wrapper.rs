@@ -1,6 +1,12 @@
 #![cfg(feature = "cuda")]
 
-use super::alma_wrapper::DeviceArrayF32;
+// Note: VWAP uses its own device-array handle to carry a Context
+// reference and device id, so that buffers outlive the wrapper and
+// free under a valid CUDA context when needed by Python interop. For
+// compatibility with generic CUDA helpers (e.g., ma_selector), the
+// classic shared handle from ALMA is also returned by the legacy
+// methods.
+use super::alma_wrapper::DeviceArrayF32 as SharedDeviceArrayF32;
 use crate::indicators::moving_averages::vwap::{
     expand_grid_vwap, first_valid_vwap_index, parse_anchor, VwapBatchRange, VwapParams,
 };
@@ -39,6 +45,15 @@ pub enum CudaVwapError {
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
+}
+
+/// VRAM-backed array handle for VWAP (keeps Context alive)
+pub struct VwapDeviceArrayF32 {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
 }
 
 // -------- Kernel selection policy (parity with ALMA/CWMA, simplified for VWAP) --------
@@ -215,6 +230,14 @@ impl CudaVwap {
     }
     #[inline]
     fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Some((free, _)) = Self::device_mem_info() {
+            return required_bytes.saturating_add(headroom_bytes) <= free;
+        }
+        true
+    }
     #[inline]
     fn ensure_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaVwapError> {
         if !Self::mem_check_enabled() { return Ok(()); }
@@ -425,7 +448,7 @@ impl CudaVwap {
         volumes: &[f64],
         prices: &[f64],
         sweep: &VwapBatchRange,
-    ) -> Result<DeviceArrayF32, CudaVwapError> {
+    ) -> Result<SharedDeviceArrayF32, CudaVwapError> {
         let PreparedBatch {
             combos,
             counts,
@@ -457,7 +480,7 @@ impl CudaVwap {
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
-        Self::ensure_fit(required, headroom)?;
+        if !Self::will_fit(required, headroom) { return Err(CudaVwapError::OutOfMemory { required, free: Self::device_mem_info().map(|(f, _)| f).unwrap_or(0), headroom }); }
 
         let d_timestamps = unsafe { DeviceBuffer::from_slice_async(timestamps, &self.stream) }?;
         let d_volumes = unsafe { DeviceBuffer::from_slice_async(&volumes_f32, &self.stream) }?;
@@ -494,11 +517,54 @@ impl CudaVwap {
             series_len,
             n_combos,
         )?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: series_len,
-        })
+        // Synchronous handoff: ensure kernels/copies complete so producers can
+        // omit CAI/DLPack stream semantics cleanly.
+        self.stream.synchronize()?;
+        Ok(SharedDeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
+    }
+
+    /// Same as `vwap_batch_dev` but returns a handle that retains the CUDA
+    /// context and device id for safe interop with Python (DLPack/CAI).
+    pub fn vwap_batch_dev_retaining_ctx(
+        &self,
+        timestamps: &[i64],
+        volumes: &[f64],
+        prices: &[f64],
+        sweep: &VwapBatchRange,
+    ) -> Result<VwapDeviceArrayF32, CudaVwapError> {
+        let PreparedBatch { combos, counts, unit_codes, divisors, first_valids, month_ids, series_len } =
+            Self::prepare_batch_inputs(timestamps, volumes, prices, sweep)?;
+        let n_combos = combos.len();
+        let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
+        let volumes_f32: Vec<f32> = volumes.iter().map(|&v| v as f32).collect();
+
+        let in_bytes = series_len * (std::mem::size_of::<i64>() + 2 * std::mem::size_of::<f32>());
+        let param_bytes = n_combos * (2 * std::mem::size_of::<i32>() + std::mem::size_of::<i64>() + std::mem::size_of::<i32>());
+        let month_bytes = month_ids.as_ref().map(|v| v.len() * 4).unwrap_or(0);
+        let out_bytes = n_combos.checked_mul(series_len)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let required = in_bytes.checked_add(param_bytes)
+            .and_then(|v| v.checked_add(month_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) { return Err(CudaVwapError::OutOfMemory { required, free: Self::device_mem_info().map(|(f, _)| f).unwrap_or(0), headroom }); }
+
+        let d_timestamps = unsafe { DeviceBuffer::from_slice_async(timestamps, &self.stream) }?;
+        let d_volumes = unsafe { DeviceBuffer::from_slice_async(&volumes_f32, &self.stream) }?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(&prices_f32, &self.stream) }?;
+        let d_counts = unsafe { DeviceBuffer::from_slice_async(&counts, &self.stream) }?;
+        let d_unit_codes = unsafe { DeviceBuffer::from_slice_async(&unit_codes, &self.stream) }?;
+        let d_divisors = unsafe { DeviceBuffer::from_slice_async(&divisors, &self.stream) }?;
+        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
+        let mut d_month_ids = if let Some(ids) = month_ids { Some(unsafe { DeviceBuffer::from_slice_async(&ids, &self.stream) }?) } else { None };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
+
+        let month_ptr = d_month_ids.as_mut().map(|buf| buf.as_device_ptr().as_raw()).unwrap_or(0);
+        self.launch_kernel(&d_timestamps, &d_volumes, &d_prices, &d_counts, &d_unit_codes, &d_divisors, &d_first_valids, month_ptr, &mut d_out, series_len, n_combos)?;
+        self.stream.synchronize()?;
+        Ok(VwapDeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len, _ctx: self._context.clone(), device_id: self.device_id })
     }
 
     pub fn vwap_batch_into_host_f32(
@@ -766,7 +832,7 @@ impl CudaVwap {
         cols: usize,
         rows: usize,
         anchor: &str,
-    ) -> Result<DeviceArrayF32, CudaVwapError> {
+    ) -> Result<SharedDeviceArrayF32, CudaVwapError> {
         if cols == 0 || rows == 0 {
             return Err(CudaVwapError::InvalidInput("empty matrix".into()));
         }
@@ -840,7 +906,7 @@ impl CudaVwap {
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
-        Self::ensure_fit(required, headroom)?;
+        if !Self::will_fit(required, headroom) { return Err(CudaVwapError::OutOfMemory { required, free: Self::device_mem_info().map(|(f, _)| f).unwrap_or(0), headroom }); }
 
         // Upload
         let d_timestamps = unsafe { DeviceBuffer::from_slice_async(timestamps, &self.stream) }?;
@@ -869,11 +935,48 @@ impl CudaVwap {
             rows,
             &mut d_out_tm,
         )?;
-        Ok(DeviceArrayF32 {
-            buf: d_out_tm,
-            rows,
-            cols,
-        })
+        self.stream.synchronize()?;
+        Ok(SharedDeviceArrayF32 { buf: d_out_tm, rows, cols })
+    }
+
+    /// Many-series variant returning a handle that retains context for Python interop.
+    pub fn vwap_many_series_one_param_time_major_dev_retaining_ctx(
+        &self,
+        timestamps: &[i64],
+        volumes_tm_f64: &[f64],
+        prices_tm_f64: &[f64],
+        cols: usize,
+        rows: usize,
+        anchor: &str,
+    ) -> Result<VwapDeviceArrayF32, CudaVwapError> {
+        if cols == 0 || rows == 0 { return Err(CudaVwapError::InvalidInput("empty matrix".into())); }
+        if timestamps.len() != rows { return Err(CudaVwapError::InvalidInput("timestamps len != rows".into())); }
+        if volumes_tm_f64.len() != rows * cols || prices_tm_f64.len() != rows * cols {
+            return Err(CudaVwapError::InvalidInput("prices/volumes len != rows*cols".into()));
+        }
+        let (count, unit_char) = parse_anchor(anchor).map_err(|e| CudaVwapError::InvalidInput(e.to_string()))?;
+        let first_valids = Self::compute_first_valids_many_series(timestamps, volumes_tm_f64, cols, rows, count, unit_char)?;
+        let prices_tm_f32: Vec<f32> = prices_tm_f64.iter().map(|&v| v as f32).collect();
+        let volumes_tm_f32: Vec<f32> = volumes_tm_f64.iter().map(|&v| v as f32).collect();
+        let in_bytes_ts = rows.checked_mul(std::mem::size_of::<i64>()).ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let in_bytes_floats = rows.checked_mul(cols).and_then(|v| v.checked_mul(2 * std::mem::size_of::<f32>())).ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let in_bytes_first_valids = cols.checked_mul(std::mem::size_of::<i32>()).ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let in_bytes = in_bytes_ts.checked_add(in_bytes_floats).and_then(|v| v.checked_add(in_bytes_first_valids)).ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let month_bytes = if unit_char == 'M' { rows * std::mem::size_of::<i32>() } else { 0 };
+        let out_bytes = rows.checked_mul(cols).and_then(|v| v.checked_mul(std::mem::size_of::<f32>())).ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let required = in_bytes.checked_add(month_bytes).and_then(|v| v.checked_add(out_bytes)).ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024; if !Self::will_fit(required, headroom) { return Err(CudaVwapError::OutOfMemory { required, free: Self::device_mem_info().map(|(f, _)| f).unwrap_or(0), headroom }); }
+
+        let d_timestamps = unsafe { DeviceBuffer::from_slice_async(timestamps, &self.stream) }?;
+        let d_volumes_tm = unsafe { DeviceBuffer::from_slice_async(&volumes_tm_f32, &self.stream) }?;
+        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(&prices_tm_f32, &self.stream) }?;
+        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
+        let mut d_month_ids = if unit_char == 'M' { let ids = Self::compute_month_ids(timestamps)?; Some(unsafe { DeviceBuffer::from_slice_async(&ids, &self.stream) }?) } else { None };
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows * cols, &self.stream) }?;
+
+        self.launch_many_series_kernel(&d_timestamps, &d_volumes_tm, &d_prices_tm, count, unit_char, &d_first_valids, d_month_ids.as_mut().map(|b| b), cols, rows, &mut d_out_tm)?;
+        self.stream.synchronize()?;
+        Ok(VwapDeviceArrayF32 { buf: d_out_tm, rows, cols, _ctx: self._context.clone(), device_id: self.device_id })
     }
 
     fn launch_many_series_kernel(

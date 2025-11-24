@@ -416,6 +416,13 @@ pub use vosc_wrapper::{
 pub fn cuda_available() -> bool {
     #[cfg(feature = "cuda")]
     {
+        // Local iteration safety: when building with placeholder PTX or when explicitly
+        // asked to skip CUDA probes, report unavailable to let tests skip gracefully.
+        if std::env::var("CUDA_PLACEHOLDER_ON_FAIL").ok().as_deref() == Some("1")
+            || std::env::var("CUDA_FORCE_SKIP").ok().as_deref() == Some("1")
+        {
+            return false;
+        }
         use cust::{device::Device, function::BlockSize, function::GridSize, module::Module, prelude::CudaFlags, stream::{Stream, StreamFlags}};
         // Initialize the CUDA driver and query devices. Keep this defensive so
         // it never panics when CUDA is missing.

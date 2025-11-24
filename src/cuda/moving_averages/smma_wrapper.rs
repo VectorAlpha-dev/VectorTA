@@ -587,15 +587,7 @@ impl CudaSmma {
             .checked_add(fv_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSmmaError::InvalidInput("size overflow in VRAM estimate".into()))?;
-        if let Ok((free, _total)) = mem_get_info() {
-            let headroom = 64usize * 1024 * 1024;
-            if required.saturating_add(headroom) > free {
-                return Err(CudaSmmaError::InvalidInput(format!(
-                    "estimated device memory {:.2} MB exceeds free VRAM",
-                    (required as f64) / (1024.0 * 1024.0)
-                )));
-            }
-        }
+        Self::will_fit(required, 64usize * 1024 * 1024)?;
 
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32).map_err(CudaSmmaError::Cuda)?;
         let d_first_valids = DeviceBuffer::from_slice(&first_valids).map_err(CudaSmmaError::Cuda)?;

@@ -30,22 +30,28 @@ use cust::stream::{Stream, StreamFlags};
 use cust_derive::DeviceCopy;
 use std::env;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaMassError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("mass: out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("mass: missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("mass: invalid input: {0}")]
     InvalidInput(String),
+    #[error("mass: invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("mass: launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("mass: device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("mass: not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaMassError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaMassError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaMassError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaMassError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -80,7 +86,8 @@ pub struct CudaMassPolicy {
 pub struct CudaMass {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaMassPolicy,
     debug_logged: bool,
 }
@@ -108,33 +115,27 @@ fn ds_add(hi: f32, lo: f32, x: f32) -> (f32, f32) {
 
 impl CudaMass {
     pub fn new(device_id: usize) -> Result<Self, CudaMassError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMassError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaMassError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mass_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaMassError::Cuda(e.to_string()))?
-                }
-            }
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| {
+                Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+            })
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaMassPolicy::default(),
             debug_logged: false,
         })
@@ -144,6 +145,14 @@ impl CudaMass {
         self.policy = policy;
     }
 
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
     fn maybe_log_selected(&mut self, which: &str, block_x: u32) {
         if self.debug_logged {
             return;
@@ -151,6 +160,36 @@ impl CudaMass {
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             eprintln!("[DEBUG] MASS {} block_x={} ", which, block_x);
             self.debug_logged = true;
+        }
+    }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaMassError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        match mem_get_info() {
+            Ok((free, _total)) => {
+                let needed = required_bytes.saturating_add(headroom_bytes);
+                if needed > free {
+                    Err(CudaMassError::OutOfMemory {
+                        required: required_bytes,
+                        free,
+                        headroom: headroom_bytes,
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+            Err(e) => Err(CudaMassError::Cuda(e)),
         }
     }
 
@@ -229,12 +268,19 @@ impl CudaMass {
         cols: usize,
         rows: usize,
     ) -> Result<(Vec<F2>, Vec<i32>, Vec<i32>), CudaMassError> {
-        if cols == 0 || rows == 0 { return Err(CudaMassError::InvalidInput("cols/rows zero".into())); }
-        if high_tm.len() != cols * rows || low_tm.len() != cols * rows {
-            return Err(CudaMassError::InvalidInput("time-major inputs wrong length".into()));
+        if cols == 0 || rows == 0 {
+            return Err(CudaMassError::InvalidInput("cols/rows zero".into()));
         }
-        let mut prefix_ratio_tm_ds = vec!(F2::default(); cols * rows + 1);
-        let mut prefix_nan_tm = vec![0i32; cols * rows + 1];
+        let total = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMassError::InvalidInput("grid size overflow".into()))?;
+        if high_tm.len() != total || low_tm.len() != total {
+            return Err(CudaMassError::InvalidInput(
+                "time-major inputs wrong length".into(),
+            ));
+        }
+        let mut prefix_ratio_tm_ds = vec!(F2::default(); total + 1);
+        let mut prefix_nan_tm = vec![0i32; total + 1];
         let mut first_valids = vec![0i32; cols];
 
         let alpha: f32 = 2.0f32 / 10.0f32;
@@ -296,22 +342,19 @@ impl CudaMass {
         if cols == 0 || rows == 0 {
             return Err(CudaMassError::InvalidInput("cols/rows zero".into()));
         }
-        if cols == 0 || rows == 0 {
-            return Err(CudaMassError::InvalidInput("cols/rows zero".into()));
-        }
-        if high_tm.len() != cols * rows || low_tm.len() != cols * rows {
-            return Err(CudaMassError::InvalidInput(
-                "time-major inputs wrong length".into(),
-            ));
+        let total = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMassError::InvalidInput("grid size overflow".into()))?;
+        if high_tm.len() != total || low_tm.len() != total {
             return Err(CudaMassError::InvalidInput(
                 "time-major inputs wrong length".into(),
             ));
         }
-        let mut prefix_nan_tm = vec![0i32; cols * rows + 1];
+        let mut prefix_nan_tm = vec![0i32; total + 1];
         let mut first_valids = vec![0i32; cols];
 
         // Build double prefixes exactly like the original path (time-major flattened)
-        let mut prefix_ratio_tm_f64 = vec![0.0f64; cols * rows + 1];
+        let mut prefix_ratio_tm_f64 = vec![0.0f64; total + 1];
         let alpha = 2.0f64 / 10.0f64;
         let inv_alpha = 1.0f64 - alpha;
 
@@ -383,33 +426,23 @@ impl CudaMass {
         low: &[f32],
         sweep: &MassBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<MassParams>), CudaMassError> {
-        if high.len() != low.len() || high.is_empty() {
-            return Err(CudaMassError::InvalidInput(
-                "mismatched or empty inputs".into(),
-            ));
+        if high.is_empty() || low.is_empty() || high.len() != low.len() {
             return Err(CudaMassError::InvalidInput(
                 "mismatched or empty inputs".into(),
             ));
         }
 
         // Expand parameter grid
-        let combos = expand_mass_combos(sweep);
+        let combos = expand_mass_combos(sweep)?;
         if combos.is_empty() {
             return Err(CudaMassError::InvalidInput(
                 "no parameter combinations".into(),
             ));
-            return Err(CudaMassError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
         }
-        let (prefix_ratio_ds, prefix_nan, first_valid) = Self::precompute_ratio_prefix_one_series_ds(high, low)?;
+        let (prefix_ratio_ds, prefix_nan, first_valid) =
+            Self::precompute_ratio_prefix_one_series_ds(high, low)?;
 
         let len = high.len();
-        let max_period = combos
-            .iter()
-            .map(|c| c.period.unwrap_or(0))
-            .max()
-            .unwrap_or(0);
         let max_period = combos
             .iter()
             .map(|c| c.period.unwrap_or(0))
@@ -423,46 +456,50 @@ impl CudaMass {
             )));
         }
 
-        // VRAM check with headroom
-        let bytes_needed = prefix_ratio_ds.len() * std::mem::size_of::<F2>()
-            + prefix_nan.len() * std::mem::size_of::<i32>()
-            + combos.len() * std::mem::size_of::<i32>()
-            + (len * combos.len()) * std::mem::size_of::<f32>();
-        if let Ok((free, _)) = mem_get_info() {
-            let headroom = 64usize << 20; // ~64MB
-            if bytes_needed + headroom > free {
-                return Err(CudaMassError::InvalidInput(
-                    "insufficient device memory for mass batch".into(),
-                ));
-                return Err(CudaMassError::InvalidInput(
-                    "insufficient device memory for mass batch".into(),
-                ));
-            }
-        }
+        // VRAM check with headroom and checked arithmetic
+        let size_f2 = std::mem::size_of::<F2>();
+        let size_i32 = std::mem::size_of::<i32>();
+        let size_f32 = std::mem::size_of::<f32>();
+
+        let ratio_bytes = prefix_ratio_ds
+            .len()
+            .checked_mul(size_f2)
+            .ok_or_else(|| CudaMassError::InvalidInput("size overflow (ratio)".into()))?;
+        let nan_bytes = prefix_nan
+            .len()
+            .checked_mul(size_i32)
+            .ok_or_else(|| CudaMassError::InvalidInput("size overflow (nan prefix)".into()))?;
+        let periods_bytes = combos
+            .len()
+            .checked_mul(size_i32)
+            .ok_or_else(|| CudaMassError::InvalidInput("size overflow (periods)".into()))?;
+        let out_elems = len
+            .checked_mul(combos.len())
+            .ok_or_else(|| CudaMassError::InvalidInput("output size overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(size_f32)
+            .ok_or_else(|| CudaMassError::InvalidInput("size overflow (output bytes)".into()))?;
+
+        let bytes_needed = ratio_bytes
+            .checked_add(nan_bytes)
+            .and_then(|v| v.checked_add(periods_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaMassError::InvalidInput("total VRAM size overflow".into()))?;
+
+        let headroom = 64usize << 20; // ~64MB
+        Self::will_fit(bytes_needed, headroom)?;
 
         // Upload inputs
-        let d_prefix_ratio = DeviceBuffer::from_slice(&prefix_ratio_ds)
-            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
-        let d_prefix_nan = DeviceBuffer::from_slice(&prefix_nan)
-            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        let d_prefix_ratio = DeviceBuffer::from_slice(&prefix_ratio_ds)?;
+        let d_prefix_nan = DeviceBuffer::from_slice(&prefix_nan)?;
         let periods_i32: Vec<i32> = combos
             .iter()
             .map(|c| c.period.unwrap_or(0) as i32)
             .collect();
-        let periods_i32: Vec<i32> = combos
-            .iter()
-            .map(|c| c.period.unwrap_or(0) as i32)
-            .collect();
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = DeviceBuffer::zeroed(len * combos.len())
-            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+        let mut d_out: DeviceBuffer<f32> = DeviceBuffer::zeroed(out_elems)?;
 
         // Launch config
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
-            _ => 256,
-        };
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
             _ => 256,
@@ -474,13 +511,14 @@ impl CudaMass {
 
         // Chunk Y if needed
         let mut launched = 0usize;
+        const MAX_GRID_Y: usize = 65_535;
         while launched < combos.len() {
-            let chunk = (combos.len() - launched).min(65_535);
+            let chunk = (combos.len() - launched).min(MAX_GRID_Y);
             let func = self
                 .module
                 .get_function("mass_batch_f32")
-                .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
-            let grid: GridSize = (grid_x, chunk as u32, 1).into();
+                .map_err(|_| CudaMassError::MissingKernelSymbol { name: "mass_batch_f32" })?;
+            let grid: GridSize = (grid_x.max(1), chunk as u32, 1).into();
             unsafe {
                 launch!(
                     func<<<grid, block, 0, stream>>>(
@@ -493,13 +531,11 @@ impl CudaMass {
                         d_out.as_device_ptr().offset((launched * len) as isize)
                     )
                 )
-                .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+                ?;
             }
             launched += chunk;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
@@ -519,66 +555,108 @@ impl CudaMass {
         params: &MassParams,
     ) -> Result<DeviceArrayF32, CudaMassError> {
         let period = params.period.unwrap_or(0);
-        if period == 0 { return Err(CudaMassError::InvalidInput("period=0".into())); }
+        if period == 0 {
+            return Err(CudaMassError::InvalidInput("period=0".into()));
+        }
+        let total = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMassError::InvalidInput("grid size overflow".into()))?;
+        if high_tm.len() != total || low_tm.len() != total {
+            return Err(CudaMassError::InvalidInput(
+                "time-major inputs wrong length".into(),
+            ));
+        }
+
+        // Host buffer used only for upload; still guard VRAM for the final DeviceBuffer.
+        let bytes_out = total
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMassError::InvalidInput("output bytes overflow".into()))?;
+        Self::will_fit(bytes_out, 64usize << 20)?;
+
         // Fallback to CPU compute for correctness, then upload to device.
-        let mut host_tm = vec![0f32; cols * rows];
+        let mut host_tm = vec![0f32; total];
         for s in 0..cols {
             let mut h = vec![f64::NAN; rows];
             let mut l = vec![f64::NAN; rows];
-            for t in 0..rows { h[t] = high_tm[t * cols + s] as f64; l[t] = low_tm[t * cols + s] as f64; }
+            for t in 0..rows {
+                h[t] = high_tm[t * cols + s] as f64;
+                l[t] = low_tm[t * cols + s] as f64;
+            }
             let p = MassParams { period: Some(period) };
             let input = MassInput { data: MassData::Slices { high: &h, low: &l }, params: p };
-            let out = mass_with_kernel(&input, Kernel::Scalar).map_err(|e| CudaMassError::Cuda(format!("cpu mass error: {}", e)))?;
-            for t in 0..rows { host_tm[t * cols + s] = out.values[t] as f32; }
+            let out = mass_with_kernel(&input, Kernel::Scalar)
+                .map_err(|e| CudaMassError::InvalidInput(format!("cpu mass error: {}", e)))?;
+            for t in 0..rows {
+                host_tm[t * cols + s] = out.values[t] as f32;
+            }
         }
 
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total) }?;
         unsafe {
             d_out_tm
-                .async_copy_from(host_tm.as_slice(), &self.stream)
-                .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+                .async_copy_from(host_tm.as_slice(), &self.stream)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
     }
 }
 
 // ----------------------- helpers -----------------------
 
-fn expand_mass_combos(r: &MassBatchRange) -> Vec<MassParams> {
-    let (start, end, step) = r.period;
-    let mut v = Vec::new();
-    if step == 0 {
-        v.push(MassParams {
-            period: Some(start),
-        });
-        return v;
+fn expand_mass_combos(r: &MassBatchRange) -> Result<Vec<MassParams>, CudaMassError> {
+    #[inline]
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, CudaMassError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step).collect();
+            if v.is_empty() {
+                return Err(CudaMassError::InvalidInput(
+                    "invalid range (empty expansion)".into(),
+                ));
+            }
+            Ok(v)
+        } else {
+            // Reversed bounds supported: walk downward including both ends.
+            let mut v = Vec::new();
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                if cur <= end {
+                    break;
+                }
+                match cur.checked_sub(step) {
+                    Some(next) => {
+                        cur = next;
+                    }
+                    None => break,
+                }
+            }
+            if v.is_empty() {
+                Err(CudaMassError::InvalidInput(
+                    "invalid range (empty expansion)".into(),
+                ))
+            } else {
+                Ok(v)
+            }
+        }
     }
-    if start == 0 || end == 0 || start > end || step == 0 {
-        v.push(MassParams {
-            period: Some(start),
-        });
-        return v;
+
+    let periods = axis_usize(r.period)?;
+    if periods.is_empty() {
+        return Err(CudaMassError::InvalidInput(
+            "invalid range (empty expansion)".into(),
+        ));
     }
-    if start == 0 || end == 0 || start > end || step == 0 {
-        return v;
-    }
-    let mut p = start;
-    while p <= end {
+    let mut v = Vec::with_capacity(periods.len());
+    for p in periods {
         v.push(MassParams { period: Some(p) });
-        match p.checked_add(step) {
-            Some(nxt) => p = nxt,
-            None => break,
-        }
-        match p.checked_add(step) {
-            Some(nxt) => p = nxt,
-            None => break,
-        }
     }
-    v
+    Ok(v)
 }
 
 // ----------------------- benches registration -----------------------

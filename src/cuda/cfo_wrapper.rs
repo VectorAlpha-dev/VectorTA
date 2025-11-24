@@ -25,22 +25,32 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaCfoError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
+    #[error("invalid range (usize): start={start} end={end} step={step}")]
+    InvalidRangeUsize { start: usize, end: usize, step: usize },
+    #[error("invalid range (f64): start={start} end={end} step={step}")]
+    InvalidRangeF64 { start: f64, end: f64, step: f64 },
 }
-
-impl fmt::Display for CudaCfoError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaCfoError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaCfoError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaCfoError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -71,43 +81,60 @@ impl Default for CudaCfoPolicy {
 pub struct CudaCfo {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaCfoPolicy,
     last_batch_block: Option<u32>,
     last_many_block: Option<u32>,
 }
 
 impl CudaCfo {
+    fn will_fit(required_bytes: usize, headroom: usize) -> Result<(), CudaCfoError> {
+        if let Ok((free, _)) = mem_get_info() {
+            if required_bytes > free.saturating_sub(headroom) {
+                return Err(CudaCfoError::OutOfMemory { required: required_bytes, free, headroom });
+            }
+        }
+        Ok(())
+    }
     pub fn new(device_id: usize) -> Result<Self, CudaCfoError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cfo_kernel.ptx"));
-        let module = Module::from_ptx(
+        let module = match Module::from_ptx(
             ptx,
             &[
                 ModuleJitOption::DetermineTargetFromContext,
                 ModuleJitOption::OptLevel(OptLevel::O2),
             ],
-        )
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        ) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
+            }
+        };
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaCfoPolicy::default(),
             last_batch_block: None,
             last_many_block: None,
         })
     }
+
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     pub fn set_policy(&mut self, policy: CudaCfoPolicy) {
         self.policy = policy;
@@ -131,33 +158,21 @@ impl CudaCfo {
         let (ps, pw) = build_prefixes_from_first(data_f32, first_valid);
 
         // VRAM: data + prefixes (2*f64 arrays) + params + out + headroom
-        let bytes = len * 4
-            + (len + 1) * std::mem::size_of::<f64>() * 2
-            + n_combos * (4 + 4)
-            + len * n_combos * 4
-            + 64 * 1024 * 1024;
-        if let Ok((free, _)) = mem_get_info() {
-            if bytes > free {
-                return Err(CudaCfoError::InvalidInput(format!(
-                    "estimated device memory {:.2} MB exceeds free VRAM",
-                    (bytes as f64) / (1024.0 * 1024.0)
-                )));
-            }
-        }
+        let bytes_data = len.checked_mul(std::mem::size_of::<f32>()).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        let bytes_prefix = (len + 1).checked_mul(std::mem::size_of::<f64>()).and_then(|b| b.checked_mul(2)).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        let bytes_params = n_combos.checked_mul(std::mem::size_of::<i32>() + std::mem::size_of::<f32>()).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        let bytes_out = len.checked_mul(n_combos).and_then(|e| e.checked_mul(std::mem::size_of::<f32>())).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024usize;
+        let required = bytes_data.checked_add(bytes_prefix).and_then(|v| v.checked_add(bytes_params)).and_then(|v| v.checked_add(bytes_out)).and_then(|v| v.checked_add(headroom)).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, headroom)?;
 
-        let d_data = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_ps: DeviceBuffer<f64> = DeviceBuffer::from_slice(&ps)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_pw: DeviceBuffer<f64> = DeviceBuffer::from_slice(&pw)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_periods =
-            DeviceBuffer::from_slice(&periods).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_scalars =
-            DeviceBuffer::from_slice(&scalars).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_data = DeviceBuffer::from_slice(data_f32)?;
+        let d_ps: DeviceBuffer<f64> = DeviceBuffer::from_slice(&ps)?;
+        let d_pw: DeviceBuffer<f64> = DeviceBuffer::from_slice(&pw)?;
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let d_scalars = DeviceBuffer::from_slice(&scalars)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len * n_combos)
-                .map_err(|e| CudaCfoError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(len * n_combos)?
         };
 
         self.launch_batch_kernel(
@@ -172,6 +187,8 @@ impl CudaCfo {
             &mut d_out,
         )?;
 
+        // synchronize producing stream to simplify CAI interop
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -198,7 +215,7 @@ impl CudaCfo {
         let func = self
             .module
             .get_function("cfo_batch_f32")
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCfoError::MissingKernelSymbol { name: "cfo_batch_f32" })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
@@ -209,6 +226,14 @@ impl CudaCfo {
         for (start, count) in grid_y_chunks(n_combos as usize) {
             let grid: GridSize = (grid_x.max(1), count as u32, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
+            // Optional validation against device limits
+            let dev = Device::get_device(self.device_id)?;
+            let max_gx = dev.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as u32;
+            let max_gy = dev.get_attribute(cust::device::DeviceAttribute::MaxGridDimY)? as u32;
+            let max_bx = dev.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)? as u32;
+            if grid_x > max_gx || (count as u32) > max_gy || block_x > max_bx {
+                return Err(CudaCfoError::LaunchConfigTooLarge { gx: grid_x, gy: count as u32, gz: 1, bx: block_x, by: 1, bz: 1 });
+            }
             unsafe {
                 let mut p_data = d_data.as_device_ptr().as_raw();
                 let mut p_ps = d_ps.as_device_ptr().as_raw();
@@ -230,9 +255,7 @@ impl CudaCfo {
                     &mut p_n as *mut _ as *mut c_void,
                     &mut p_out as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
         }
         Ok(())
@@ -254,31 +277,21 @@ impl CudaCfo {
         let (ps_tm, pw_tm) = build_prefixes_time_major(data_tm_f32, cols, rows, &first_valids);
 
         // VRAM estimate
-        let elems = cols * rows;
-        let bytes = elems * 4
-            + (elems + 1) * std::mem::size_of::<f64>() * 2
-            + cols * 4
-            + rows * cols * 4
-            + 64 * 1024 * 1024;
-        if let Ok((free, _)) = mem_get_info() {
-            if bytes > free {
-                return Err(CudaCfoError::InvalidInput(format!(
-                    "estimated device memory {:.2} MB exceeds free VRAM",
-                    (bytes as f64) / (1024.0 * 1024.0)
-                )));
-            }
-        }
+        let elems = cols.checked_mul(rows).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        let bytes_data = elems.checked_mul(std::mem::size_of::<f32>()).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        let bytes_prefix = (elems + 1).checked_mul(std::mem::size_of::<f64>()).and_then(|b| b.checked_mul(2)).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        let bytes_fv = cols.checked_mul(std::mem::size_of::<i32>()).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        let bytes_out = elems.checked_mul(std::mem::size_of::<f32>()).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024usize;
+        let required = bytes_data.checked_add(bytes_prefix).and_then(|v| v.checked_add(bytes_fv)).and_then(|v| v.checked_add(bytes_out)).and_then(|v| v.checked_add(headroom)).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, headroom)?;
 
-        let d_data = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_ps: DeviceBuffer<f64> = DeviceBuffer::from_slice(&ps_tm)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_pw: DeviceBuffer<f64> = DeviceBuffer::from_slice(&pw_tm)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_data = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_ps: DeviceBuffer<f64> = DeviceBuffer::from_slice(&ps_tm)?;
+        let d_pw: DeviceBuffer<f64> = DeviceBuffer::from_slice(&pw_tm)?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(elems).map_err(|e| CudaCfoError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(elems)?
         };
 
         self.launch_many_series_kernel(
@@ -293,6 +306,7 @@ impl CudaCfo {
             &mut d_out,
         )?;
 
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -319,7 +333,7 @@ impl CudaCfo {
         let func = self
             .module
             .get_function("cfo_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCfoError::MissingKernelSymbol { name: "cfo_many_series_one_param_time_major_f32" })?;
 
         // Original mapping: stride over time (x), grid.y enumerates series
         let block_x = match self.policy.many_series {
@@ -351,9 +365,7 @@ impl CudaCfo {
                 &mut p_scalar as *mut _ as *mut c_void,
                 &mut p_out as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -373,12 +385,7 @@ impl CudaCfo {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaCfoError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaCfoError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = expand_grid(sweep)?;
 
         let mut periods = Vec::with_capacity(combos.len());
         let mut scalars = Vec::with_capacity(combos.len());
@@ -414,7 +421,7 @@ impl CudaCfo {
                 "num_series or series_len is zero".into(),
             ));
         }
-        if data_tm_f32.len() != cols * rows {
+        if data_tm_f32.len() != cols.checked_mul(rows).ok_or(CudaCfoError::InvalidInput("size overflow".into()))? {
             return Err(CudaCfoError::InvalidInput(format!(
                 "data length {} != cols*rows {}",
                 data_tm_f32.len(),
@@ -508,37 +515,34 @@ fn build_prefixes_time_major(
 
 // ---- Grid expand (mirror indicator) ----
 
-fn expand_grid(r: &CfoBatchRange) -> Vec<CfoParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
+fn expand_grid(r: &CfoBatchRange) -> Result<Vec<CfoParams>, CudaCfoError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaCfoError> {
+        if step == 0 || start == end { return Ok(vec![start]); }
+        let mut vals = Vec::new();
+        if start < end {
+            let mut cur = start; while cur <= end { vals.push(cur); if let Some(n) = cur.checked_add(step) { cur = n } else { break } }
+        } else {
+            let mut cur = start; while cur >= end { vals.push(cur); cur = cur.saturating_sub(step); if vals.last() == Some(&cur) { break; } }
+            if let Some(&last) = vals.last() { if last < end { vals.pop(); } }
         }
-        (start..=end).step_by(step).collect()
+        if vals.is_empty() { return Err(CudaCfoError::InvalidRangeUsize { start, end, step }); }
+        Ok(vals)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
-        }
-        let mut out = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            out.push(x);
-            x += step;
-        }
-        out
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaCfoError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return Ok(vec![start]); }
+        let mut vals = Vec::new();
+        let delta = if start <= end { step.abs() } else { -step.abs() };
+        if delta.is_sign_positive() { let mut x = start; while x <= end + 1e-12 { vals.push(x); x += delta; if !x.is_finite() { break; } } }
+        else { let mut x = start; while x >= end - 1e-12 { vals.push(x); x += delta; if !x.is_finite() { break; } } }
+        if vals.is_empty() { return Err(CudaCfoError::InvalidRangeF64 { start, end, step }); }
+        Ok(vals)
     }
-    let periods = axis_usize(r.period);
-    let scalars = axis_f64(r.scalar);
-    let mut out = Vec::with_capacity(periods.len() * scalars.len());
-    for &p in &periods {
-        for &s in &scalars {
-            out.push(CfoParams {
-                period: Some(p),
-                scalar: Some(s),
-            });
-        }
-    }
-    out
+    let periods = axis_usize(r.period)?;
+    let scalars = axis_f64(r.scalar)?;
+    let combos_len = periods.len().checked_mul(scalars.len()).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+    let mut out = Vec::with_capacity(combos_len);
+    for &p in &periods { for &s in &scalars { out.push(CfoParams { period: Some(p), scalar: Some(s) }); } }
+    Ok(out)
 }
 
 #[inline(always)]

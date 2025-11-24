@@ -20,6 +20,7 @@
 //!   AVX2 outperforms scalar by >25% and AVX512 is also faster than scalar (slightly behind AVX2 on this CPU).
 //! - Scalar path optimized: loop-jammed accumulators, trig/denominator precompute, fused state pass; matches tests.
 //! - Batch: row-specific SIMD not implemented; potential future win is caching trig tables for identical periods across rows.
+//! - CUDA/Python: CUDA wrapper with typed errors plus Python CAI v3/DLPack v1.x zero-copy interop; VRAM handles retain device context and id.
 //! - Memory: uses alloc_with_nan_prefix/make_uninit_matrix/init_matrix_prefixes; no O(N) temporaries for outputs.
 
 #[cfg(feature = "python")]
@@ -30,6 +31,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context as CudaContext;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc as StdArc;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -209,14 +214,22 @@ impl CorrelationCycleBuilder {
 
 #[derive(Debug, Error)]
 pub enum CorrelationCycleError {
-    #[error("correlation_cycle: Empty data provided.")]
-    EmptyData,
+    #[error("correlation_cycle: input data slice is empty")]
+    EmptyInputData,
     #[error("correlation_cycle: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("correlation_cycle: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("correlation_cycle: All values are NaN.")]
     AllValuesNaN,
+    #[error("correlation_cycle: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("correlation_cycle: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("correlation_cycle: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("correlation_cycle: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -234,7 +247,7 @@ pub fn correlation_cycle_with_kernel(
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
-        return Err(CorrelationCycleError::EmptyData);
+        return Err(CorrelationCycleError::EmptyInputData);
     }
     let first = data
         .iter()
@@ -311,7 +324,7 @@ pub fn correlation_cycle_into(
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
-        return Err(CorrelationCycleError::EmptyData);
+        return Err(CorrelationCycleError::EmptyInputData);
     }
 
     if out_real.len() != len
@@ -319,10 +332,11 @@ pub fn correlation_cycle_into(
         || out_angle.len() != len
         || out_state.len() != len
     {
-        return Err(CorrelationCycleError::InvalidPeriod {
-            period: input.get_period(),
-            data_len: len,
-        });
+        let got = *[out_real.len(), out_imag.len(), out_angle.len(), out_state.len()]
+            .iter()
+            .min()
+            .unwrap_or(&0);
+        return Err(CorrelationCycleError::OutputLengthMismatch { expected: len, got });
     }
 
     let first = data
@@ -394,15 +408,19 @@ pub fn correlation_cycle_into_slices(
 ) -> Result<(), CorrelationCycleError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
+    if len == 0 {
+        return Err(CorrelationCycleError::EmptyInputData);
+    }
     if dst_real.len() != len
         || dst_imag.len() != len
         || dst_angle.len() != len
         || dst_state.len() != len
     {
-        return Err(CorrelationCycleError::InvalidPeriod {
-            period: dst_real.len(),
-            data_len: len,
-        });
+        let got = *[dst_real.len(), dst_imag.len(), dst_angle.len(), dst_state.len()]
+            .iter()
+            .min()
+            .unwrap_or(&0);
+        return Err(CorrelationCycleError::OutputLengthMismatch { expected: len, got });
     }
     let first = data
         .iter()
@@ -1488,12 +1506,7 @@ pub fn correlation_cycle_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(CorrelationCycleError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(CorrelationCycleError::InvalidKernelForBatch(k)),
     };
 
     let simd = match kernel {
@@ -1542,39 +1555,82 @@ impl CorrelationCycleBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &CorrelationCycleBatchRange) -> Vec<CorrelationCycleParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &CorrelationCycleBatchRange) -> Result<Vec<CorrelationCycleParams>, CorrelationCycleError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CorrelationCycleError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut vals = Vec::new();
+        if start < end {
+            let mut v = start;
+            loop {
+                vals.push(v);
+                if v >= end { break; }
+                let next = match v.checked_add(step) { Some(n) => n, None => break };
+                if next == v { break; }
+                v = next;
+            }
+        } else {
+            let mut v = start;
+            loop {
+                vals.push(v);
+                if v <= end { break; }
+                let next = v.saturating_sub(step);
+                if next == v { break; }
+                v = next;
+            }
+        }
+        if vals.is_empty() {
+            return Err(CorrelationCycleError::InvalidRange { start, end, step });
+        }
+        Ok(vals)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CorrelationCycleError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        let mut vals = Vec::new();
+        if start <= end {
+            let mut x = start;
+            loop {
+                vals.push(x);
+                if x >= end { break; }
+                let next = x + step;
+                if !next.is_finite() || next == x { break; }
+                x = next;
+                if x > end + 1e-12 { break; }
+            }
+        } else {
+            let mut x = start;
+            loop {
+                vals.push(x);
+                if x <= end { break; }
+                let next = x - step.abs();
+                if !next.is_finite() || next == x { break; }
+                x = next;
+                if x < end - 1e-12 { break; }
+            }
         }
-        v
+        if vals.is_empty() {
+            return Err(CorrelationCycleError::InvalidRange { start: start as usize, end: end as usize, step: step.abs() as usize });
+        }
+        Ok(vals)
     }
 
-    let periods = axis_usize(r.period);
-    let thresholds = axis_f64(r.threshold);
+    let periods = axis_usize(r.period)?;
+    let thresholds = axis_f64(r.threshold)?;
 
-    let mut out = Vec::with_capacity(periods.len() * thresholds.len());
+    let cap = periods
+        .len()
+        .checked_mul(thresholds.len())
+        .ok_or_else(|| CorrelationCycleError::InvalidInput("rows*cols overflow".into()))?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &t in &thresholds {
-            out.push(CorrelationCycleParams {
-                period: Some(p),
-                threshold: Some(t),
-            });
+            out.push(CorrelationCycleParams { period: Some(p), threshold: Some(t) });
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1602,13 +1658,10 @@ fn correlation_cycle_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<CorrelationCycleBatchOutput, CorrelationCycleError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(CorrelationCycleError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+    if data.is_empty() {
+        return Err(CorrelationCycleError::EmptyInputData);
     }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -1624,6 +1677,9 @@ fn correlation_cycle_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| CorrelationCycleError::InvalidInput("rows*cols overflow".into()))?;
 
     // Step 1: Allocate uninitialized matrices for each output
     let mut real_mu = make_uninit_matrix(rows, cols);
@@ -1632,10 +1688,13 @@ fn correlation_cycle_batch_inner(
     let mut state_mu = make_uninit_matrix(rows, cols);
 
     // Step 2: Calculate warmup periods for each row (each parameter combination)
-    let ria_warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+    let ria_warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first.checked_add(c.period.unwrap()).unwrap_or(usize::MAX))
+        .collect();
     let st_warm: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.period.unwrap() + 1)
+        .map(|c| first.checked_add(c.period.unwrap()).and_then(|v| v.checked_add(1)).unwrap_or(usize::MAX))
         .collect();
 
     // Step 3: Initialize NaN prefixes for each row
@@ -1775,13 +1834,10 @@ fn correlation_cycle_batch_inner_into(
     out_angle: &mut [f64],
     out_state: &mut [f64],
 ) -> Result<Vec<CorrelationCycleParams>, CorrelationCycleError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(CorrelationCycleError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+    if data.is_empty() {
+        return Err(CorrelationCycleError::EmptyInputData);
     }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -1797,10 +1853,20 @@ fn correlation_cycle_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    assert_eq!(out_real.len(), rows * cols);
-    assert_eq!(out_imag.len(), rows * cols);
-    assert_eq!(out_angle.len(), rows * cols);
-    assert_eq!(out_state.len(), rows * cols);
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| CorrelationCycleError::InvalidInput("rows*cols overflow".into()))?;
+    if out_real.len() != expected
+        || out_imag.len() != expected
+        || out_angle.len() != expected
+        || out_state.len() != expected
+    {
+        let got = *[out_real.len(), out_imag.len(), out_angle.len(), out_state.len()]
+            .iter()
+            .min()
+            .unwrap_or(&0);
+        return Err(CorrelationCycleError::OutputLengthMismatch { expected, got });
+    }
 
     let do_row = |row: usize, r: &mut [f64], im: &mut [f64], an: &mut [f64], st: &mut [f64]| unsafe {
         let p = combos[row].period.unwrap();
@@ -2757,6 +2823,339 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
 
 // ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32CorrelationCycle", unsendable)]
+pub struct DeviceArrayF32CcPy {
+    pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
+    pub(crate) ctx: StdArc<CudaContext>,
+    pub(crate) device_id: i32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32CcPy {
+    #[new]
+    fn py_new() -> PyResult<Self> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "use correlation_cycle_cuda_* factory functions to create this type",
+        ))
+    }
+
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let inner = &self.inner;
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr_val: usize = if inner.rows == 0 || inner.cols == 0 {
+            0
+        } else {
+            inner.buf.as_device_ptr().as_raw() as usize
+        };
+        d.set_item("data", (ptr_val, false))?;
+        // Stream omitted: producing kernels synchronize before returning.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        Ok((2, self.device_id))
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<i64>,
+        max_version: Option<(i32, i32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<pyo3::PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        // Basic validation hooks following Array API semantics.
+        if let Some((dev_ty, dev_id)) = dl_device {
+            if dev_ty != 2 || dev_id != self.device_id {
+                return Err(PyValueError::new_err(
+                    "dl_device does not match correlation_cycle CUDA buffer device",
+                ));
+            }
+        }
+        if let Some(true) = copy {
+            return Err(PyValueError::new_err(
+                "copy=True not supported for correlation_cycle DLPack export",
+            ));
+        }
+        if let Some(s) = stream {
+            // Producer is fully synchronized; reject reserved zero stream.
+            if s == 0 {
+                return Err(PyValueError::new_err(
+                    "stream=0 is reserved and not supported by this producer",
+                ));
+            }
+        }
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        #[repr(C)]
+        #[derive(Copy, Clone)]
+        struct DLPackVersion {
+            major: u32,
+            minor: u32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+
+        struct HolderV0 {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: crate::cuda::moving_averages::DeviceArrayF32,
+            ctx: StdArc<CudaContext>,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: crate::cuda::moving_averages::DeviceArrayF32,
+            ctx: StdArc<CudaContext>,
+        }
+
+        extern "C" fn deleter_v0(mt: *mut DLManagedTensor) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut HolderV0;
+                if !holder_ptr.is_null() {
+                    let raw = (*holder_ptr).ctx.get_inner();
+                    let _ = cust::sys::cuCtxSetCurrent(raw.as_raw());
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+        extern "C" fn deleter_v1(mt: *mut DLManagedTensorVersioned) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut HolderV1;
+                if !holder_ptr.is_null() {
+                    let raw = (*holder_ptr).ctx.get_inner();
+                    let _ = cust::sys::cuCtxSetCurrent(raw.as_raw());
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_legacy(
+            capsule: *mut pyo3::ffi::PyObject,
+        ) {
+            let name = b"dltensor\0";
+            let ptr =
+                pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+        unsafe extern "C" fn capsule_destructor_versioned(
+            capsule: *mut pyo3::ffi::PyObject,
+        ) {
+            let name = b"dltensor_versioned\0";
+            let ptr =
+                pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensorVersioned;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        // Move VRAM handle into the holder so lifetime is tied to the capsule.
+        let dummy = cust::memory::DeviceBuffer::<f32>::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            crate::cuda::moving_averages::DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+        );
+
+        let want_v1 = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    version: DLPackVersion { major: 1, minor: 0 },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_v1),
+                    flags: 0,
+                    dl_tensor: DLTensor {
+                        data: if inner.rows == 0 || inner.cols == 0 {
+                            std::ptr::null_mut()
+                        } else {
+                            inner.buf.as_device_ptr().as_raw()
+                                as *mut std::ffi::c_void
+                        },
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: self.device_id,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                },
+                shape: [inner.rows as i64, inner.cols as i64],
+                strides: [inner.cols as i64, 1],
+                arr: inner,
+                ctx: self.ctx.clone(),
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            holder.managed.manager_ctx =
+                &mut *holder as *mut HolderV1 as *mut std::ffi::c_void;
+            let _keep = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor_versioned),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { deleter_v1(mt_ptr) };
+                return Err(PyValueError::new_err(
+                    "failed to create DLPack v1.x capsule",
+                ));
+            }
+            Ok(unsafe { pyo3::PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mut holder = Box::new(HolderV0 {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: if inner.rows == 0 || inner.cols == 0 {
+                            std::ptr::null_mut()
+                        } else {
+                            inner.buf.as_device_ptr().as_raw()
+                                as *mut std::ffi::c_void
+                        },
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: self.device_id,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_v0),
+                },
+                shape: [inner.rows as i64, inner.cols as i64],
+                strides: [inner.cols as i64, 1],
+                arr: inner,
+                ctx: self.ctx.clone(),
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            holder.managed.manager_ctx =
+                &mut *holder as *mut HolderV0 as *mut std::ffi::c_void;
+            let _keep = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor_legacy),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { deleter_v0(mt_ptr) };
+                return Err(PyValueError::new_err(
+                    "failed to create DLPack capsule",
+                ));
+            }
+            Ok(unsafe { pyo3::PyObject::from_owned_ptr(py, capsule) })
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl DeviceArrayF32CcPy {
+    pub fn new_from_rust(
+        inner: crate::cuda::moving_averages::DeviceArrayF32,
+        ctx: StdArc<CudaContext>,
+        device_id: u32,
+    ) -> Self {
+        Self {
+            inner,
+            ctx,
+            device_id: device_id as i32,
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "correlation_cycle_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, threshold_range, device_id=0))]
 pub fn correlation_cycle_cuda_batch_dev_py(
@@ -2766,10 +3165,10 @@ pub fn correlation_cycle_cuda_batch_dev_py(
     threshold_range: (f64, f64, f64),
     device_id: usize,
 ) -> PyResult<(
-    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
-    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
-    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
-    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
+    DeviceArrayF32CcPy,
+    DeviceArrayF32CcPy,
+    DeviceArrayF32CcPy,
+    DeviceArrayF32CcPy,
 )> {
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaCorrelationCycle;
@@ -2781,17 +3180,20 @@ pub fn correlation_cycle_cuda_batch_dev_py(
         period: period_range,
         threshold: threshold_range,
     };
-    let quad = py.allow_threads(|| {
+    let (quad, ctx, dev_id) = py.allow_threads(|| {
         let mut cuda = CudaCorrelationCycle::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.correlation_cycle_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.ctx();
+        let dev_id = cuda.device_id();
+        let quad = cuda.correlation_cycle_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((quad, ctx, dev_id))
     })?;
     Ok((
-        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.real },
-        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.imag },
-        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.angle },
-        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.state },
+        DeviceArrayF32CcPy::new_from_rust(quad.real, ctx.clone(), dev_id),
+        DeviceArrayF32CcPy::new_from_rust(quad.imag, ctx.clone(), dev_id),
+        DeviceArrayF32CcPy::new_from_rust(quad.angle, ctx.clone(), dev_id),
+        DeviceArrayF32CcPy::new_from_rust(quad.state, ctx, dev_id),
     ))
 }
 
@@ -2805,10 +3207,10 @@ pub fn correlation_cycle_cuda_many_series_one_param_dev_py(
     threshold: f64,
     device_id: usize,
 ) -> PyResult<(
-    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
-    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
-    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
-    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
+    DeviceArrayF32CcPy,
+    DeviceArrayF32CcPy,
+    DeviceArrayF32CcPy,
+    DeviceArrayF32CcPy,
 )> {
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaCorrelationCycle;
@@ -2823,21 +3225,30 @@ pub fn correlation_cycle_cuda_many_series_one_param_dev_py(
     let rows = shape[0];
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if flat.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
+    }
     let params = CorrelationCycleParams {
         period: Some(period),
         threshold: Some(threshold),
     };
-    let quad = py.allow_threads(|| {
+    let (quad, ctx, dev_id) = py.allow_threads(|| {
         let mut cuda = CudaCorrelationCycle::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.correlation_cycle_many_series_one_param_time_major_dev(flat, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.ctx();
+        let dev_id = cuda.device_id();
+        let quad = cuda.correlation_cycle_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((quad, ctx, dev_id))
     })?;
     Ok((
-        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.real },
-        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.imag },
-        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.angle },
-        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.state },
+        DeviceArrayF32CcPy::new_from_rust(quad.real, ctx.clone(), dev_id),
+        DeviceArrayF32CcPy::new_from_rust(quad.imag, ctx.clone(), dev_id),
+        DeviceArrayF32CcPy::new_from_rust(quad.angle, ctx.clone(), dev_id),
+        DeviceArrayF32CcPy::new_from_rust(quad.state, ctx, dev_id),
     ))
 }
 
@@ -2896,15 +3307,18 @@ pub fn correlation_cycle_batch_py<'py>(
         threshold: threshold_range.unwrap_or((9.0, 9.0, 0.0)),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
     // Preallocate flat outputs
-    let out_real = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let out_imag = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let out_angle = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let out_state = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_real = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let out_imag = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let out_angle = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let out_state = unsafe { PyArray1::<f64>::new(py, [total], false) };
 
     let mut_r = unsafe { out_real.as_slice_mut()? };
     let mut_im = unsafe { out_imag.as_slice_mut()? };

@@ -1,5 +1,7 @@
 //! # Rolling Deviation Indicator
 //!
+//! Decision log: SIMD/CUDA status — SIMD enabled for stddev/mode; CUDA wrapper for stddev only; batch stddev uses prefix sums. Numerical outputs unchanged; warmups match scalar.
+//!
 //! Computes rolling Standard Deviation, Mean Absolute Deviation, or Median Absolute Deviation.
 //! This indicator provides three different measures of variability in a data series:
 //!
@@ -71,7 +73,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::deviation_wrapper::CudaDeviation;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -253,14 +255,22 @@ impl DeviationBuilder {
 /// Deviation indicator errors.
 #[derive(Debug, Error)]
 pub enum DeviationError {
+    #[error("deviation: empty input data")]
+    EmptyInputData,
     #[error("deviation: All values are NaN.")]
     AllValuesNaN,
     #[error("deviation: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("deviation: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("deviation: output length mismatch: expected={expected} got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
     #[error("deviation: Invalid devtype (must be 0, 1, or 2). devtype={devtype}")]
     InvalidDevType { devtype: usize },
+    #[error("deviation: invalid range expansion start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("deviation: non-batch kernel passed to batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("deviation: Calculation error: {0}")]
     CalculationError(String),
 }
@@ -289,10 +299,7 @@ fn deviation_prepare<'a>(
     let data = input.as_slice();
     let len = data.len();
     if len == 0 {
-        // mirror ALMA EmptyInputData semantics
-        return Err(DeviationError::CalculationError(
-            "EmptyData: No input data provided".to_string(),
-        ));
+        return Err(DeviationError::EmptyInputData);
     }
     let first = data
         .iter()
@@ -407,11 +414,10 @@ pub fn deviation_into_slice(
 ) -> Result<(), DeviationError> {
     let (data, period, devtype, first, chosen) = deviation_prepare(input, kernel)?;
     if dst.len() != data.len() {
-        return Err(DeviationError::CalculationError(format!(
-            "Output buffer length mismatch: expected {}, got {}",
-            data.len(),
-            dst.len()
-        )));
+        return Err(DeviationError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
     deviation_compute_into(data, period, devtype, first, chosen, dst)?;
     // finalize warmup NaNs after compute
@@ -801,12 +807,7 @@ pub fn deviation_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(DeviationError::CalculationError(format!(
-                "Non-batch kernel {:?} provided to batch function",
-                k
-            )));
-        }
+        _ => return Err(DeviationError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -842,60 +843,67 @@ impl DeviationBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &DeviationBatchRange) -> Vec<DeviationParams> {
-    // Calculate capacity upfront
-    let period_count = if r.period.2 == 0 || r.period.0 == r.period.1 {
-        1
-    } else {
-        ((r.period.1 - r.period.0) / r.period.2) + 1
-    };
-
-    let devtype_count = if r.devtype.2 == 0 || r.devtype.0 == r.devtype.1 {
-        1
-    } else {
-        ((r.devtype.1 - r.devtype.0) / r.devtype.2) + 1
-    };
-
-    let mut out = Vec::with_capacity(period_count * devtype_count);
-
-    // Generate periods inline
-    if r.period.2 == 0 || r.period.0 == r.period.1 {
-        let p = r.period.0;
-        // Generate devtypes inline
-        if r.devtype.2 == 0 || r.devtype.0 == r.devtype.1 {
-            out.push(DeviationParams {
-                period: Some(p),
-                devtype: Some(r.devtype.0),
-            });
-        } else {
-            let mut d = r.devtype.0;
-            while d <= r.devtype.1 {
-                out.push(DeviationParams {
-                    period: Some(p),
-                    devtype: Some(d),
-                });
-                d += r.devtype.2;
-            }
+    // Robust expansion: zero step => static; support reversed bounds; checked capacity.
+    fn expand_axis(start: usize, end: usize, step: usize) -> Option<Vec<usize>> {
+        if step == 0 {
+            return Some(vec![start]);
         }
-    } else {
-        let mut p = r.period.0;
-        while p <= r.period.1 {
-            // Generate devtypes inline
-            if r.devtype.2 == 0 || r.devtype.0 == r.devtype.1 {
-                out.push(DeviationParams {
-                    period: Some(p),
-                    devtype: Some(r.devtype.0),
-                });
-            } else {
-                let mut d = r.devtype.0;
-                while d <= r.devtype.1 {
-                    out.push(DeviationParams {
-                        period: Some(p),
-                        devtype: Some(d),
-                    });
-                    d += r.devtype.2;
+        let mut v = Vec::new();
+        if start <= end {
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                match cur.checked_add(step) {
+                    Some(n) => {
+                        if n == cur {
+                            break;
+                        }
+                        cur = n;
+                    }
+                    None => break,
                 }
             }
-            p += r.period.2;
+        } else {
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                if cur <= end {
+                    break;
+                }
+                match cur.checked_sub(step) {
+                    Some(n) => cur = n,
+                    None => break,
+                }
+                if cur < end {
+                    break;
+                }
+            }
+        }
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
+    }
+    let periods = match expand_axis(r.period.0, r.period.1, r.period.2) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    let devtypes = match expand_axis(r.devtype.0, r.devtype.1, r.devtype.2) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    let cap = match periods.len().checked_mul(devtypes.len()) {
+        Some(c) => c,
+        None => 0,
+    };
+    let mut out = Vec::with_capacity(cap);
+    for &p in &periods {
+        for &d in &devtypes {
+            out.push(DeviationParams {
+                period: Some(p),
+                devtype: Some(d),
+            });
         }
     }
     out
@@ -911,9 +919,10 @@ fn deviation_batch_inner_into(
 ) -> Result<Vec<DeviationParams>, DeviationError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(DeviationError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(DeviationError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
     let first = data
@@ -930,7 +939,19 @@ fn deviation_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    assert_eq!(out.len(), rows * cols, "out buffer wrong size");
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(DeviationError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(DeviationError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Treat out as uninit and stamp NaN prefixes using your helper, just like ALMA matrix path
     let out_mu = unsafe {
@@ -1061,8 +1082,22 @@ fn deviation_batch_inner(
     parallel: bool,
 ) -> Result<DeviationBatchOutput, DeviationError> {
     let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(DeviationError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
+    }
     let rows = combos.len();
     let cols = data.len();
+    let _expected = rows
+        .checked_mul(cols)
+        .ok_or(DeviationError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
     // ALMA-style matrix allocation
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -3618,8 +3653,11 @@ pub fn deviation_batch_py<'py>(
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
@@ -3678,7 +3716,8 @@ pub fn deviation_cuda_batch_dev_py<'py>(
     let devtypes: Vec<u64> = combos.iter().map(|p| p.devtype.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
     dict.set_item("devtypes", devtypes.into_pyarray(py))?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    let dev = make_device_array_py(device_id, inner)?;
+    Ok((dev, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3712,7 +3751,7 @@ pub fn deviation_cuda_many_series_one_param_dev_py<'py>(
         cuda.deviation_many_series_one_param_time_major_dev(slice_tm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 #[cfg(feature = "wasm")]
@@ -3872,7 +3911,10 @@ pub fn deviation_batch_into(
         let combos = expand_grid(&sweep);
         let rows = combos.len();
         let cols = len;
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow in deviation_batch_into"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         deviation_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)

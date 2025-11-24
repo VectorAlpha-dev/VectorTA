@@ -24,22 +24,27 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CudaDpoError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaDpoError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaDpoError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaDpoError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaDpoError {}
 
 // ---------------------- Host mirror for CUDA float2 ----------------------
 // 8-byte aligned to match device-side float2 alignment.
@@ -77,7 +82,8 @@ impl Default for CudaDpoPolicy {
 pub struct CudaDpo {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaDpoPolicy,
     last_batch_block: Option<u32>,
     last_many_block: Option<u32>,
@@ -85,48 +91,61 @@ pub struct CudaDpo {
 
 impl CudaDpo {
     pub fn new(device_id: usize) -> Result<Self, CudaDpoError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/dpo_kernel.ptx"));
-        // Keep default (O4) JIT optimization and determine target from current context.
-        let module = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-            .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+        // Determine target from current context; keep defaults otherwise
+        let module = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaDpoPolicy::default(),
             last_batch_block: None,
             last_many_block: None,
         })
     }
 
+    #[inline]
+    pub fn context_arc_clone(&self) -> Arc<Context> { self.context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Option<(usize, usize)> {
+        if let Ok((free, total)) = mem_get_info() {
+            let free = free.saturating_sub(headroom_bytes);
+            return Some((free, total));
+        }
+        None
+    }
+
     // Upload helper: page-locked (pinned) + async copy for large slices
     fn upload_slice<T: DeviceCopy + Clone>(&self, h: &[T]) -> Result<DeviceBuffer<T>, CudaDpoError> {
         use std::mem::size_of;
         const PIN_THRESHOLD_BYTES: usize = 1 << 20; // 1 MiB
-        let bytes = h.len() * size_of::<T>();
+        let bytes = h
+            .len()
+            .checked_mul(size_of::<T>())
+            .ok_or_else(|| CudaDpoError::InvalidInput("size overflow computing upload bytes".into()))?;
         if bytes >= PIN_THRESHOLD_BYTES {
-            let h_locked =
-                LockedBuffer::from_slice(h).map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+            let h_locked = LockedBuffer::from_slice(h).map_err(CudaDpoError::Cuda)?;
             unsafe {
                 let mut d = DeviceBuffer::uninitialized_async(h.len(), &self.stream)
-                    .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+                    .map_err(CudaDpoError::Cuda)?;
                 d.async_copy_from(&h_locked, &self.stream)
-                    .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+                    .map_err(CudaDpoError::Cuda)?;
                 Ok(d)
             }
         } else {
             unsafe {
-                DeviceBuffer::from_slice_async(h, &self.stream)
-                    .map_err(|e| CudaDpoError::Cuda(e.to_string()))
+                DeviceBuffer::from_slice_async(h, &self.stream).map_err(CudaDpoError::Cuda)
             }
         }
     }
@@ -152,15 +171,18 @@ impl CudaDpo {
         // Build dual-fp32 (float2) prefix over [first_valid..)
         let ps = build_prefixes_from_first(data_f32, first_valid);
 
-        // VRAM estimate
-        let bytes = len * 4 + (len + 1) * 8 + n_combos * 4 + len * n_combos * 4 + 64 * 1024 * 1024;
-        let bytes = len * 4 + (len + 1) * 8 + n_combos * 4 + len * n_combos * 4 + 64 * 1024 * 1024;
-        if let Ok((free, _)) = mem_get_info() {
+        // VRAM estimate with checked arithmetic and headroom
+        let headroom = 64 * 1024 * 1024; // 64 MiB safety margin
+        let bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .and_then(|b| b.checked_add((len + 1).checked_mul(std::mem::size_of::<Float2>())?))
+            .and_then(|b| b.checked_add(n_combos.checked_mul(std::mem::size_of::<i32>())?))
+            .and_then(|b| b.checked_add(len.checked_mul(n_combos)?.checked_mul(std::mem::size_of::<f32>())?))
+            .and_then(|b| b.checked_add(headroom))
+            .ok_or_else(|| CudaDpoError::InvalidInput("size overflow computing allocation".into()))?;
+        if let Some((free, _total)) = Self::will_fit(bytes, headroom) {
             if bytes > free {
-                return Err(CudaDpoError::InvalidInput(format!(
-                    "estimated device memory {:.2} MB exceeds free VRAM",
-                    (bytes as f64) / (1024.0 * 1024.0)
-                )));
+                return Err(CudaDpoError::OutOfMemory { required: bytes, free, headroom });
             }
         }
 
@@ -169,7 +191,7 @@ impl CudaDpo {
         let d_periods = self.upload_slice(&periods)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(len * n_combos, &self.stream)
-                .map_err(|e| CudaDpoError::Cuda(e.to_string()))?
+                .map_err(CudaDpoError::Cuda)?
         };
 
         self.launch_batch_kernel(
@@ -181,6 +203,8 @@ impl CudaDpo {
             n_combos as i32,
             &mut d_out,
         )?;
+        // Ensure completion so Python CAI can omit a stream key
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
     }
@@ -202,7 +226,7 @@ impl CudaDpo {
         let func = self
             .module
             .get_function("dpo_batch_f32")
-            .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaDpoError::MissingKernelSymbol { name: "dpo_batch_f32" })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
@@ -213,6 +237,7 @@ impl CudaDpo {
         for (start, count) in grid_y_chunks(n_combos as usize) {
             let grid: GridSize = (grid_x.max(1), count as u32, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
+            self.validate_launch(grid_x.max(1), count as u32, 1, block_x, 1, 1)?;
             unsafe {
                 let mut p_data = d_data.as_device_ptr().as_raw();
                 let mut p_ps = d_ps.as_device_ptr().as_raw();
@@ -230,9 +255,7 @@ impl CudaDpo {
                     &mut p_n as *mut _ as *mut c_void,
                     &mut p_out as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
         }
         Ok(())
@@ -253,15 +276,19 @@ impl CudaDpo {
         // Build time-major dual-fp32 prefix P per series
         let ps_tm = build_prefixes_time_major(data_tm_f32, cols, rows, &first_valids);
 
-        // VRAM estimate
-        let elems = cols * rows;
-        let bytes = elems * 4 + (elems + 1) * 8 + cols * 4 + rows * cols * 4 + 64 * 1024 * 1024;
-        if let Ok((free, _)) = mem_get_info() {
+        // VRAM estimate (checked) + headroom
+        let elems = cols.checked_mul(rows).ok_or_else(|| CudaDpoError::InvalidInput("cols*rows overflow".into()))?;
+        let headroom = 64 * 1024 * 1024; // 64 MiB safety margin
+        let bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .and_then(|b| b.checked_add((elems + 1).checked_mul(std::mem::size_of::<Float2>())?))
+            .and_then(|b| b.checked_add(cols.checked_mul(std::mem::size_of::<i32>())?))
+            .and_then(|b| b.checked_add(elems.checked_mul(std::mem::size_of::<f32>())?))
+            .and_then(|b| b.checked_add(headroom))
+            .ok_or_else(|| CudaDpoError::InvalidInput("size overflow computing allocation".into()))?;
+        if let Some((free, _total)) = Self::will_fit(bytes, headroom) {
             if bytes > free {
-                return Err(CudaDpoError::InvalidInput(format!(
-                    "estimated device memory {:.2} MB exceeds free VRAM",
-                    (bytes as f64) / (1024.0 * 1024.0)
-                )));
+                return Err(CudaDpoError::OutOfMemory { required: bytes, free, headroom });
             }
         }
 
@@ -270,7 +297,7 @@ impl CudaDpo {
         let d_fv = self.upload_slice(&first_valids)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(elems, &self.stream)
-                .map_err(|e| CudaDpoError::Cuda(e.to_string()))?
+                .map_err(CudaDpoError::Cuda)?
         };
 
         self.launch_many_series_kernel(
@@ -282,6 +309,8 @@ impl CudaDpo {
             period as i32,
             &mut d_out,
         )?;
+        // Ensure completion so Python CAI can omit a stream key
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
@@ -306,7 +335,7 @@ impl CudaDpo {
         let func = self
             .module
             .get_function("dpo_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaDpoError::MissingKernelSymbol { name: "dpo_many_series_one_param_time_major_f32" })?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
@@ -316,6 +345,7 @@ impl CudaDpo {
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(grid_x.max(1), cols as u32, 1, block_x, 1, 1)?;
 
         unsafe {
             let mut p_data = d_data.as_device_ptr().as_raw();
@@ -334,9 +364,39 @@ impl CudaDpo {
                 &mut p_period as *mut _ as *mut c_void,
                 &mut p_out as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn validate_launch(&self, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32) -> Result<(), CudaDpoError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads || bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
+            return Err(CudaDpoError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
         }
         Ok(())
     }
@@ -356,14 +416,9 @@ impl CudaDpo {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaDpoError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = expand_grid(sweep);
+        let combos = expand_grid(sweep)?;
         if combos.is_empty() {
-            return Err(CudaDpoError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-            return Err(CudaDpoError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
+            return Err(CudaDpoError::InvalidInput("no parameter combinations".into()));
         }
 
         let mut periods = Vec::with_capacity(combos.len());
@@ -488,22 +543,53 @@ fn build_prefixes_time_major(
 
 // ---- Grid expand (mirror indicator) ----
 
-fn expand_grid(r: &DpoBatchRange) -> Vec<DpoParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &DpoBatchRange) -> Result<Vec<DpoParams>, CudaDpoError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaDpoError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        if step == 0 || start == end {
-            return vec![start];
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.max(1);
+            while x <= end {
+                v.push(x);
+                match x.checked_add(st) {
+                    Some(nx) => x = nx,
+                    None => break,
+                }
+            }
+            if v.is_empty() {
+                return Err(CudaDpoError::InvalidInput(format!(
+                    "invalid period range: start={} end={} step={} (empty expansion)",
+                    start, end, step
+                )));
+            }
+            return Ok(v);
         }
-        (start..=end).step_by(step).collect()
+        // reversed bounds: walk downward in `step` units
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(CudaDpoError::InvalidInput(format!(
+                "invalid period range: start={} end={} step={} (empty expansion)",
+                start, end, step
+            )));
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(DpoParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]

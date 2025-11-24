@@ -12,13 +12,16 @@
 //!
 //! ## Developer Status
 //! - **SIMD Kernels**: AVX2/AVX512 delegate to scalar (IIR dependency across time prevents lane speedup)
+//! - **CUDA**: Wrapper mirrors scalar/streaming semantics; FP32 GPU paths are validated against f64 CPU within loose tolerances.
+//! - **Python**: CUDA handles use shared DeviceArrayF32Py (CAI v3 + DLPack v1.x) with primary-context lifetime guards.
 //! - **Streaming**: O(1) performance
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 //! - **Batch**: Row kernels reuse a precomputed mid-price series for all rows
 //!
 //! Decision: Streaming kernel mirrors scalar FMA ordering and uses a branchless
 //! CU/CD split; outputs match the batch scalar path. SIMD remains delegated due
-//! to IIR time dependency.
+//! to IIR time dependency; CUDA paths are enabled but validated against the
+//! scalar reference with relaxed FP32 tolerances.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -28,6 +31,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -158,16 +163,20 @@ impl LrsiBuilder {
 
 #[derive(Debug, Error)]
 pub enum LrsiError {
-    #[error("lrsi: Empty data provided.")]
-    EmptyData,
+    #[error("lrsi: Empty input data slice.")]
+    EmptyInputData,
     #[error("lrsi: Invalid alpha: alpha = {alpha}. Must be between 0 and 1.")]
     InvalidAlpha { alpha: f64 },
     #[error("lrsi: All values are NaN.")]
     AllValuesNaN,
     #[error("lrsi: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("lrsi: Output length mismatch: expected = {expected}, provided = {provided}")]
-    OutputLengthMismatch { expected: usize, provided: usize },
+    #[error("lrsi: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("lrsi: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("lrsi: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 #[inline]
@@ -191,12 +200,12 @@ pub fn lrsi_with_kernel(input: &LrsiInput, kernel: Kernel) -> Result<LrsiOutput,
         LrsiData::Candles { candles } => {
             let high = candles
                 .select_candle_field("high")
-                .map_err(|_| LrsiError::EmptyData)?;
+                .map_err(|_| LrsiError::EmptyInputData)?;
             let low = candles
                 .select_candle_field("low")
-                .map_err(|_| LrsiError::EmptyData)?;
+                .map_err(|_| LrsiError::EmptyInputData)?;
             if high.len() != low.len() {
-                return Err(LrsiError::EmptyData);
+                return Err(LrsiError::EmptyInputData);
             }
             (high, low)
         }
@@ -204,7 +213,7 @@ pub fn lrsi_with_kernel(input: &LrsiInput, kernel: Kernel) -> Result<LrsiOutput,
     };
 
     if high.is_empty() || low.is_empty() {
-        return Err(LrsiError::EmptyData);
+        return Err(LrsiError::EmptyInputData);
     }
 
     let alpha = input.get_alpha();
@@ -266,12 +275,12 @@ pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Resu
         LrsiData::Candles { candles } => {
             let high = candles
                 .select_candle_field("high")
-                .map_err(|_| LrsiError::EmptyData)?;
+                .map_err(|_| LrsiError::EmptyInputData)?;
             let low = candles
                 .select_candle_field("low")
-                .map_err(|_| LrsiError::EmptyData)?;
+                .map_err(|_| LrsiError::EmptyInputData)?;
             if high.len() != low.len() {
-                return Err(LrsiError::EmptyData);
+                return Err(LrsiError::EmptyInputData);
             }
             (high, low)
         }
@@ -299,7 +308,7 @@ pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Resu
     if dst.len() != n {
         return Err(LrsiError::OutputLengthMismatch {
             expected: n,
-            provided: dst.len(),
+            got: dst.len(),
         });
     }
 
@@ -314,10 +323,7 @@ pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Resu
         Kernel::Auto => detect_best_kernel(),
         // Reject batch kernels in single-row calculations
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => {
-            return Err(LrsiError::NotEnoughValidData {
-                needed: 2,
-                valid: 1,
-            });
+            return Err(LrsiError::InvalidKernelForBatch(kern));
         }
         other => other,
     };
@@ -713,12 +719,12 @@ impl LrsiBatchBuilder {
     pub fn apply_candles(self, c: &Candles) -> Result<LrsiBatchOutput, LrsiError> {
         let high = c
             .select_candle_field("high")
-            .map_err(|_| LrsiError::EmptyData)?;
+            .map_err(|_| LrsiError::EmptyInputData)?;
         let low = c
             .select_candle_field("low")
-            .map_err(|_| LrsiError::EmptyData)?;
+            .map_err(|_| LrsiError::EmptyInputData)?;
         if high.len() != low.len() {
-            return Err(LrsiError::EmptyData);
+            return Err(LrsiError::EmptyInputData);
         }
         self.apply_slices(high, low)
     }
@@ -739,7 +745,7 @@ pub fn lrsi_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(LrsiError::EmptyData),
+        other => return Err(LrsiError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -773,27 +779,55 @@ impl LrsiBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &LrsiBatchRange) -> Vec<LrsiParams> {
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+fn expand_grid(r: &LrsiBatchRange) -> Result<Vec<LrsiParams>, LrsiError> {
+    fn axis_f64(
+        (start, end, step): (f64, f64, f64),
+    ) -> Result<Vec<f64>, LrsiError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(LrsiError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
+        }
+        // Reversed bounds
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
+        let st = step.abs();
+        while x + 1e-12 >= end {
             v.push(x);
-            x += step;
+            x -= st;
         }
-        v
+        if v.is_empty() {
+            return Err(LrsiError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
 
-    let alphas = axis_f64(r.alpha);
+    let alphas = axis_f64(r.alpha)?;
 
     let mut out = Vec::with_capacity(alphas.len());
     for &a in &alphas {
         out.push(LrsiParams { alpha: Some(a) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -824,19 +858,30 @@ fn lrsi_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<LrsiBatchOutput, LrsiError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(LrsiError::EmptyData);
+        return Err(LrsiError::InvalidRange {
+            start: sweep.alpha.0.to_string(),
+            end: sweep.alpha.1.to_string(),
+            step: sweep.alpha.2.to_string(),
+        });
     }
     if high.is_empty() || low.is_empty() {
-        return Err(LrsiError::EmptyData);
+        return Err(LrsiError::EmptyInputData);
     }
     if high.len() != low.len() {
-        return Err(LrsiError::EmptyData);
+        return Err(LrsiError::EmptyInputData);
     }
 
     let cols = high.len();
     let rows = combos.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(LrsiError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
 
     // Find first valid price
     let first = (0..cols)
@@ -863,7 +908,7 @@ fn lrsi_batch_inner(
     let resolved = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k if k.is_batch() => k,
-        _ => Kernel::ScalarBatch,
+        other => return Err(LrsiError::InvalidKernelForBatch(other)),
     };
     let row_kernel = match resolved {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -981,7 +1026,6 @@ pub fn lrsi_batch_unified_js(
     let sweep = LrsiBatchRange {
         alpha: config.alpha_range,
     };
-
     let result = lrsi_batch_with_kernel(high, low, &sweep, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1083,10 +1127,14 @@ pub fn lrsi_batch_into(
         let sweep = LrsiBatchRange {
             alpha: (alpha_start, alpha_end, alpha_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow in lrsi_batch"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         let row_kernel = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -1931,16 +1979,20 @@ fn lrsi_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<LrsiParams>, LrsiError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(LrsiError::EmptyData);
+        return Err(LrsiError::InvalidRange {
+            start: sweep.alpha.0.to_string(),
+            end: sweep.alpha.1.to_string(),
+            step: sweep.alpha.2.to_string(),
+        });
     }
 
     if high.is_empty() || low.is_empty() {
-        return Err(LrsiError::EmptyData);
+        return Err(LrsiError::EmptyInputData);
     }
     if high.len() != low.len() {
-        return Err(LrsiError::EmptyData);
+        return Err(LrsiError::EmptyInputData);
     }
 
     // Precompute mid-price once for all rows and find first valid index
@@ -1959,7 +2011,19 @@ fn lrsi_batch_inner_into(
 
     let rows = combos.len();
     let cols = high.len();
-    debug_assert_eq!(out.len(), rows * cols);
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(LrsiError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
+    if out.len() != expected {
+        return Err(LrsiError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Work through MaybeUninit to avoid UB on uninitialized cells
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
@@ -2070,7 +2134,7 @@ pub fn lrsi_batch_py<'py>(
     let h = high.as_slice()?;
     let l = low.as_slice()?;
     let sweep = LrsiBatchRange { alpha: alpha_range };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = h.len();
 
@@ -2117,7 +2181,7 @@ pub fn lrsi_cuda_batch_dev_py(
     low_f32: numpy::PyReadonlyArray1<'_, f32>,
     alpha_range: (f64, f64, f64),
     device_id: usize,
-) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::CudaLrsi;
     if !cuda_available() {
@@ -2135,7 +2199,8 @@ pub fn lrsi_cuda_batch_dev_py(
         cuda.lrsi_batch_dev(h, l, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2147,7 +2212,7 @@ pub fn lrsi_cuda_many_series_one_param_dev_py(
     low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     alpha: f64,
     device_id: usize,
-) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::CudaLrsi;
     use numpy::PyUntypedArrayMethods;
@@ -2167,5 +2232,6 @@ pub fn lrsi_cuda_many_series_one_param_dev_py(
         cuda.lrsi_many_series_one_param_time_major_dev(h, l, cols, rows, alpha)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }

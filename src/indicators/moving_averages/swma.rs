@@ -47,10 +47,6 @@ use crate::cuda::cuda_available;
 use crate::cuda::moving_averages::CudaSwma;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -61,6 +57,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -2163,17 +2161,18 @@ pub fn swma_cuda_batch_dev_py(
     };
     let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
 
-    let (inner, ctx, dev) = py
+    let (inner, dev) = py
         .allow_threads(|| -> Result<_, crate::cuda::moving_averages::swma_wrapper::CudaSwmaError> {
             let cuda = CudaSwma::new(device_id)?;
             let arr = cuda.swma_batch_dev(&data_f32, &sweep)?;
-            let ctx = cuda.context_arc();
             let dev = cuda.device_id() as u32;
-            Ok((arr, ctx, dev))
+            Ok((arr, dev))
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(DeviceArrayF32SwmaPy { inner: Some(inner), ctx: Some(ctx), device_id: dev })
+    let pc_guard = PrimaryCtxGuard::new(dev)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(DeviceArrayF32SwmaPy { inner: Some(inner), device_id: dev, pc_guard })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2198,18 +2197,19 @@ pub fn swma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (inner, ctx, dev) = py
+    let (inner, dev) = py
         .allow_threads(|| -> Result<_, crate::cuda::moving_averages::swma_wrapper::CudaSwmaError> {
             let cuda = CudaSwma::new(device_id)?;
             let arr =
                 cuda.swma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)?;
-            let ctx = cuda.context_arc();
             let dev = cuda.device_id() as u32;
-            Ok((arr, ctx, dev))
+            Ok((arr, dev))
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(DeviceArrayF32SwmaPy { inner: Some(inner), ctx: Some(ctx), device_id: dev })
+    let pc_guard = PrimaryCtxGuard::new(dev)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(DeviceArrayF32SwmaPy { inner: Some(inner), device_id: dev, pc_guard })
 }
 
 // ---------------- SWMA Python device handle (CAI v3 + DLPack) ----------------
@@ -2217,8 +2217,37 @@ pub fn swma_cuda_many_series_one_param_dev_py(
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Swma", unsendable)]
 pub struct DeviceArrayF32SwmaPy {
     pub(crate) inner: Option<DeviceArrayF32>,
-    pub(crate) ctx: Option<Arc<Context>>, // keep context alive for VRAM handle
     pub(crate) device_id: u32,
+    pub(crate) pc_guard: PrimaryCtxGuard,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+pub struct PrimaryCtxGuard {
+    dev: i32,
+    ctx: cust::sys::CUcontext,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl PrimaryCtxGuard {
+    fn new(device_id: u32) -> Result<Self, cust::error::CudaError> {
+        unsafe {
+            let mut ctx: cust::sys::CUcontext = std::ptr::null_mut();
+            let dev = device_id as i32;
+            cust::sys::cuDevicePrimaryCtxRetain(&mut ctx as *mut _, dev)
+                .result()
+                .map_err(|e| cust::error::CudaError::UnknownError { msg: format!("cuDevicePrimaryCtxRetain: {:?}", e) })?;
+            Ok(PrimaryCtxGuard { dev, ctx })
+        }
+    }
+    #[inline]
+    unsafe fn push_current(&self) {
+        let _ = cust::sys::cuCtxSetCurrent(self.ctx);
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl Drop for PrimaryCtxGuard {
+    fn drop(&mut self) { unsafe { let _ = cust::sys::cuDevicePrimaryCtxRelease(self.dev); } }
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2240,23 +2269,36 @@ impl DeviceArrayF32SwmaPy {
                 std::mem::size_of::<f32>(),
             ),
         )?;
-        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        let ptr_val: usize = if inner.rows == 0 || inner.cols == 0 { 0 } else { inner.device_ptr() as usize };
+        d.set_item("data", (ptr_val, false))?;
         // Producing stream is synchronized in the wrapper; omit 'stream' per CAI v3
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
-        let inner = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
         Ok((2, self.device_id as i32))
     }
 
-    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<i64>,
+        max_version: Option<(i32, i32)>,
+        dl_device: Option<&PyAny>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
         use std::os::raw::c_char;
         use std::ptr::null_mut;
+
+        if let Some(dev_obj) = dl_device {
+            if let Ok(tuple) = dev_obj.extract::<(i32, i32)>() {
+                if tuple.0 != 2 || tuple.1 != self.device_id as i32 {
+                    return Err(PyValueError::new_err("__dlpack__: device mismatch"));
+                }
+            }
+        }
 
         #[repr(C)]
         struct DLDataType { code: u8, bits: u8, lanes: u16 }
@@ -2270,7 +2312,7 @@ impl DeviceArrayF32SwmaPy {
             dtype: DLDataType,
             shape: *mut i64,
             strides: *mut i64,
-            byte_offset: u64,
+            byte_offset: usize,
         }
         #[repr(C)]
         struct DLManagedTensor {
@@ -2278,21 +2320,45 @@ impl DeviceArrayF32SwmaPy {
             manager_ctx: *mut std::ffi::c_void,
             deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
         }
+        #[repr(C)]
+        struct DLPackVersion { major: i32, minor: i32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: i32,
+            dl_tensor: DLTensor,
+        }
 
-        struct Holder {
+        struct HolderV0 {
             managed: DLManagedTensor,
             shape: [i64; 2],
             strides: [i64; 2],
             arr: DeviceArrayF32,
+            pc: PrimaryCtxGuard,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32,
+            pc: PrimaryCtxGuard,
         }
 
         extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
             if mt.is_null() { return; }
             unsafe {
-                let holder_ptr = (*mt).manager_ctx as *mut Holder;
-                if !holder_ptr.is_null() {
-                    drop(Box::from_raw(holder_ptr));
-                }
+                let holder_ptr = (*mt).manager_ctx as *mut HolderV0;
+                if !holder_ptr.is_null() { (*holder_ptr).pc.push_current(); drop(Box::from_raw(holder_ptr)); }
+            }
+        }
+
+        extern "C" fn dl_managed_deleter_v1(mt: *mut DLManagedTensorVersioned) {
+            if mt.is_null() { return; }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut HolderV1;
+                if !holder_ptr.is_null() { (*holder_ptr).pc.push_current(); drop(Box::from_raw(holder_ptr)); }
             }
         }
 
@@ -2310,46 +2376,74 @@ impl DeviceArrayF32SwmaPy {
             .inner
             .take()
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
-
-        let mut holder = Box::new(Holder {
-            managed: DLManagedTensor {
-                dl_tensor: DLTensor {
-                    data: inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
-                    device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
-                    ndim: 2,
-                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                    shape: std::ptr::null_mut(),
-                    strides: std::ptr::null_mut(),
-                    byte_offset: 0,
+        let want_v1 = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    version: DLPackVersion { major: 1, minor: 0 },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(dl_managed_deleter_v1),
+                    flags: 0,
+                    dl_tensor: DLTensor {
+                        data: if inner.rows == 0 || inner.cols == 0 { std::ptr::null_mut() } else { inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void },
+                        device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                        ndim: 2,
+                        dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
                 },
-                manager_ctx: std::ptr::null_mut(),
-                deleter: Some(dl_managed_deleter),
-            },
-            shape: [inner.rows as i64, inner.cols as i64],
-            strides: [inner.cols as i64, 1],
-            arr: inner,
-        });
-
-        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
-        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
-        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
-        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
-
-        let _leaked = Box::into_raw(holder);
-
-        let name = b"dltensor\0";
-        let capsule = unsafe {
-            pyo3::ffi::PyCapsule_New(
-                mt_ptr as *mut std::ffi::c_void,
-                name.as_ptr() as *const c_char,
-                Some(capsule_destructor),
-            )
-        };
-        if capsule.is_null() {
-            unsafe { dl_managed_deleter(mt_ptr) };
-            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+                shape: [inner.rows as i64, inner.cols as i64],
+                strides: [inner.cols as i64, 1],
+                arr: inner,
+                pc: std::mem::replace(&mut self.pc_guard, PrimaryCtxGuard::new(self.device_id).map_err(|e| PyValueError::new_err(e.to_string()))?),
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            holder.managed.manager_ctx = &mut *holder as *mut HolderV1 as *mut std::ffi::c_void;
+            let _keep = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe { pyo3::ffi::PyCapsule_New(mt_ptr as *mut std::ffi::c_void, name.as_ptr() as *const c_char, Some(capsule_destructor_v1)) };
+            if capsule.is_null() {
+                unsafe { dl_managed_deleter_v1(mt_ptr) };
+                return Err(PyValueError::new_err("failed to create DLPack v1.x capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mut holder = Box::new(HolderV0 {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: if inner.rows == 0 || inner.cols == 0 { std::ptr::null_mut() } else { inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void },
+                        device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                        ndim: 2,
+                        dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(dl_managed_deleter),
+                },
+                shape: [inner.rows as i64, inner.cols as i64],
+                strides: [inner.cols as i64, 1],
+                arr: inner,
+                pc: std::mem::replace(&mut self.pc_guard, PrimaryCtxGuard::new(self.device_id).map_err(|e| PyValueError::new_err(e.to_string()))?),
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            holder.managed.manager_ctx = &mut *holder as *mut HolderV0 as *mut std::ffi::c_void;
+            let _keep = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let capsule = unsafe { pyo3::ffi::PyCapsule_New(mt_ptr as *mut std::ffi::c_void, name.as_ptr() as *const c_char, Some(capsule_destructor)) };
+            if capsule.is_null() {
+                unsafe { dl_managed_deleter(mt_ptr) };
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
     }
 }
 

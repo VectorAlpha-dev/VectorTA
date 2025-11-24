@@ -22,6 +22,7 @@
 //! - **Streaming**: Implemented with O(1) update performance (pure calculations). Branch-minimized stream update; only gates on inputs required per mode; uses `mul_add` for FMA parity.
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 //! - Decision: Scalar path structured as per-mode loops (jammed) with safe indexing to aid LLVM vectorization; observed ~10–15% improvement at 100k locally. AVX2/AVX512 kernels implemented and selected via runtime kernel detection. Batch uses row-per-mode fan-out; no additional row-specific sharing beyond single-pass p/d reuse per element.
+//! - Decision log: SIMD enabled (AVX2/AVX512) with scalar as reference; CUDA wrapper present and returning VRAM handles; Python interop exposes CUDA Array Interface v3 and DLPack v1.x via primary-context–backed device arrays. Numerical outputs are unchanged across CPU/CUDA paths.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -202,6 +203,12 @@ pub enum PivotError {
     AllValuesNaN,
     #[error("pivot: Not enough valid data after the first valid index.")]
     NotEnoughValidData,
+    #[error("pivot: Output slice length mismatch (expected {expected}, got {got}).")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("pivot: Invalid range: start={start}, end={end}, step={step}.")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("pivot: Invalid kernel for batch path: {0:?}.")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // ========== BUILDER ==========
@@ -386,18 +393,22 @@ pub fn pivot_into(
     if low.len() != len || close.len() != len || open.len() != len {
         return Err(PivotError::EmptyData);
     }
-    if r4.len() != len
-        || r3.len() != len
-        || r2.len() != len
-        || r1.len() != len
-        || pp.len() != len
-        || s1.len() != len
-        || s2.len() != len
-        || s3.len() != len
-        || s4.len() != len
-    {
-        // Consistent with existing error semantics in this module
-        return Err(PivotError::EmptyData);
+    let expected = len;
+    let first_mismatch = [
+        r4.len(),
+        r3.len(),
+        r2.len(),
+        r1.len(),
+        pp.len(),
+        s1.len(),
+        s2.len(),
+        s3.len(),
+        s4.len(),
+    ]
+    .into_iter()
+    .find(|&got| got != expected);
+    if let Some(got) = first_mismatch {
+        return Err(PivotError::OutputLengthMismatch { expected, got });
     }
 
     let mode = input.get_mode();
@@ -483,17 +494,22 @@ pub fn pivot_into_slices(
     if low.len() != len || close.len() != len || open.len() != len {
         return Err(PivotError::EmptyData);
     }
-    if r4.len() != len
-        || r3.len() != len
-        || r2.len() != len
-        || r1.len() != len
-        || pp.len() != len
-        || s1.len() != len
-        || s2.len() != len
-        || s3.len() != len
-        || s4.len() != len
-    {
-        return Err(PivotError::EmptyData);
+    let expected = len;
+    let first_mismatch = [
+        r4.len(),
+        r3.len(),
+        r2.len(),
+        r1.len(),
+        pp.len(),
+        s1.len(),
+        s2.len(),
+        s3.len(),
+        s4.len(),
+    ]
+    .into_iter()
+    .find(|&got| got != expected);
+    if let Some(got) = first_mismatch {
+        return Err(PivotError::OutputLengthMismatch { expected, got });
     }
 
     let mode = input.get_mode();
@@ -1541,9 +1557,10 @@ fn pivot_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<PivotParams>, PivotError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(PivotError::EmptyData);
+        let (start, end, step) = sweep.mode;
+        return Err(PivotError::InvalidRange { start, end, step });
     }
     let cols = high.len();
     if cols == 0 || low.len() != cols || close.len() != cols || open.len() != cols {
@@ -1555,13 +1572,27 @@ fn pivot_batch_inner_into(
         return Err(PivotError::NotEnoughValidData);
     }
 
-    let rows = combos.len() * N_LEVELS;
-    // out is expected length rows*cols
-    assert_eq!(
-        out.len(),
-        rows * cols,
-        "pivot_batch_inner_into: out len mismatch"
-    );
+    let rows = combos
+        .len()
+        .checked_mul(N_LEVELS)
+        .ok_or(PivotError::InvalidRange {
+            start: combos.len(),
+            end: N_LEVELS,
+            step: 0,
+        })?;
+    let expected_len = rows
+        .checked_mul(cols)
+        .ok_or(PivotError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 0,
+        })?;
+    if out.len() != expected_len {
+        return Err(PivotError::OutputLengthMismatch {
+            expected: expected_len,
+            got: out.len(),
+        });
+    }
 
     // Warm prefixes for each of the 9 rows of each combo
     let warm: Vec<usize> = vec![first; rows];
@@ -1792,7 +1823,7 @@ pub fn pivot_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(PivotError::EmptyData),
+        _ => return Err(PivotError::InvalidKernelForBatch(k)),
     };
     pivot_batch_inner(high, low, close, open, sweep, kernel)
 }
@@ -1825,14 +1856,29 @@ pub fn pivot_batch_flat_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(PivotError::EmptyData),
+        _ => return Err(PivotError::InvalidKernelForBatch(k)),
     };
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(PivotError::EmptyData);
+        let (start, end, step) = sweep.mode;
+        return Err(PivotError::InvalidRange { start, end, step });
     }
     let cols = high.len();
-    let rows = combos.len() * N_LEVELS;
+    let rows = combos
+        .len()
+        .checked_mul(N_LEVELS)
+        .ok_or(PivotError::InvalidRange {
+            start: combos.len(),
+            end: N_LEVELS,
+            step: 0,
+        })?;
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(PivotError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 0,
+        })?;
 
     // Single allocation, MU -> f64 without copies
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1861,15 +1907,54 @@ pub fn pivot_batch_flat_with_kernel(
     })
 }
 
-fn expand_grid(r: &PivotBatchRange) -> Vec<PivotParams> {
-    let (start, end, step) = r.mode;
-    let mut v = Vec::new();
-    let mut m = start;
-    while m <= end {
-        v.push(PivotParams { mode: Some(m) });
-        m += step;
+fn expand_grid(r: &PivotBatchRange) -> Result<Vec<PivotParams>, PivotError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, PivotError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        let mut vals = Vec::new();
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                vals.push(cur);
+                cur = cur
+                    .checked_add(step)
+                    .ok_or(PivotError::InvalidRange { start, end, step })?;
+            }
+        } else {
+            let mut cur = start;
+            while cur >= end {
+                vals.push(cur);
+                cur = cur
+                    .checked_sub(step)
+                    .ok_or(PivotError::InvalidRange { start, end, step })?;
+                if cur == 0 && end > 0 {
+                    break;
+                }
+                if let Some(&last) = vals.last() {
+                    if last == cur {
+                        break;
+                    }
+                }
+            }
+            if let Some(&last) = vals.last() {
+                if last < end {
+                    vals.pop();
+                }
+            }
+        }
+        if vals.is_empty() {
+            return Err(PivotError::InvalidRange { start, end, step });
+        }
+        Ok(vals)
     }
-    v
+
+    let modes = axis_usize(r.mode)?;
+    let mut v = Vec::with_capacity(modes.len());
+    for m in modes {
+        v.push(PivotParams { mode: Some(m) });
+    }
+    Ok(v)
 }
 fn pivot_batch_inner(
     high: &[f64],
@@ -1879,9 +1964,10 @@ fn pivot_batch_inner(
     sweep: &PivotBatchRange,
     kernel: Kernel,
 ) -> Result<PivotBatchOutput, PivotError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(PivotError::EmptyData);
+        let (start, end, step) = sweep.mode;
+        return Err(PivotError::InvalidRange { start, end, step });
     }
     let len = high.len();
     let mut levels = Vec::with_capacity(combos.len());
@@ -2162,7 +2248,7 @@ pub fn pivot_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::pivot_wrapper::CudaPivot;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "pivot_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, open_f32, mode_range, device_id=0))]
@@ -2198,7 +2284,8 @@ pub fn pivot_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok((handle, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2228,7 +2315,8 @@ pub fn pivot_cuda_many_series_one_param_dev_py(
         cuda.pivot_many_series_one_param_time_major_dev(h, l, c, o, cols, rows, mode)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 #[cfg(feature = "python")]

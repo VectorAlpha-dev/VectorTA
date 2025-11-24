@@ -224,8 +224,43 @@ impl CudaAroonOsc {
         }
 
         let block_x = self.select_block_x_batch(avg_len);
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        let gx = n_combos as u32;
+        let gy = 1u32;
+        let gz = 1u32;
+        let bx = block_x;
+        let by = 1u32;
+        let bz = 1u32;
+
+        // Optional safety: clamp against device launch limits
+        if let Ok(dev) = Device::get_device(self.device_id) {
+            use cust::device::DeviceAttribute;
+            let max_threads = dev
+                .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+                .unwrap_or(1024);
+            let max_block_x = dev
+                .get_attribute(DeviceAttribute::MaxBlockDimX)
+                .unwrap_or(1024);
+            let max_grid_x = dev
+                .get_attribute(DeviceAttribute::MaxGridDimX)
+                .unwrap_or(i32::MAX);
+            let threads = bx.saturating_mul(by).saturating_mul(bz);
+            if threads as i32 > max_threads
+                || bx as i32 > max_block_x
+                || gx as i32 > max_grid_x
+            {
+                return Err(CudaAroonOscError::LaunchConfigTooLarge {
+                    gx,
+                    gy,
+                    gz,
+                    bx,
+                    by,
+                    bz,
+                });
+            }
+        }
+
+        let grid: GridSize = (gx, gy, gz).into();
+        let block: BlockSize = (bx, by, bz).into();
 
         unsafe {
             let func = self
@@ -378,18 +413,18 @@ impl CudaAroonOsc {
         }
 
         // VRAM estimate (64 MB headroom)
-        let bytes = (high_tm_f32.len() + low_tm_f32.len()) * 4
-            + first_valids.len() * 4
-            + rows * cols * 4
-            + 64 * 1024 * 1024;
-        if let Ok((free, _)) = mem_get_info() {
-            if bytes > free {
-                return Err(CudaAroonOscError::InvalidInput(format!(
-                    "estimated device memory {:.2} MB exceeds free VRAM",
-                    (bytes as f64) / (1024.0 * 1024.0)
-                )));
-            }
-        }
+        let in_bytes = high_tm_f32.len().saturating_mul(4)
+            + low_tm_f32.len().saturating_mul(4);
+        let fv_bytes = first_valids.len().saturating_mul(4);
+        let out_bytes = rows
+            .checked_mul(cols)
+            .and_then(|x| x.checked_mul(4))
+            .ok_or_else(|| CudaAroonOscError::InvalidInput("byte size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(fv_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaAroonOscError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
         let d_high = DeviceBuffer::from_slice(high_tm_f32).map_err(CudaAroonOscError::Cuda)?;
         let d_low = DeviceBuffer::from_slice(low_tm_f32).map_err(CudaAroonOscError::Cuda)?;
@@ -423,13 +458,47 @@ impl CudaAroonOsc {
         series_len: i32,
         length: i32,
         d_out_tm: &mut DeviceBuffer<f32>,
-    ) -> Result<(), CudaAroonOscError> {
+        ) -> Result<(), CudaAroonOscError> {
         if num_series <= 0 || series_len <= 0 || length <= 0 {
             return Ok(());
         }
         let block_x = self.select_block_x_many(series_len);
-        let grid: GridSize = (num_series as u32, 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        let gx = num_series as u32;
+        let gy = 1u32;
+        let gz = 1u32;
+        let bx = block_x;
+        let by = 1u32;
+        let bz = 1u32;
+
+        if let Ok(dev) = Device::get_device(self.device_id) {
+            use cust::device::DeviceAttribute;
+            let max_threads = dev
+                .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+                .unwrap_or(1024);
+            let max_block_x = dev
+                .get_attribute(DeviceAttribute::MaxBlockDimX)
+                .unwrap_or(1024);
+            let max_grid_x = dev
+                .get_attribute(DeviceAttribute::MaxGridDimX)
+                .unwrap_or(i32::MAX);
+            let threads = bx.saturating_mul(by).saturating_mul(bz);
+            if threads as i32 > max_threads
+                || bx as i32 > max_block_x
+                || gx as i32 > max_grid_x
+            {
+                return Err(CudaAroonOscError::LaunchConfigTooLarge {
+                    gx,
+                    gy,
+                    gz,
+                    bx,
+                    by,
+                    bz,
+                });
+            }
+        }
+
+        let grid: GridSize = (gx, gy, gz).into();
+        let block: BlockSize = (bx, by, bz).into();
 
         unsafe {
             let func = self
@@ -477,13 +546,29 @@ impl CudaAroonOsc {
     ) -> Result<(usize, usize, Vec<AroonOscParams>), CudaAroonOscError> {
         let (combos, first_valid, series_len) =
             Self::prepare_batch_inputs(high_f32, low_f32, sweep)?;
-        if out.len() != combos.len() * series_len {
+        let expected = combos
+            .len()
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaAroonOscError::InvalidInput("output length overflow".into()))?;
+        if out.len() != expected {
             return Err(CudaAroonOscError::InvalidInput(format!(
                 "out wrong length: got {}, expected {}",
                 out.len(),
-                combos.len() * series_len
+                expected
             )));
         }
+        // VRAM estimate (64 MB headroom)
+        let in_bytes = high_f32.len().saturating_mul(4) + low_f32.len().saturating_mul(4);
+        let param_bytes = combos.len().saturating_mul(4);
+        let out_bytes = expected
+            .checked_mul(4)
+            .ok_or_else(|| CudaAroonOscError::InvalidInput("byte size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(param_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaAroonOscError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
         let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaAroonOscError::Cuda)?;
         let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaAroonOscError::Cuda)?;
         let lengths_i32: Vec<i32> = combos
@@ -528,13 +613,29 @@ impl CudaAroonOsc {
     ) -> Result<(usize, usize, Vec<AroonOscParams>), CudaAroonOscError> {
         let (combos, first_valid, series_len) =
             Self::prepare_batch_inputs(high_f32, low_f32, sweep)?;
-        if pinned_out.len() != combos.len() * series_len {
+        let expected = combos
+            .len()
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaAroonOscError::InvalidInput("output length overflow".into()))?;
+        if pinned_out.len() != expected {
             return Err(CudaAroonOscError::InvalidInput(format!(
                 "pinned_out wrong length: got {}, expected {}",
                 pinned_out.len(),
-                combos.len() * series_len
+                expected
             )));
         }
+
+        // VRAM estimate (64 MB headroom)
+        let in_bytes = high_f32.len().saturating_mul(4) + low_f32.len().saturating_mul(4);
+        let param_bytes = combos.len().saturating_mul(4);
+        let out_bytes = expected
+            .checked_mul(4)
+            .ok_or_else(|| CudaAroonOscError::InvalidInput("byte size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(param_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaAroonOscError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
         let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaAroonOscError::Cuda)?;
         let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaAroonOscError::Cuda)?;

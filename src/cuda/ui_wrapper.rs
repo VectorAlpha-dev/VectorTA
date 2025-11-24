@@ -15,6 +15,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize, Function};
 use cust::launch;
+use cust::error::CudaError;
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
@@ -23,7 +24,8 @@ use cust::context::CacheConfig;
 use cust::sys; // low-level CUDA driver API access
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug)]
 pub enum UiBatchKernelPolicy {
@@ -55,26 +57,30 @@ pub struct CudaUiPolicy {
     pub many_series: UiManySeriesKernelPolicy,
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaUiError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaUiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaUiError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaUiError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaUiError {}
 
 pub struct CudaUi {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaUiPolicy,
     debug_batch_logged: bool,
@@ -83,10 +89,9 @@ pub struct CudaUi {
 
 impl CudaUi {
     pub fn new(device_id: usize) -> Result<Self, CudaUiError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaUiError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaUiError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ui_kernel.ptx"));
         let jit_opts = &[
@@ -96,22 +101,22 @@ impl CudaUi {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) =
+                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaUiError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaUiPolicy::default(),
             debug_batch_logged: false,
@@ -121,10 +126,11 @@ impl CudaUi {
 
     pub fn set_policy(&mut self, policy: CudaUiPolicy) { self.policy = policy; }
     pub fn policy(&self) -> &CudaUiPolicy { &self.policy }
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
     pub fn synchronize(&self) -> Result<(), CudaUiError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaUiError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
     }
 
     #[inline]
@@ -141,12 +147,11 @@ impl CudaUi {
         if !Self::mem_check_enabled() {
             return true;
         }
-        if !Self::mem_check_enabled() {
-            return true;
-        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     #[inline]
@@ -163,10 +168,12 @@ impl CudaUi {
                 smem_bytes as i32,
             );
             if r1 != sys::CUresult::CUDA_SUCCESS {
-                return Err(CudaUiError::Cuda(format!(
-                    "cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES={}) failed: {:?}",
-                    smem_bytes, r1
-                )));
+                return Err(CudaUiError::Cuda(CudaError::UnknownError {
+                    msg: format!(
+                        "cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES={}) failed: {:?}",
+                        smem_bytes, r1
+                    ),
+                }));
             }
             let _ = sys::cuFuncSetAttribute(
                 f,
@@ -193,41 +200,104 @@ impl CudaUi {
         }
     }
 
+    #[inline]
+    fn validate_launch(&self, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32) -> Result<(), CudaUiError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaUiError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
+    }
+
     // ---- Batch: one-series × many-params ----
 
-    fn expand_grid(sweep: &UiBatchRange) -> (Vec<usize>, Vec<f32>) {
+    fn expand_grid(sweep: &UiBatchRange) -> Result<(Vec<usize>, Vec<f32>), CudaUiError> {
         let (ps, pe, pst) = sweep.period;
         let (ss, se, sst) = sweep.scalar;
         let periods: Vec<usize> = if pst == 0 || ps == pe {
             vec![ps]
-        } else {
+        } else if ps < pe {
             (ps..=pe).step_by(pst).collect()
-        };
-        let periods: Vec<usize> = if pst == 0 || ps == pe {
-            vec![ps]
         } else {
-            (ps..=pe).step_by(pst).collect()
+            // Support reversed bounds by iterating [pe, ps] and reversing.
+            let mut v: Vec<usize> = (pe..=ps).step_by(pst).collect();
+            v.reverse();
+            v
         };
         let scalars: Vec<f32> = if sst.abs() < 1e-12 || (ss - se).abs() < 1e-12 {
             vec![ss as f32]
         } else {
+            if (ss < se && sst <= 0.0) || (ss > se && sst >= 0.0) {
+                return Err(CudaUiError::InvalidInput(
+                    "invalid scalar sweep: step sign must move from start toward end".into(),
+                ));
+            }
             let mut v = Vec::new();
             let mut x = ss;
-            let mut iters = 0;
-            while x <= se + 1e-12 && iters < 10000 {
-                v.push(x as f32);
-                x += sst;
-                iters += 1;
+            let mut iters: usize = 0;
+            const MAX_ITERS: usize = 10_000;
+            if ss < se {
+                while x <= se + 1e-12 {
+                    if iters >= MAX_ITERS {
+                        return Err(CudaUiError::InvalidInput(
+                            "scalar sweep produced too many steps".into(),
+                        ));
+                    }
+                    v.push(x as f32);
+                    x += sst;
+                    iters += 1;
+                }
+            } else {
+                while x >= se - 1e-12 {
+                    if iters >= MAX_ITERS {
+                        return Err(CudaUiError::InvalidInput(
+                            "scalar sweep produced too many steps".into(),
+                        ));
+                    }
+                    v.push(x as f32);
+                    x += sst; // negative
+                    iters += 1;
+                }
             }
             if v.is_empty() {
-                v.push(ss as f32);
-            }
-            if v.is_empty() {
-                v.push(ss as f32);
+                return Err(CudaUiError::InvalidInput("empty scalar sweep".into()));
             }
             v
         };
-        (periods, scalars)
+        if periods.is_empty() || scalars.is_empty() {
+            return Err(CudaUiError::InvalidInput("empty sweep".into()));
+        }
+        Ok((periods, scalars))
     }
 
     pub fn ui_batch_dev(
@@ -243,13 +313,14 @@ impl CudaUi {
             .find(|&i| prices[i].is_finite())
             .ok_or_else(|| CudaUiError::InvalidInput("all values are NaN".into()))?;
 
-        let (periods, scalars) = Self::expand_grid(sweep);
-        if periods.is_empty() || scalars.is_empty() {
-            return Err(CudaUiError::InvalidInput("empty sweep".into()));
-        }
+        let (periods, scalars) = Self::expand_grid(sweep)?;
 
         // Build combos
-        let mut combos: Vec<UiParams> = Vec::with_capacity(periods.len() * scalars.len());
+        let combos_cap = periods
+            .len()
+            .checked_mul(scalars.len())
+            .ok_or_else(|| CudaUiError::InvalidInput("rows * cols overflow in ui_batch_dev".into()))?;
+        let mut combos: Vec<UiParams> = Vec::with_capacity(combos_cap);
         for &p in &periods {
             for &s in &scalars {
                 combos.push(UiParams {
@@ -260,22 +331,123 @@ impl CudaUi {
         }
         let rows = combos.len();
         let max_p = *periods.iter().max().unwrap();
-        let max_warm = first_valid + (max_p * 2 - 2);
+        let span = max_p
+            .checked_mul(2)
+            .and_then(|v| v.checked_sub(2))
+            .ok_or_else(|| {
+                CudaUiError::InvalidInput("period too large for warmup computation".into())
+            })?;
+        let max_warm = first_valid
+            .checked_add(span)
+            .ok_or_else(|| CudaUiError::InvalidInput("warmup index overflow".into()))?;
         if len <= max_warm {
             return Err(CudaUiError::InvalidInput("not enough valid data".into()));
         }
-        
-        let headroom = env::var("CUDA_MEM_HEADROOM").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
-        let d_prices = DeviceBuffer::from_slice(prices).map_err(|e| CudaUiError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
-            .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+
+        let prices_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                CudaUiError::InvalidInput("len overflow when computing prices_bytes".into())
+            })?;
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| {
+                CudaUiError::InvalidInput("rows * len overflow for output".into())
+            })?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                CudaUiError::InvalidInput("output bytes overflow in ui_batch_dev".into())
+            })?;
 
         // Heuristic for multi-param kernel
         let n_unique_periods = periods.len();
         let scalars_per_period = scalars.len();
         let use_multi_param = match self.policy.batch {
-            UiBatchKernelPolicy::Auto => n_unique_periods > 1 && (scalars_per_period <= 2 || n_unique_periods >= 8),
+            UiBatchKernelPolicy::Auto => {
+                n_unique_periods > 1 && (scalars_per_period <= 2 || n_unique_periods >= 8)
+            }
             UiBatchKernelPolicy::Plain { .. } => false,
+        };
+
+        let (_required, d_prices, mut d_out) = if use_multi_param {
+            let params_bytes_per_row =
+                std::mem::size_of::<i32>() + std::mem::size_of::<f32>();
+            let params_bytes = rows
+                .checked_mul(params_bytes_per_row)
+                .ok_or_else(|| {
+                    CudaUiError::InvalidInput(
+                        "rows overflow when computing params_bytes".into(),
+                    )
+                })?;
+            let required = prices_bytes
+                .checked_add(out_bytes)
+                .and_then(|v| v.checked_add(params_bytes))
+                .ok_or_else(|| {
+                    CudaUiError::InvalidInput("required bytes overflow (multi-param)".into())
+                })?;
+            if !Self::will_fit(required, headroom) {
+                if let Some((free, _total)) = Self::device_mem_info() {
+                    return Err(CudaUiError::OutOfMemory {
+                        required,
+                        free,
+                        headroom,
+                    });
+                } else {
+                    return Err(CudaUiError::InvalidInput(
+                        "insufficient device memory for UI batch (multi-param)".into(),
+                    ));
+                }
+            }
+            let d_prices = DeviceBuffer::from_slice(prices)?;
+            let d_out: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(out_elems) }?;
+            (required, d_prices, d_out)
+        } else {
+            let base_bytes = len
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| {
+                    CudaUiError::InvalidInput(
+                        "len overflow when computing base_bytes".into(),
+                    )
+                })?;
+            let scalars_bytes = scalars
+                .len()
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| {
+                    CudaUiError::InvalidInput(
+                        "scalar count overflow when computing scalars_bytes".into(),
+                    )
+                })?;
+            let required = prices_bytes
+                .checked_add(out_bytes)
+                .and_then(|v| v.checked_add(base_bytes))
+                .and_then(|v| v.checked_add(scalars_bytes))
+                .ok_or_else(|| {
+                    CudaUiError::InvalidInput("required bytes overflow (base+scale)".into())
+                })?;
+            if !Self::will_fit(required, headroom) {
+                if let Some((free, _total)) = Self::device_mem_info() {
+                    return Err(CudaUiError::OutOfMemory {
+                        required,
+                        free,
+                        headroom,
+                    });
+                } else {
+                    return Err(CudaUiError::InvalidInput(
+                        "insufficient device memory for UI batch (base+scale)".into(),
+                    ));
+                }
+            }
+            let d_prices = DeviceBuffer::from_slice(prices)?;
+            let d_out: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(out_elems) }?;
+            (required, d_prices, d_out)
         };
 
         if use_multi_param {
@@ -284,15 +456,15 @@ impl CudaUi {
             let mut scalars_params: Vec<f32> = Vec::with_capacity(rows);
             for &p in &periods { for &s in &scalars { periods_params.push(p as i32); scalars_params.push(s); } }
 
-            let required = len * std::mem::size_of::<f32>()
-                + rows * len * std::mem::size_of::<f32>()
-                + rows * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
-            if !Self::will_fit(required, headroom) { return Err(CudaUiError::InvalidInput("insufficient VRAM for UI batch (multi-param)".into())); }
+            let d_periods = DeviceBuffer::from_slice(&periods_params)?;
+            let d_scalars = DeviceBuffer::from_slice(&scalars_params)?;
 
-            let d_periods = DeviceBuffer::from_slice(&periods_params).map_err(|e| CudaUiError::Cuda(e.to_string()))?;
-            let d_scalars = DeviceBuffer::from_slice(&scalars_params).map_err(|e| CudaUiError::Cuda(e.to_string()))?;
-
-            let mut func = self.module.get_function("ui_one_series_many_params_f32").map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+            let mut func = self
+                .module
+                .get_function("ui_one_series_many_params_f32")
+                .map_err(|_| CudaUiError::MissingKernelSymbol {
+                    name: "ui_one_series_many_params_f32",
+                })?;
             func.set_cache_config(CacheConfig::PreferShared).ok();
 
             let bytes_per_param = {
@@ -307,8 +479,11 @@ impl CudaUi {
             let smem = (bytes_per_param as u64 * warps_per_block as u64) as usize;
             CudaUi::set_kernel_dynamic_smem(&mut func, smem, 100)?;
 
-            let block = BlockSize::xyz(warps_per_block * 32, 1, 1);
-            let grid = GridSize::xyz(((rows as u32) + warps_per_block - 1) / warps_per_block, 1, 1);
+            let block_x = warps_per_block * 32;
+            let grid_x = ((rows as u32) + warps_per_block - 1) / warps_per_block;
+            let block = BlockSize::xyz(block_x, 1, 1);
+            let grid = GridSize::xyz(grid_x, 1, 1);
+            self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
 
             unsafe {
                 let mut a_prices = d_prices.as_device_ptr().as_raw();
@@ -329,8 +504,7 @@ impl CudaUi {
                     &mut a_maxp as *mut _ as *mut c_void,
                     &mut a_out as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&mut func, grid, block, smem as u32, &mut args)
-                    .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+                self.stream.launch(&mut func, grid, block, smem as u32, &mut args)?;
             }
 
             if (cfg!(debug_assertions) || std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1")) && !self.debug_batch_logged {
@@ -339,19 +513,23 @@ impl CudaUi {
             }
         } else {
             // ---------- Base+scale (optimized) ----------
-            let required = (len /*in*/ + len /*base*/ + rows * len /*out*/)
-                * std::mem::size_of::<f32>()
-                + scalars.len() * std::mem::size_of::<f32>();
-            if !Self::will_fit(required, headroom) { return Err(CudaUiError::InvalidInput("insufficient VRAM for UI batch (base+scale)".into())); }
-
-            let mut d_base: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-                .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+            let mut d_base: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
             // Upload scalars once
-            let d_scalars = DeviceBuffer::from_slice(&scalars).map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+            let d_scalars = DeviceBuffer::from_slice(&scalars)?;
 
-            let mut fn_single = self.module.get_function("ui_single_series_f32").map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+            let mut fn_single = self
+                .module
+                .get_function("ui_single_series_f32")
+                .map_err(|_| CudaUiError::MissingKernelSymbol {
+                    name: "ui_single_series_f32",
+                })?;
             fn_single.set_cache_config(CacheConfig::PreferShared).ok();
-            let fn_scale = self.module.get_function("ui_scale_rows_from_base_f32").map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+            let fn_scale = self
+                .module
+                .get_function("ui_scale_rows_from_base_f32")
+                .map_err(|_| CudaUiError::MissingKernelSymbol {
+                    name: "ui_scale_rows_from_base_f32",
+                })?;
 
             let block_scale_x = match self.policy.batch { UiBatchKernelPolicy::Plain { block_x } => block_x, UiBatchKernelPolicy::Auto => 256 };
             let grid_scale_x = ((len as u32) + block_scale_x - 1) / block_scale_x;
@@ -380,8 +558,8 @@ impl CudaUi {
                         &mut a_p as *mut _ as *mut c_void,
                         &mut a_base as *mut _ as *mut c_void,
                     ];
-                    self.stream.launch(&mut fn_single, GridSize::xyz(1,1,1), BlockSize::xyz(1,1,1), shmem, &mut args)
-                        .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+                    self.validate_launch(1, 1, 1, 1, 1, 1)?;
+                    self.stream.launch(&mut fn_single, GridSize::xyz(1,1,1), BlockSize::xyz(1,1,1), shmem, &mut args)?;
                 }
 
                 // Scale across all scalars into rows
@@ -390,8 +568,11 @@ impl CudaUi {
                 let mut row_off = start_row;
                 while remaining > 0 {
                     let chunk = remaining.min(MAX_GRID_Y);
-                    let grid = GridSize::xyz(grid_scale_x.max(1), chunk as u32, 1);
+                    let grid_x = grid_scale_x.max(1);
+                    let grid_y = chunk as u32;
+                    let grid = GridSize::xyz(grid_x, grid_y, 1);
                     let block = BlockSize::xyz(block_scale_x, 1, 1);
+                    self.validate_launch(grid_x, grid_y, 1, block_scale_x, 1, 1)?;
                     unsafe {
                         let mut a_base = d_base.as_device_ptr().as_raw();
                         let mut a_scalars = d_scalars.as_device_ptr().as_raw();
@@ -405,8 +586,7 @@ impl CudaUi {
                             &mut a_rows as *mut _ as *mut c_void,
                             &mut a_out as *mut _ as *mut c_void,
                         ];
-                        self.stream.launch(&fn_scale, grid, block, 0, &mut args)
-                            .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+                        self.stream.launch(&fn_scale, grid, block, 0, &mut args)?;
                     }
                     remaining -= chunk;
                     row_off += chunk;
@@ -421,7 +601,7 @@ impl CudaUi {
             }
         }
 
-        self.stream.synchronize().map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok((DeviceArrayF32 { buf: d_out, rows, cols: len }, combos))
     }
 
@@ -437,13 +617,10 @@ impl CudaUi {
         if cols == 0 || rows == 0 {
             return Err(CudaUiError::InvalidInput("empty dims".into()));
         }
-        if prices_tm.len() != cols * rows {
-            return Err(CudaUiError::InvalidInput("matrix shape mismatch".into()));
-        }
-        if cols == 0 || rows == 0 {
-            return Err(CudaUiError::InvalidInput("empty dims".into()));
-        }
-        if prices_tm.len() != cols * rows {
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaUiError::InvalidInput("cols * rows overflow".into()))?;
+        if prices_tm.len() != elems {
             return Err(CudaUiError::InvalidInput("matrix shape mismatch".into()));
         }
         let period = params.period.unwrap_or(14);
@@ -464,15 +641,21 @@ impl CudaUi {
                 }
             }
         }
+        let warm_span = period
+            .checked_mul(2)
+            .and_then(|v| v.checked_sub(2))
+            .ok_or_else(|| {
+                CudaUiError::InvalidInput(
+                    "period too large for warmup computation (many-series)".into(),
+                )
+            })?;
         for &fv in &first_valids {
-            if (fv as usize) + (2 * period).saturating_sub(2) >= rows {
-                return Err(CudaUiError::InvalidInput(
-                    "not enough valid data for at least one series".into(),
-                ));
-            }
-        }
-        for &fv in &first_valids {
-            if (fv as usize) + (2 * period).saturating_sub(2) >= rows {
+            let warm = (fv as usize)
+                .checked_add(warm_span)
+                .ok_or_else(|| {
+                    CudaUiError::InvalidInput("warmup index overflow (many-series)".into())
+                })?;
+            if warm >= rows {
                 return Err(CudaUiError::InvalidInput(
                     "not enough valid data for at least one series".into(),
                 ));
@@ -480,32 +663,67 @@ impl CudaUi {
         }
 
         // VRAM: inputs + outputs + first_valids (int32)
-        let required = (cols * rows * 2) * std::mem::size_of::<f32>()
-            + cols * std::mem::size_of::<i32>();
-        let headroom = env::var("CUDA_MEM_HEADROOM").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
-        if !Self::will_fit(required, headroom) { return Err(CudaUiError::InvalidInput("insufficient VRAM for many-series".into())); }
+        let fp_bytes = elems
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| {
+                CudaUiError::InvalidInput(
+                    "required bytes overflow when computing fp32 traffic (many-series)".into(),
+                )
+            })?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| {
+                CudaUiError::InvalidInput(
+                    "cols overflow when computing first_valids bytes".into(),
+                )
+            })?;
+        let required = fp_bytes
+            .checked_add(first_bytes)
+            .ok_or_else(|| {
+                CudaUiError::InvalidInput(
+                    "required bytes overflow (many-series total)".into(),
+                )
+            })?;
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaUiError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaUiError::InvalidInput(
+                    "insufficient VRAM for many-series".into(),
+                ));
+            }
+        }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices_tm).map_err(|e| CudaUiError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
-        let d_prices =
-            DeviceBuffer::from_slice(prices_tm).map_err(|e| CudaUiError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(prices_tm)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }?;
 
-        let mut func = self.module.get_function("ui_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+        let mut func = self
+            .module
+            .get_function("ui_many_series_one_param_time_major_f32")
+            .map_err(|_| CudaUiError::MissingKernelSymbol {
+                name: "ui_many_series_one_param_time_major_f32",
+            })?;
         func.set_cache_config(CacheConfig::PreferShared).ok();
 
         // This kernel uses per-block shared memory for a single series;
         // launch with exactly one thread per block to avoid shared-memory aliasing.
         let block_x: u32 = 1;
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let grid_x_eff = grid_x.max(1);
+        let grid: GridSize = (grid_x_eff, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(grid_x_eff, 1, 1, block_x, 1, 1)?;
         // FP32 + uint8 SMEM layout matches kernel (index, value, ring, valid)
         let shmem = {
             let deq_idx = Self::align16(period * std::mem::size_of::<i32>());
@@ -533,13 +751,10 @@ impl CudaUi {
                 &mut a_scalar as *mut _ as *mut c_void,
                 &mut a_out as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&mut func, grid, block, shmem, &mut args)
-                .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+            self.stream.launch(&mut func, grid, block, shmem, &mut args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -562,9 +777,7 @@ impl CudaUi {
                 expected
             )));
         }
-        dev.buf
-            .copy_to(out_host)
-            .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+        dev.buf.copy_to(out_host)?;
         Ok((dev.rows, dev.cols, combos))
     }
 }

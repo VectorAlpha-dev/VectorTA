@@ -32,6 +32,8 @@ pub enum CudaPwmaError {
     Cuda(#[from] cust::error::CudaError),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("launch config too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
@@ -164,9 +166,11 @@ impl CudaPwma {
 
         let combos = expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaPwmaError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
+            return Err(CudaPwmaError::InvalidRange {
+                start: sweep.period.0,
+                end: sweep.period.1,
+                step: sweep.period.2,
+            });
         }
 
         let mut max_period = 0usize;

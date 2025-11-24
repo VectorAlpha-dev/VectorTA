@@ -1,0 +1,348 @@
+   Compiling my_project v0.1.0 (/mnt/c/Rust Projects/my_project)
+error[E0282]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:237:58
+    |
+237 |         let d_vf = DeviceBuffer::from_slice(&vf).map_err(Into::into)?;
+    |                                                          ^^^^^^^^^^ cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+help: consider specifying the generic argument
+    |
+237 |         let d_vf = DeviceBuffer::from_slice(&vf).map_err(Into::<T>::into)?;
+    |                                                              +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:237:58
+    |
+237 |         let d_vf = DeviceBuffer::from_slice(&vf).map_err(Into::into)?;
+    |                                                          ^^^^^^^^^^ - type must be known at this point
+    |                                                          |
+    |                                                          cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+237 |         let d_vf = DeviceBuffer::from_slice(&vf).map_err(Into::<T>::into)?;
+    |                                                              +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:238:66
+    |
+238 |         let d_shorts = DeviceBuffer::from_slice(&shorts).map_err(Into::into)?;
+    |                                                                  ^^^^^^^^^^ - type must be known at this point
+    |                                                                  |
+    |                                                                  cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+238 |         let d_shorts = DeviceBuffer::from_slice(&shorts).map_err(Into::<T>::into)?;
+    |                                                                      +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:239:64
+    |
+239 |         let d_longs = DeviceBuffer::from_slice(&longs).map_err(Into::into)?;
+    |                                                                ^^^^^^^^^^ - type must be known at this point
+    |                                                                |
+    |                                                                cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+239 |         let d_longs = DeviceBuffer::from_slice(&longs).map_err(Into::<T>::into)?;
+    |                                                                    +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:241:60
+    |
+241 |             DeviceBuffer::uninitialized(out_elems).map_err(Into::into)?
+    |                                                            ^^^^^^^^^^ - type must be known at this point
+    |                                                            |
+    |                                                            cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+241 |             DeviceBuffer::uninitialized(out_elems).map_err(Into::<T>::into)?
+    |                                                                +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:253:43
+    |
+253 |         self.stream.synchronize().map_err(Into::into)?;
+    |                                           ^^^^^^^^^^ - type must be known at this point
+    |                                           |
+    |                                           cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+253 |         self.stream.synchronize().map_err(Into::<T>::into)?;
+    |                                               +++++
+
+error[E0282]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:311:69
+    |
+311 |             self.stream.launch(&func, grid, block, 0, args).map_err(Into::into)?;
+    |                                                                     ^^^^^^^^^^ cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+help: consider specifying the generic argument
+    |
+311 |             self.stream.launch(&func, grid, block, 0, args).map_err(Into::<T>::into)?;
+    |                                                                         +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:311:69
+    |
+311 |             self.stream.launch(&func, grid, block, 0, args).map_err(Into::into)?;
+    |                                                                     ^^^^^^^^^^ - type must be known at this point
+    |                                                                     |
+    |                                                                     cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+311 |             self.stream.launch(&func, grid, block, 0, args).map_err(Into::<T>::into)?;
+    |                                                                         +++++
+
+error[E0282]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:368:64
+    |
+368 |         let d_high = DeviceBuffer::from_slice(high_tm).map_err(Into::into)?;
+    |                                                                ^^^^^^^^^^ cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+help: consider specifying the generic argument
+    |
+368 |         let d_high = DeviceBuffer::from_slice(high_tm).map_err(Into::<T>::into)?;
+    |                                                                    +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:368:64
+    |
+368 |         let d_high = DeviceBuffer::from_slice(high_tm).map_err(Into::into)?;
+    |                                                                ^^^^^^^^^^ - type must be known at this point
+    |                                                                |
+    |                                                                cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+368 |         let d_high = DeviceBuffer::from_slice(high_tm).map_err(Into::<T>::into)?;
+    |                                                                    +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:369:62
+    |
+369 |         let d_low = DeviceBuffer::from_slice(low_tm).map_err(Into::into)?;
+    |                                                              ^^^^^^^^^^ - type must be known at this point
+    |                                                              |
+    |                                                              cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+369 |         let d_low = DeviceBuffer::from_slice(low_tm).map_err(Into::<T>::into)?;
+    |                                                                  +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:370:66
+    |
+370 |         let d_close = DeviceBuffer::from_slice(close_tm).map_err(Into::into)?;
+    |                                                                  ^^^^^^^^^^ - type must be known at this point
+    |                                                                  |
+    |                                                                  cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+370 |         let d_close = DeviceBuffer::from_slice(close_tm).map_err(Into::<T>::into)?;
+    |                                                                      +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:371:65
+    |
+371 |         let d_vol = DeviceBuffer::from_slice(volume_tm).map_err(Into::into)?;
+    |                                                                 ^^^^^^^^^^ - type must be known at this point
+    |                                                                 |
+    |                                                                 cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+371 |         let d_vol = DeviceBuffer::from_slice(volume_tm).map_err(Into::<T>::into)?;
+    |                                                                     +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:372:68
+    |
+372 |         let d_fv = DeviceBuffer::from_slice(&first_valids).map_err(Into::into)?;
+    |                                                                    ^^^^^^^^^^ - type must be known at this point
+    |                                                                    |
+    |                                                                    cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+372 |         let d_fv = DeviceBuffer::from_slice(&first_valids).map_err(Into::<T>::into)?;
+    |                                                                        +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:374:56
+    |
+374 |             DeviceBuffer::uninitialized(elems).map_err(Into::into)?
+    |                                                        ^^^^^^^^^^ - type must be known at this point
+    |                                                        |
+    |                                                        cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+374 |             DeviceBuffer::uninitialized(elems).map_err(Into::<T>::into)?
+    |                                                            +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:389:43
+    |
+389 |         self.stream.synchronize().map_err(Into::into)?;
+    |                                           ^^^^^^^^^^ - type must be known at this point
+    |                                           |
+    |                                           cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+389 |         self.stream.synchronize().map_err(Into::<T>::into)?;
+    |                                               +++++
+
+error[E0282]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:456:69
+    |
+456 |             self.stream.launch(&func, grid, block, 0, args).map_err(Into::into)?;
+    |                                                                     ^^^^^^^^^^ cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+help: consider specifying the generic argument
+    |
+456 |             self.stream.launch(&func, grid, block, 0, args).map_err(Into::<T>::into)?;
+    |                                                                         +++++
+
+error[E0283]: type annotations needed
+   --> src/cuda/kvo_wrapper.rs:456:69
+    |
+456 |             self.stream.launch(&func, grid, block, 0, args).map_err(Into::into)?;
+    |                                                                     ^^^^^^^^^^ - type must be known at this point
+    |                                                                     |
+    |                                                                     cannot infer type of the type parameter `T` declared on the trait `Into`
+    |
+note: multiple `impl`s satisfying `CudaKvoError: From<_>` found
+   --> src/cuda/kvo_wrapper.rs:30:10
+    |
+30  |     Cuda(#[from] cust::error::CudaError),
+    |          ^^^^^^^
+    = note: and another `impl` found in the `core` crate: `impl<T> From<T> for T;`
+help: consider specifying the generic argument
+    |
+456 |             self.stream.launch(&func, grid, block, 0, args).map_err(Into::<T>::into)?;
+    |                                                                         +++++
+
+error[E0277]: `?` couldn't convert the error to `CudaKaufmanstopError`
+   --> src/cuda/kaufmanstop_wrapper.rs:627:60
+    |
+627 |             let sma = CudaSma::new(self.device_id as usize)?;
+    |                       -------------------------------------^ the trait `From<CudaSmaError>` is not implemented for `CudaKaufmanstopError`
+    |                       |
+    |                       this can't be annotated with `?` because it has type `Result<_, CudaSmaError>`
+    |
+note: `CudaKaufmanstopError` needs to implement `From<CudaSmaError>`
+   --> src/cuda/kaufmanstop_wrapper.rs:31:1
+    |
+31  | pub enum CudaKaufmanstopError {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: alternatively, `CudaSmaError` needs to implement `Into<CudaKaufmanstopError>`
+   --> src/cuda/moving_averages/sma_wrapper.rs:29:1
+    |
+29  | pub enum CudaSmaError {
+    | ^^^^^^^^^^^^^^^^^^^^^
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = help: the trait `From<CudaSmaError>` is not implemented for `CudaKaufmanstopError`
+            but trait `From<CudaError>` is implemented for it
+    = help: for that trait implementation, expected `CudaError`, found `CudaSmaError`
+
+error[E0596]: cannot borrow `ring_stride_mid` as mutable, as it is not declared as mutable
+   --> src/cuda/emd_wrapper.rs:490:17
+    |
+490 |                 &mut ring_stride_mid as *mut _ as *mut c_void,
+    |                 ^^^^^^^^^^^^^^^^^^^^ cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+380 |         let mut ring_stride_mid = max_p
+    |             +++
+
+Some errors have detailed explanations: E0277, E0282, E0283, E0596.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `my_project` (lib) due to 20 previous errors

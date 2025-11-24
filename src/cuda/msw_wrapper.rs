@@ -22,26 +22,32 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
 // Must match the kernel's MSW_CHUNK_PER_THREAD macro (default 8)
 const MSW_CHUNK_PER_THREAD: u32 = 8;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaMswError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf}, current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaMswError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaMswError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaMswError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaMswError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -68,7 +74,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaMsw {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy_batch: BatchKernelPolicy,
     policy_many: ManySeriesKernelPolicy,
@@ -80,28 +86,18 @@ pub struct CudaMsw {
 
 impl CudaMsw {
     pub fn new(device_id: usize) -> Result<Self, CudaMswError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/msw_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaMswError::Cuda(e.to_string()))?
-                }
-            }
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
@@ -136,10 +132,7 @@ impl CudaMsw {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaMswError> {
-        self
-            .stream
-            .synchronize()
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
 
     #[inline]
@@ -192,14 +185,26 @@ impl CudaMsw {
             Err(_) => true,
         }
     }
-    fn will_fit(required_bytes: usize, headroom: usize) -> bool {
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+    fn will_fit(required_bytes: usize, headroom: usize) -> Result<(), CudaMswError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
-        if let Ok((free, _)) = mem_get_info() {
-            required_bytes.saturating_add(headroom) <= free
+        if let Some((free, _total)) = Self::device_mem_info() {
+            if required_bytes.saturating_add(headroom) > free {
+                return Err(CudaMswError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom,
+                });
+            }
+            Ok(())
         } else {
-            true
+            // If mem_get_info failed earlier, conservatively succeed here but callers
+            // still see any underlying CUDA errors from allocations.
+            Ok(())
         }
     }
     fn first_valid_f32(series: &[f32]) -> Result<usize, CudaMswError> {
@@ -211,17 +216,75 @@ impl CudaMsw {
             .position(|x| x.is_finite())
             .ok_or_else(|| CudaMswError::InvalidInput("all values are NaN".into()))
     }
-    fn expand_grid(range: &MswBatchRange) -> Vec<MswParams> {
+    fn expand_grid(range: &MswBatchRange) -> Result<Vec<MswParams>, CudaMswError> {
+        fn axis_usize(
+            (start, end, step): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaMswError> {
+            if step == 0 || start == end {
+                return Ok(vec![start]);
+            }
+            if start < end {
+                let mut out = Vec::new();
+                let mut v = start;
+                while v <= end {
+                    out.push(v);
+                    match v.checked_add(step) {
+                        Some(next) => {
+                            if next == v {
+                                break;
+                            }
+                            v = next;
+                        }
+                        None => break,
+                    }
+                }
+                if out.is_empty() {
+                    return Err(CudaMswError::InvalidInput(format!(
+                        "invalid range: start={}, end={}, step={}",
+                        start, end, step
+                    )));
+                }
+                return Ok(out);
+            }
+            // Reversed bounds: walk downwards, including both ends.
+            let mut out = Vec::new();
+            let mut v = start;
+            loop {
+                out.push(v);
+                if v <= end {
+                    break;
+                }
+                match v.checked_sub(step) {
+                    Some(next) => {
+                        v = next;
+                        if v <= end {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            if out.is_empty() {
+                return Err(CudaMswError::InvalidInput(format!(
+                    "invalid range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            Ok(out)
+        }
+
         let (s, e, step) = range.period;
-        let periods = if step == 0 || s == e {
-            vec![s]
-        } else {
-            (s..=e).step_by(step).collect::<Vec<_>>()
-        };
-        periods
+        let periods = axis_usize((s, e, step))?;
+        if periods.is_empty() {
+            return Err(CudaMswError::InvalidInput(format!(
+                "no parameter combinations for range start={}, end={}, step={}",
+                s, e, step
+            )));
+        }
+        Ok(periods
             .into_iter()
             .map(|p| MswParams { period: Some(p) })
-            .collect()
+            .collect())
     }
 
     // Dynamic shared memory for optimized kernel (use_lut = true):
@@ -250,8 +313,7 @@ impl CudaMsw {
                     .unwrap_or([px, 256, 192, 128, 96, 64, 48, 32, 32]);
             }
         }
-        let dev =
-            Device::get_device(self.device_id).map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        let dev = Device::get_device(self.device_id)?;
         let max_threads = dev
             .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
             .unwrap_or(1024) as u32;
@@ -305,6 +367,21 @@ impl CudaMsw {
         let grid_y = chunk_rows as u32;
         let grid: GridSize = (grid_x.max(1), grid_y, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        // Basic launch config validation against device limits
+        let dev = Device::get_device(self.device_id)?;
+        let max_bx = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        if block_x > max_bx || grid_y == 0 {
+            return Err(CudaMswError::LaunchConfigTooLarge {
+                gx: grid_x.max(1),
+                gy: grid_y,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -324,8 +401,7 @@ impl CudaMsw {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(func, grid, block, shared_bytes as u32, args)
-                .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+            self.stream.launch(func, grid, block, shared_bytes as u32, args)?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaMsw)).last_batch =
@@ -344,12 +420,7 @@ impl CudaMsw {
             return Err(CudaMswError::InvalidInput("empty series".into()));
         }
         let first_valid = Self::first_valid_f32(prices_f32)?;
-        let combos = Self::expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaMswError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = Self::expand_grid(sweep)?;
 
         let len = prices_f32.len();
         let mut periods_i32 = Vec::with_capacity(combos.len());
@@ -377,28 +448,40 @@ impl CudaMsw {
         }
 
         // VRAM estimate: input + periods + output(2*rows*len)
-        let req = len * 4 + periods_i32.len() * 4 + (2 * combos.len() * len) * 4;
+        let rows = combos.len();
+        let prices_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMswError::InvalidInput("series length overflow".into()))?;
+        let periods_bytes = periods_i32
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaMswError::InvalidInput("periods size overflow".into()))?;
+        let out_elems = rows
+            .checked_mul(len)
+            .and_then(|n| n.checked_mul(2))
+            .ok_or_else(|| CudaMswError::InvalidInput("rows*len overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMswError::InvalidInput("output size overflow".into()))?;
+        let req = prices_bytes
+            .checked_add(periods_bytes)
+            .and_then(|b| b.checked_add(out_bytes))
+            .ok_or_else(|| CudaMswError::InvalidInput("total VRAM size overflow".into()))?;
         let headroom = 64 * 1024 * 1024usize;
-        if !Self::will_fit(req, headroom) {
-            return Err(CudaMswError::InvalidInput(
-                "insufficient VRAM for MSW batch".into(),
-            ));
-        }
+        Self::will_fit(req, headroom)?;
 
         // Device buffers
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(prices_f32, &self.stream) }
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(2 * combos.len() * len, &self.stream) }
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(prices_f32, &self.stream) }?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
         // Select block_x based on max_p for shared memory sizing once using the function handle
         // (we still pass it to launch method via try_pick inside, so warm up function cache here)
         let func = self
             .module
             .get_function("msw_batch_f32")
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMswError::MissingKernelSymbol { name: "msw_batch_f32" })?;
         let (block_x, shared_bytes) = self.try_pick_block_x(
             &func,
             max_p,
@@ -416,12 +499,7 @@ impl CudaMsw {
             self.launch_batch_chunk(&d_prices, &d_periods, len, first_valid, take, base, &mut d_out, block_x, shared_bytes, &func)?;
             base += take;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {
@@ -444,7 +522,10 @@ impl CudaMsw {
         if cols == 0 || rows == 0 {
             return Err(CudaMswError::InvalidInput("cols/rows must be > 0".into()));
         }
-        if prices_tm_f32.len() != cols * rows {
+        let expected_elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMswError::InvalidInput("cols*rows overflow".into()))?;
+        if prices_tm_f32.len() != expected_elems {
             return Err(CudaMswError::InvalidInput(
                 "data length != cols*rows".into(),
             ));
@@ -479,29 +560,55 @@ impl CudaMsw {
         }
 
         // VRAM: input + first_valids + output (rows * 2*cols)
-        let req = (cols * rows * 4) + (cols * 4) + (rows * 2 * cols * 4);
-        if !Self::will_fit(req, 64 * 1024 * 1024) {
-            return Err(CudaMswError::InvalidInput(
-                "insufficient VRAM for MSW many-series".into(),
-            ));
-        }
+        let prices_bytes = expected_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMswError::InvalidInput("input size overflow".into()))?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaMswError::InvalidInput("first_valids size overflow".into()))?;
+        let out_elems = rows
+            .checked_mul(2)
+            .and_then(|n| n.checked_mul(cols))
+            .ok_or_else(|| CudaMswError::InvalidInput("output rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMswError::InvalidInput("output size overflow".into()))?;
+        let req = prices_bytes
+            .checked_add(first_bytes)
+            .and_then(|b| b.checked_add(out_bytes))
+            .ok_or_else(|| CudaMswError::InvalidInput("total VRAM size overflow".into()))?;
+        Self::will_fit(req, 64 * 1024 * 1024)?;
 
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows * 2 * cols, &self.stream) }
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }?;
+        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
         let mut func = self
             .module
             .get_function("msw_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMswError::MissingKernelSymbol {
+                name: "msw_many_series_one_param_time_major_f32",
+            })?;
         let (block_x, shared_bytes) = self.try_pick_block_x(&func, period, match self.policy_many { ManySeriesKernelPolicy::OneD { block_x } => Some(block_x), _ => None })?;
         // grid.x in tiles of T = block_x * MSW_CHUNK_PER_THREAD
         let t_per_block = block_x * MSW_CHUNK_PER_THREAD;
         let grid_x = ((rows as u32) + t_per_block - 1) / t_per_block;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
+        let dev = Device::get_device(self.device_id)?;
+        let max_bx = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        if block_x > max_bx {
+            return Err(CudaMswError::LaunchConfigTooLarge {
+                gx: grid_x.max(1),
+                gy: cols as u32,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
@@ -520,8 +627,7 @@ impl CudaMsw {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&func, grid, block, shared_bytes as u32, args)
-                .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+                .launch(&func, grid, block, shared_bytes as u32, args)?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaMsw)).last_many =
@@ -532,9 +638,7 @@ impl CudaMsw {
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
         self.maybe_log_many_debug();
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 { buf: d_out, rows, cols: 2 * cols })
     }

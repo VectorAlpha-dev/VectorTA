@@ -18,6 +18,7 @@
 //! - SIMD status: AVX2/AVX512 stubs delegate to scalar (branch-heavy rolling max; SIMD underperforms). Kept for future work.
 //! - Batch status: row-specific SIMD not attempted; algorithmic batch optimization groups rows by period and scales a base (scalar=1.0) series per row.
 //! - Memory/Perf: uses `alloc_with_nan_prefix` and zero-copy outputs; warmup handling matches alma.rs patterns.
+//! - CUDA status: GPU batch and many-series kernels are exposed via `CudaUi`, with primary-context–safe VRAM handles and Python interop through CAI v3 + DLPack v1.x.
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -50,7 +51,7 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaUi;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 
 impl<'a> AsRef<[f64]> for UiInput<'a> {
     #[inline(always)]
@@ -197,18 +198,27 @@ impl UiBuilder {
 
 #[derive(Debug, Error)]
 pub enum UiError {
-    #[error("ui: Empty input")]
-    EmptyInput,
+    #[error("ui: Empty input data")]
+    EmptyInputData,
     #[error("ui: All values are NaN.")]
     AllValuesNaN,
     #[error("ui: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("ui: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("ui: Invalid length: expected = {expected}, actual = {actual}")]
-    InvalidLength { expected: usize, actual: usize },
+    #[error("ui: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
     #[error("ui: Invalid scalar: {scalar}")]
     InvalidScalar { scalar: f64 },
+    #[error("ui: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
+    #[error("ui: Invalid kernel for batch operation. Expected batch kernel, got: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    // Back-compat aliases kept for older callers; new code paths do not emit them.
+    #[error("ui: Empty input")]
+    EmptyInput,
+    #[error("ui: Invalid length: expected = {expected}, actual = {actual}")]
+    InvalidLength { expected: usize, actual: usize },
 }
 
 #[inline]
@@ -220,7 +230,7 @@ pub fn ui_with_kernel(input: &UiInput, kernel: Kernel) -> Result<UiOutput, UiErr
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
-        return Err(UiError::EmptyInput);
+        return Err(UiError::EmptyInputData);
     }
 
     let first = data
@@ -251,7 +261,21 @@ pub fn ui_with_kernel(input: &UiInput, kernel: Kernel) -> Result<UiOutput, UiErr
         other => other,
     };
 
-    let warmup = first + (period * 2 - 2);
+    let span = period
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(2))
+        .ok_or(UiError::InvalidRange {
+            start: period as f64,
+            end: len as f64,
+            step: 2.0,
+        })?;
+    let warmup = first
+        .checked_add(span)
+        .ok_or(UiError::InvalidRange {
+            start: period as f64,
+            end: len as f64,
+            step: 2.0,
+        })?;
     let mut out = alloc_with_nan_prefix(len, warmup.min(len));
 
     // no extra clearing needed; prefix already set
@@ -277,13 +301,13 @@ pub fn ui_into(input: &UiInput, out: &mut [f64]) -> Result<(), UiError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
-        return Err(UiError::EmptyInput);
+        return Err(UiError::EmptyInputData);
     }
 
     if out.len() != len {
-        return Err(UiError::InvalidLength {
+        return Err(UiError::OutputLengthMismatch {
             expected: len,
-            actual: out.len(),
+            got: out.len(),
         });
     }
 
@@ -313,7 +337,21 @@ pub fn ui_into(input: &UiInput, out: &mut [f64]) -> Result<(), UiError> {
     let chosen = detect_best_kernel();
 
     // Prefill warmup prefix with the crate's quiet-NaN pattern to match alloc_with_nan_prefix
-    let warmup = first + (period * 2 - 2);
+    let span = period
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(2))
+        .ok_or(UiError::InvalidRange {
+            start: period as f64,
+            end: len as f64,
+            step: 2.0,
+        })?;
+    let warmup = first
+        .checked_add(span)
+        .ok_or(UiError::InvalidRange {
+            start: period as f64,
+            end: len as f64,
+            step: 2.0,
+        })?;
     let nan_q = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..warmup.min(len)] {
         *v = nan_q;
@@ -895,11 +933,8 @@ pub fn ui_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(UiError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+        other => {
+            return Err(UiError::InvalidKernelForBatch(other));
         }
     };
 
@@ -936,35 +971,91 @@ impl UiBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &UiBatchRange) -> Vec<UiParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &UiBatchRange) -> Result<Vec<UiParams>, UiError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, UiError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let vals: Vec<usize> = (start..=end).step_by(step).collect();
+            if vals.is_empty() {
+                return Err(UiError::InvalidRange {
+                    start: start as f64,
+                    end: end as f64,
+                    step: step as f64,
+                });
+            }
+            Ok(vals)
+        } else {
+            // Support reversed bounds by walking [end, start] and reversing.
+            let mut v: Vec<usize> = (end..=start).step_by(step).collect();
+            if v.is_empty() {
+                return Err(UiError::InvalidRange {
+                    start: start as f64,
+                    end: end as f64,
+                    step: step as f64,
+                });
+            }
+            v.reverse();
+            Ok(v)
+        }
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, UiError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        // Guard against invalid steps that could cause infinite loops
+        // Guard against invalid step direction that would not converge.
         if (start < end && step <= 0.0) || (start > end && step >= 0.0) {
-            return vec![start];
+            return Err(UiError::InvalidRange { start, end, step });
         }
         let mut v = Vec::new();
         let mut x = start;
-        let max_iterations = 10000; // Safety limit
-        let mut iterations = 0;
-        while x <= end + 1e-12 && iterations < max_iterations {
-            v.push(x);
-            x += step;
-            iterations += 1;
+        let max_iterations: usize = 10_000; // Safety limit
+        let mut iterations: usize = 0;
+        if start < end {
+            while x <= end + 1e-12 {
+                if iterations >= max_iterations {
+                    return Err(UiError::InvalidRange { start, end, step });
+                }
+                v.push(x);
+                x += step;
+                iterations += 1;
+            }
+        } else {
+            // Reversed bounds with negative step.
+            while x >= end - 1e-12 {
+                if iterations >= max_iterations {
+                    return Err(UiError::InvalidRange { start, end, step });
+                }
+                v.push(x);
+                x += step; // step < 0 here
+                iterations += 1;
+            }
         }
-        v
+        if v.is_empty() {
+            return Err(UiError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let scalars = axis_f64(r.scalar);
-    let mut out = Vec::with_capacity(periods.len() * scalars.len());
+
+    let periods = axis_usize(r.period)?;
+    let scalars = axis_f64(r.scalar)?;
+    if periods.is_empty() || scalars.is_empty() {
+        return Err(UiError::InvalidRange {
+            start: r.period.0 as f64,
+            end: r.period.1 as f64,
+            step: r.period.2 as f64,
+        });
+    }
+    let combos_len = periods
+        .len()
+        .checked_mul(scalars.len())
+        .ok_or(UiError::InvalidRange {
+            start: periods.len() as f64,
+            end: scalars.len() as f64,
+            step: 0.0,
+        })?;
+    let mut out = Vec::with_capacity(combos_len);
     for &p in &periods {
         for &s in &scalars {
             out.push(UiParams {
@@ -973,7 +1064,7 @@ fn expand_grid(r: &UiBatchRange) -> Vec<UiParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1003,15 +1094,12 @@ fn ui_batch_inner(
 ) -> Result<UiBatchOutput, UiError> {
     // Check for empty input first
     if data.is_empty() {
-        return Err(UiError::EmptyInput);
+        return Err(UiError::EmptyInputData);
     }
 
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(UiError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(UiError::InvalidRange { start: sweep.period.0 as f64, end: sweep.period.1 as f64, step: sweep.period.2 as f64 });
     }
 
     // Resolve Kernel::Auto to a concrete kernel
@@ -1025,7 +1113,21 @@ fn ui_batch_inner(
         .position(|x| x.is_finite())
         .ok_or(UiError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let max_warmup = first + (max_p * 2 - 2);
+    let span = max_p
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(2))
+        .ok_or(UiError::InvalidRange {
+            start: max_p as f64,
+            end: data.len() as f64,
+            step: 2.0,
+        })?;
+    let max_warmup = first
+        .checked_add(span)
+        .ok_or(UiError::InvalidRange {
+            start: max_p as f64,
+            end: data.len() as f64,
+            step: 2.0,
+        })?;
     if data.len() <= max_warmup {
         return Err(UiError::NotEnoughValidData {
             needed: max_warmup + 1,
@@ -1035,6 +1137,13 @@ fn ui_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(UiError::InvalidRange {
+            start: rows as f64,
+            end: cols as f64,
+            step: 0.0,
+        })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_slice: &mut [f64] = unsafe {
@@ -1149,11 +1258,15 @@ pub fn ui_batch_py<'py>(
         scalar: scalar_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("ui_batch: rows * cols overflow"))?;
+
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -1231,15 +1344,12 @@ fn ui_batch_inner_into(
 ) -> Result<Vec<UiParams>, UiError> {
     // Check for empty input first
     if data.is_empty() {
-        return Err(UiError::EmptyInput);
+        return Err(UiError::EmptyInputData);
     }
 
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(UiError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(UiError::InvalidRange { start: sweep.period.0 as f64, end: sweep.period.1 as f64, step: sweep.period.2 as f64 });
     }
 
     let first = data
@@ -1247,7 +1357,21 @@ fn ui_batch_inner_into(
         .position(|x| x.is_finite())
         .ok_or(UiError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let max_warmup = first + (max_p * 2 - 2);
+    let span = max_p
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(2))
+        .ok_or(UiError::InvalidRange {
+            start: max_p as f64,
+            end: data.len() as f64,
+            step: 2.0,
+        })?;
+    let max_warmup = first
+        .checked_add(span)
+        .ok_or(UiError::InvalidRange {
+            start: max_p as f64,
+            end: data.len() as f64,
+            step: 2.0,
+        })?;
     if data.len() <= max_warmup {
         return Err(UiError::NotEnoughValidData {
             needed: max_warmup + 1,
@@ -1257,7 +1381,22 @@ fn ui_batch_inner_into(
 
     let cols = data.len();
     for (row, combo) in combos.iter().enumerate() {
-        let warmup = first + (combo.period.unwrap() * 2 - 2);
+        let period = combo.period.unwrap();
+        let span_row = period
+            .checked_mul(2)
+            .and_then(|v| v.checked_sub(2))
+            .ok_or(UiError::InvalidRange {
+                start: period as f64,
+                end: data.len() as f64,
+                step: 2.0,
+            })?;
+        let warmup = first
+            .checked_add(span_row)
+            .ok_or(UiError::InvalidRange {
+                start: period as f64,
+                end: data.len() as f64,
+                step: 2.0,
+            })?;
         let row_start = row * cols;
         for i in 0..warmup.min(cols) {
             out[row_start + i] = f64::NAN;
@@ -1370,13 +1509,13 @@ pub fn ui_into_slice(dst: &mut [f64], input: &UiInput, kern: Kernel) -> Result<(
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
-        return Err(UiError::EmptyInput);
+        return Err(UiError::EmptyInputData);
     }
 
     if dst.len() != len {
-        return Err(UiError::InvalidLength {
+        return Err(UiError::OutputLengthMismatch {
             expected: len,
-            actual: dst.len(),
+            got: dst.len(),
         });
     }
 
@@ -1579,7 +1718,7 @@ pub fn ui_cuda_batch_dev_py(
             .map(|(arr, _)| arr)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1609,7 +1748,7 @@ pub fn ui_cuda_many_series_one_param_dev_py(
         cuda.ui_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 /// Fast batch API with raw pointers
@@ -1638,11 +1777,16 @@ pub fn ui_batch_into(
             scalar: (scalar_start, scalar_end, scalar_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("ui_batch_into: rows * cols overflow"))?;
+
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         ui_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

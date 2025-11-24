@@ -17,7 +17,7 @@
 //! - **AVX512**: Stub implementation - calls scalar function
 //! - **Streaming**: O(1) drop-in stream (no ring buffer), precomputed coeffs, FMA-based updates; matches batch warmup/anchor semantics
 //! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **Decision**: Fused scalar kernel enabled for default params (14,5,4.236); ~30% faster vs prior scalar at 100k. SIMD kept as stubs due to loop-carried dependencies.
+//! - **Decision log**: Fused scalar kernel enabled for default params (14,5,4.236); ~30% faster vs prior scalar at 100k. SIMD kept as stubs due to loop-carried dependencies; CUDA wrapper provided with CAI v3 + DLPack v1.x handles for batch/many-series, numerical parity vs scalar within fp32 tolerances.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -40,7 +40,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaQqe};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 use crate::indicators::moving_averages::ema::{ema, EmaInput, EmaParams};
 use crate::indicators::rsi::{rsi, RsiInput, RsiParams};
 use crate::utilities::data_loader::{source_type, Candles};
@@ -262,6 +262,15 @@ pub enum QqeError {
     #[error("qqe: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 
+    #[error("qqe: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("qqe: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("qqe: Invalid kernel type for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
     #[error("qqe: Error in dependent indicator: {message}")]
     DependentIndicatorError { message: String },
 }
@@ -376,9 +385,10 @@ pub fn qqe_into_slices(
 
     let (data, rsi_p, ema_p, fast_k, first, chosen) = qqe_prepare(input, kern)?;
     if dst_fast.len() != data.len() || dst_slow.len() != data.len() {
-        return Err(QqeError::InvalidPeriod {
-            period: dst_fast.len(),
-            data_len: data.len(),
+        let got = core::cmp::min(dst_fast.len(), dst_slow.len());
+        return Err(QqeError::OutputLengthMismatch {
+            expected: data.len(),
+            got,
         });
     }
     let warm = first + rsi_p + ema_p - 2;
@@ -574,10 +584,8 @@ pub unsafe fn qqe_scalar_classic(
 ) -> Result<(), QqeError> {
     let len = data.len();
     if dst_fast.len() != len || dst_slow.len() != len {
-        return Err(QqeError::InvalidPeriod {
-            period: dst_fast.len(),
-            data_len: len,
-        });
+        let got = core::cmp::min(dst_fast.len(), dst_slow.len());
+        return Err(QqeError::OutputLengthMismatch { expected: len, got });
     }
 
     let rsi_start = first + rsi_period;
@@ -1068,18 +1076,43 @@ fn expand_grid(r: &QqeBatchRange) -> Vec<QqeParams> {
         if st == 0 || s == e {
             return vec![s];
         }
-        (s..=e).step_by(st).collect()
+        if s < e {
+            return (s..=e).step_by(st.max(1)).collect();
+        }
+        let mut v = Vec::new();
+        let step = st.max(1);
+        let mut cur = s;
+        while cur >= e {
+            v.push(cur);
+            if cur < step {
+                break;
+            }
+            cur -= step;
+            if cur == usize::MAX {
+                break;
+            }
+        }
+        v
     }
 
     fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
-        if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+        let step = if st.is_sign_negative() { -st } else { st };
+        if step.abs() < 1e-12 || (s - e).abs() < 1e-12 {
             return vec![s];
         }
         let mut v = Vec::new();
-        let mut x = s;
-        while x <= e + 1e-12 {
-            v.push(x);
-            x += st;
+        if s <= e {
+            let mut x = s;
+            while x <= e + 1e-12 {
+                v.push(x);
+                x += step;
+            }
+        } else {
+            let mut x = s;
+            while x + 1e-12 >= e {
+                v.push(x);
+                x -= step;
+            }
         }
         v
     }
@@ -1087,7 +1120,12 @@ fn expand_grid(r: &QqeBatchRange) -> Vec<QqeParams> {
     let rs = axis_usize(r.rsi_period);
     let sm = axis_usize(r.smoothing_factor);
     let ff = axis_f64(r.fast_factor);
-    let mut out = Vec::with_capacity(rs.len() * sm.len() * ff.len());
+    let cap = rs
+        .len()
+        .checked_mul(sm.len())
+        .and_then(|x| x.checked_mul(ff.len()))
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
 
     for &rp in &rs {
         for &sp in &sm {
@@ -1113,9 +1151,10 @@ pub fn qqe_batch_with_kernel(
 
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(QqeError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(QqeError::InvalidRange {
+            start: sweep.rsi_period.0,
+            end: sweep.rsi_period.1,
+            step: sweep.rsi_period.2,
         });
     }
     let cols = data.len();
@@ -1144,10 +1183,7 @@ pub fn qqe_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(QqeError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(QqeError::InvalidKernelForBatch(k))
         }
     };
     let simd = match actual {
@@ -1158,6 +1194,13 @@ pub fn qqe_batch_with_kernel(
     };
 
     let rows = combos.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(QqeError::InvalidRange {
+            start: sweep.rsi_period.0,
+            end: sweep.rsi_period.1,
+            step: sweep.rsi_period.2,
+        })?;
     let mut fast_mu = make_uninit_matrix(rows, cols);
     let mut slow_mu = make_uninit_matrix(rows, cols);
 
@@ -1170,10 +1213,12 @@ pub fn qqe_batch_with_kernel(
     init_matrix_prefixes(&mut slow_mu, cols, &warm);
 
     // Materialize flat views
-    let fast_out: &mut [f64] =
-        unsafe { core::slice::from_raw_parts_mut(fast_mu.as_mut_ptr() as *mut f64, rows * cols) };
-    let slow_out: &mut [f64] =
-        unsafe { core::slice::from_raw_parts_mut(slow_mu.as_mut_ptr() as *mut f64, rows * cols) };
+    let fast_out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(fast_mu.as_mut_ptr() as *mut f64, total)
+    };
+    let slow_out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(slow_mu.as_mut_ptr() as *mut f64, total)
+    };
 
     // Reusable tmp buffer for RSI
     let mut tmp_mu = make_uninit_matrix(1, cols);
@@ -1216,9 +1261,9 @@ pub fn qqe_batch_with_kernel(
     }
 
     let fast_values =
-        unsafe { Vec::from_raw_parts(fast_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols) };
+        unsafe { Vec::from_raw_parts(fast_mu.as_mut_ptr() as *mut f64, total, total) };
     let slow_values =
-        unsafe { Vec::from_raw_parts(slow_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols) };
+        unsafe { Vec::from_raw_parts(slow_mu.as_mut_ptr() as *mut f64, total, total) };
     core::mem::forget(fast_mu);
     core::mem::forget(slow_mu);
 
@@ -1239,9 +1284,10 @@ fn qqe_batch_inner(
 ) -> Result<QqeBatchOutput, QqeError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(QqeError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(QqeError::InvalidRange {
+            start: sweep.rsi_period.0,
+            end: sweep.rsi_period.1,
+            step: sweep.rsi_period.2,
         });
     }
     let cols = data.len();
@@ -1265,6 +1311,13 @@ fn qqe_batch_inner(
     }
 
     let rows = combos.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(QqeError::InvalidRange {
+            start: sweep.rsi_period.0,
+            end: sweep.rsi_period.1,
+            step: sweep.rsi_period.2,
+        })?;
     let mut fast_mu = make_uninit_matrix(rows, cols);
     let mut slow_mu = make_uninit_matrix(rows, cols);
 
@@ -1280,10 +1333,7 @@ fn qqe_batch_inner(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(QqeError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(QqeError::InvalidKernelForBatch(kern))
         }
     };
     let simd = match actual {
@@ -1371,9 +1421,9 @@ fn qqe_batch_inner(
     }
 
     let fast_values =
-        unsafe { Vec::from_raw_parts(fast_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols) };
+        unsafe { Vec::from_raw_parts(fast_mu.as_mut_ptr() as *mut f64, total, total) };
     let slow_values =
-        unsafe { Vec::from_raw_parts(slow_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols) };
+        unsafe { Vec::from_raw_parts(slow_mu.as_mut_ptr() as *mut f64, total, total) };
     core::mem::forget(fast_mu);
     core::mem::forget(slow_mu);
 
@@ -1618,6 +1668,7 @@ pub fn qqe_cuda_batch_dev_py<'py>(
         cuda.qqe_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
+    let handle = make_device_array_py(device_id, inner)?;
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item(
         "rsi_periods",
@@ -1645,7 +1696,7 @@ pub fn qqe_cuda_batch_dev_py<'py>(
     )?;
     dict.set_item("rows", 2 * combos.len())?;
     dict.set_item("cols", slice.len())?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((handle, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1680,7 +1731,8 @@ pub fn qqe_cuda_many_series_one_param_dev_py<'py>(
         cuda.qqe_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 // ==================== WASM BINDINGS ====================

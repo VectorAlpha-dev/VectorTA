@@ -11,7 +11,7 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
 use cust::memory::{mem_get_info, DeviceBuffer, DeviceCopy};
@@ -20,7 +20,8 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
 // ---- OBV scan constants must match CUDA defaults ----
 // Kernels are compiled with OBV_BLOCK_SIZE = 256 and OBV_ITEMS_PER_THREAD = 8.
@@ -70,36 +71,39 @@ pub struct CudaObvPolicy {
     pub many_series: ObvManySeriesKernelPolicy,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaObvError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Out of memory on device: required={required}B, free={free}B, headroom={headroom}B")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch for buffer (buf={buf}, current={current})")]
+    DeviceMismatch { buf: i32, current: i32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaObvError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaObvError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaObvError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaObvError {}
 
 pub struct CudaObv {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaObvPolicy,
 }
 
 impl CudaObv {
     pub fn new(device_id: usize) -> Result<Self, CudaObvError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/obv_kernel.ptx"));
         let jit_opts = &[
@@ -113,18 +117,17 @@ impl CudaObv {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaObvError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaObvPolicy::default(),
         })
@@ -148,15 +151,48 @@ impl CudaObv {
     }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaObvError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+            let need = required_bytes
+                .checked_add(headroom_bytes)
+                .ok_or_else(|| {
+                    CudaObvError::InvalidInput(
+                        "size overflow when adding headroom to required bytes".into(),
+                    )
+                })?;
+            if need <= free {
+                Ok(())
+            } else {
+                Err(CudaObvError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
         } else {
-            true
+            Ok(())
         }
+    }
+
+    #[inline]
+    fn validate_launch(&self, grid: (u32, u32, u32), block: (u32, u32, u32)) -> Result<(), CudaObvError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
+
+        let (gx, gy, gz) = grid;
+        let (bx, by, bz) = block;
+        if bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
+            return Err(CudaObvError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
     }
 
     // ---------- Public API: one-series × many-params (OBV: single row) ----------
@@ -181,33 +217,34 @@ impl CudaObv {
 
         // VRAM estimate: 2 inputs + 1 output + workspace (sums+offsets)
         let tiles = (series_len + OBV_TILE - 1) / OBV_TILE;
-        let workspace_bytes = tiles * std::mem::size_of::<FPair>() * 2;
-        let bytes = (close.len() + volume.len() + series_len) * std::mem::size_of::<f32>()
-            + workspace_bytes;
+        let sz_pair = std::mem::size_of::<FPair>();
+        let sz_f32 = std::mem::size_of::<f32>();
+        let workspace_bytes = tiles
+            .checked_mul(sz_pair)
+            .and_then(|b| b.checked_mul(2))
+            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing workspace_bytes".into()))?;
+        let in_elems = close
+            .len()
+            .checked_add(volume.len())
+            .and_then(|n| n.checked_add(series_len))
+            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing input elements".into()))?;
+        let in_bytes = in_elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing input bytes".into()))?;
+        let bytes = in_bytes
+            .checked_add(workspace_bytes)
+            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing total bytes".into()))?;
         let headroom = 64 * 1024 * 1024; // ~64MB
-        if !Self::will_fit(bytes, headroom) {
-            return Err(CudaObvError::InvalidInput(
-                "insufficient device memory for OBV batch".into(),
-            ));
-        }
+        Self::will_fit(bytes, headroom)?;
 
         // H2D copies
-        let d_close =
-            DeviceBuffer::from_slice(close).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let d_volume =
-            DeviceBuffer::from_slice(volume).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let d_volume =
-            DeviceBuffer::from_slice(volume).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close)?;
+        let d_volume = DeviceBuffer::from_slice(volume)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
 
         self.launch_obv_batch(&d_close, &d_volume, series_len, 1, first_valid, &mut d_out)?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -230,12 +267,13 @@ impl CudaObv {
             let func = self
                 .module
                 .get_function("obv_batch_f32_serial_ref")
-                .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaObvError::MissingKernelSymbol { name: "obv_batch_f32_serial_ref" })?;
 
             // Cover warmup writes in parallel for larger fv
             let grid_x = ((series_len as u32) + OBV_BLOCK_X - 1) / OBV_BLOCK_X;
             let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
             let grid: GridSize = (grid_x.max(1), (n_combos as u32).max(1), 1).into();
+            self.validate_launch((grid_x.max(1), (n_combos as u32).max(1), 1), (OBV_BLOCK_X, 1, 1))?;
 
             unsafe {
                 let mut p_close = d_close.as_device_ptr().as_raw();
@@ -252,9 +290,7 @@ impl CudaObv {
                     &mut fv_i as *mut _ as *mut c_void,
                     &mut p_out as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
             return Ok(());
         }
@@ -263,15 +299,15 @@ impl CudaObv {
         let pass1 = self
             .module
             .get_function("obv_batch_f32_pass1_tilescan")
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaObvError::MissingKernelSymbol { name: "obv_batch_f32_pass1_tilescan" })?;
         let pass2 = self
             .module
             .get_function("obv_batch_f32_pass2_scan_block_sums")
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaObvError::MissingKernelSymbol { name: "obv_batch_f32_pass2_scan_block_sums" })?;
         let pass3 = self
             .module
             .get_function("obv_batch_f32_pass3_add_offsets")
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaObvError::MissingKernelSymbol { name: "obv_batch_f32_pass3_add_offsets" })?;
         let repl = self
             .module
             .get_function("obv_batch_f32_replicate_rows")
@@ -282,16 +318,15 @@ impl CudaObv {
 
         // Workspaces: block_sums and block_offsets as [tiles] of FPair
         let mut d_block_sums: DeviceBuffer<FPair> =
-            unsafe { DeviceBuffer::uninitialized(tiles) }
-                .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(tiles) }?;
         let mut d_block_offsets: DeviceBuffer<FPair> =
-            unsafe { DeviceBuffer::uninitialized(tiles) }
-                .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(tiles) }?;
 
         // Pass 1
         {
             let grid: GridSize = (tiles as u32, 1, 1).into();
             let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
+            self.validate_launch((tiles as u32, 1, 1), (OBV_BLOCK_X, 1, 1))?;
             unsafe {
                 let mut p_close = d_close.as_device_ptr().as_raw();
                 let mut p_vol = d_volume.as_device_ptr().as_raw();
@@ -311,9 +346,7 @@ impl CudaObv {
                     &mut p_sums as *mut _ as *mut c_void,
                     &mut tiles_i as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&pass1, grid, block, 0, args)
-                    .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+                self.stream.launch(&pass1, grid, block, 0, args)?;
             }
         }
 
@@ -321,6 +354,7 @@ impl CudaObv {
         {
             let grid: GridSize = (1, 1, 1).into();
             let block: BlockSize = (32, 1, 1).into();
+            self.validate_launch((1, 1, 1), (32, 1, 1))?;
             unsafe {
                 let mut p_sums = d_block_sums.as_device_ptr().as_raw();
                 let mut tiles_i = tiles as i32;
@@ -330,9 +364,7 @@ impl CudaObv {
                     &mut tiles_i as *mut _ as *mut c_void,
                     &mut p_offs as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&pass2, grid, block, 0, args)
-                    .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+                self.stream.launch(&pass2, grid, block, 0, args)?;
             }
         }
 
@@ -340,6 +372,7 @@ impl CudaObv {
         {
             let grid: GridSize = (tiles as u32, 1, 1).into();
             let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
+            self.validate_launch((tiles as u32, 1, 1), (OBV_BLOCK_X, 1, 1))?;
             unsafe {
                 let mut series_len_i = series_len as i32;
                 let mut n_combos_i = n_combos as i32;
@@ -355,9 +388,7 @@ impl CudaObv {
                     &mut p_offs as *mut _ as *mut c_void,
                     &mut tiles_i as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&pass3, grid, block, 0, args)
-                    .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+                self.stream.launch(&pass3, grid, block, 0, args)?;
             }
         }
 
@@ -368,6 +399,7 @@ impl CudaObv {
                 let grid_x = ((series_len as u32) + threads - 1) / threads;
                 let grid: GridSize = (grid_x.max(1), 1, 1).into();
                 let block: BlockSize = (threads, 1, 1).into();
+                self.validate_launch((grid_x.max(1), 1, 1), (threads, 1, 1))?;
                 unsafe {
                     let mut p_row0 = d_out.as_device_ptr().as_raw();
                     let mut series_len_i = series_len as i32;
@@ -379,9 +411,7 @@ impl CudaObv {
                         &mut n_combos_i as *mut _ as *mut c_void,
                         &mut p_out as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&func, grid, block, 0, args)
-                        .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+                    self.stream.launch(&func, grid, block, 0, args)?;
                 }
             }
         }
@@ -401,7 +431,10 @@ impl CudaObv {
         if cols == 0 || rows == 0 {
             return Err(CudaObvError::InvalidInput("empty dims".into()));
         }
-        if close_tm.len() != volume_tm.len() || close_tm.len() != cols * rows {
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing cols*rows".into()))?;
+        if close_tm.len() != volume_tm.len() || close_tm.len() != elems {
             return Err(CudaObvError::InvalidInput(
                 "mismatched input sizes for time-major matrix".into(),
             ));
@@ -427,33 +460,28 @@ impl CudaObv {
         }
 
         // VRAM estimate: 2 inputs + 1 output + first_valids
-        let elems = cols * rows;
-        let bytes = (2 * elems + elems) * std::mem::size_of::<f32>()
-            + cols * std::mem::size_of::<i32>();
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let inputs_bytes = elems
+            .checked_mul(3)
+            .and_then(|n| n.checked_mul(sz_f32))
+            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing input bytes".into()))?;
+        let first_bytes = cols
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing first_valid bytes".into()))?;
+        let bytes = inputs_bytes
+            .checked_add(first_bytes)
+            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing total bytes".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(bytes, headroom) {
-            return Err(CudaObvError::InvalidInput(
-                "insufficient device memory for OBV many-series".into(),
-            ));
-        }
+        Self::will_fit(bytes, headroom)?;
 
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let d_volume =
-            DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let d_volume =
-            DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close_tm)?;
+        let d_volume = DeviceBuffer::from_slice(volume_tm)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         self.launch_obv_many_series_tm(&d_close, &d_volume, &d_first, cols, rows, &mut d_out)?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -474,7 +502,7 @@ impl CudaObv {
         let func = self
             .module
             .get_function("obv_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaObvError::MissingKernelSymbol { name: "obv_many_series_one_param_time_major_f32" })?;
 
         let block_x = match self.policy.many_series {
             ObvManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -487,6 +515,7 @@ impl CudaObv {
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
 
         unsafe {
             let mut c_ptr = d_close_tm.as_device_ptr().as_raw();
@@ -503,9 +532,7 @@ impl CudaObv {
                 &mut rows_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }

@@ -15,13 +15,16 @@
 //! ## Returns
 //! - **values**: RVI oscillator values as `Vec<f64>` (length matches input, range 0-100)
 //!
-//! ## Developer Notes
+//! ## Developer Notes / Decision Log
 //! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation.
 //!   Decision: SIMD disabled for now — hot path is branchy (NaN-aware rolling
 //!   stddev/MAD/MEDAD + SMA/EMA smoothing), and initial attempts do not show
 //!   clear wins over the optimized scalar path. Runtime selection short-circuits
 //!   to scalar via stubs; revisit with stddev-only SIMD specialization if profiling
 //!   shows consistent >5% gains.
+//! - **CUDA wrapper**: Enabled for batch and many-series paths; kernels are FP32 with
+//!   CPU fallback for small problems. Streams are synchronized before returning VRAM
+//!   handles so Python CAI v3 + DLPack v1.x interop can omit explicit stream waits.
 //! - **Row-specific batch**: Not attempted; differing periods and NaN-aware windows
 //!   limit cross-row reuse. Batch uses scalar per row via selector; treat batch
 //!   benches as advisory.
@@ -248,8 +251,10 @@ impl RviBuilder {
 #[derive(Debug, Error)]
 pub enum RviError {
     #[error("rvi: Empty data provided.")]
-    EmptyData,
-    #[error("rvi: Invalid period or ma_len: period = {period}, ma_len = {ma_len}, data length = {data_len}")]
+    EmptyInputData,
+    #[error(
+        "rvi: Invalid period or ma_len: period = {period}, ma_len = {ma_len}, data length = {data_len}"
+    )]
     InvalidPeriod {
         period: usize,
         ma_len: usize,
@@ -259,8 +264,14 @@ pub enum RviError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("rvi: All values are NaN.")]
     AllValuesNaN,
-    #[error("rvi: Output slice length {dst_len} != data length {data_len}.")]
-    OutputLenMismatch { dst_len: usize, data_len: usize },
+    #[error("rvi: Output slice length {got} != data length {expected}.")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("rvi: invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: i128, end: i128, step: i128 },
+    #[error("rvi: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("rvi: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -271,7 +282,7 @@ pub fn rvi(input: &RviInput) -> Result<RviOutput, RviError> {
 pub fn rvi_with_kernel(input: &RviInput, kernel: Kernel) -> Result<RviOutput, RviError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
-        return Err(RviError::EmptyData);
+        return Err(RviError::EmptyInputData);
     }
     // Check for all NaN values first (before period validation)
     let first = data
@@ -326,7 +337,7 @@ pub fn rvi_with_kernel(input: &RviInput, kernel: Kernel) -> Result<RviOutput, Rv
 pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result<(), RviError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
-        return Err(RviError::EmptyData);
+        return Err(RviError::EmptyInputData);
     }
 
     // Check for all NaN values first
@@ -350,9 +361,9 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
     }
 
     if dst.len() != data.len() {
-        return Err(RviError::OutputLenMismatch {
-            dst_len: dst.len(),
-            data_len: data.len(),
+        return Err(RviError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -2364,19 +2375,66 @@ impl RviBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &RviBatchRange) -> Vec<RviParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &RviBatchRange) -> Result<Vec<RviParams>, RviError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, RviError> {
+        let s = start as i128;
+        let e = end as i128;
+        let st = step as i128;
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut v = Vec::new();
+        if start <= end {
+            let stp = step.max(1);
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                cur = match cur.checked_add(stp) {
+                    Some(n) => n,
+                    None => break,
+                };
+            }
+        } else {
+            let stp = step.max(1);
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                if cur <= end {
+                    break;
+                }
+                cur = match cur.checked_sub(stp) {
+                    Some(n) => n,
+                    None => break,
+                };
+                if cur < end {
+                    break;
+                }
+            }
+        }
+        if v.is_empty() {
+            Err(RviError::InvalidRange {
+                start: s,
+                end: e,
+                step: st,
+            })
+        } else {
+            Ok(v)
+        }
     }
-    let periods = axis_usize(r.period);
-    let ma_lens = axis_usize(r.ma_len);
-    let matypes = axis_usize(r.matype);
-    let devtypes = axis_usize(r.devtype);
-    let mut out =
-        Vec::with_capacity(periods.len() * ma_lens.len() * matypes.len() * devtypes.len());
+
+    let periods = axis_usize(r.period)?;
+    let ma_lens = axis_usize(r.ma_len)?;
+    let matypes = axis_usize(r.matype)?;
+    let devtypes = axis_usize(r.devtype)?;
+
+    let cap = periods
+        .len()
+        .checked_mul(ma_lens.len())
+        .and_then(|x| x.checked_mul(matypes.len()))
+        .and_then(|x| x.checked_mul(devtypes.len()))
+        .ok_or_else(|| RviError::InvalidInput("parameter grid too large".into()))?;
+
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &m in &ma_lens {
             for &t in &matypes {
@@ -2391,7 +2449,7 @@ fn expand_grid(r: &RviBatchRange) -> Vec<RviParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -2403,13 +2461,7 @@ pub fn rvi_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(RviError::InvalidPeriod {
-                period: 0,
-                ma_len: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(RviError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -2445,12 +2497,15 @@ fn rvi_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<RviBatchOutput, RviError> {
-    let combos = expand_grid(sweep);
+    if data.is_empty() {
+        return Err(RviError::EmptyInputData);
+    }
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(RviError::InvalidPeriod {
-            period: 0,
-            ma_len: 0,
-            data_len: 0,
+        return Err(RviError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
         });
     }
     let first = data
@@ -2468,6 +2523,9 @@ fn rvi_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| RviError::InvalidInput("rows * cols overflow".into()))?;
 
     // Use make_uninit_matrix for proper memory allocation like ALMA
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -2546,12 +2604,15 @@ fn rvi_batch_inner_into(
     parallel: bool,
     output: &mut [f64],
 ) -> Result<Vec<RviParams>, RviError> {
-    let combos = expand_grid(sweep);
+    if data.is_empty() {
+        return Err(RviError::EmptyInputData);
+    }
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(RviError::InvalidPeriod {
-            period: 0,
-            ma_len: 0,
-            data_len: 0,
+        return Err(RviError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
         });
     }
     let first = data
@@ -2567,7 +2628,17 @@ fn rvi_batch_inner_into(
             valid: data.len() - first,
         });
     }
+    let rows = combos.len();
     let cols = data.len();
+    let expected_len = rows
+        .checked_mul(cols)
+        .ok_or_else(|| RviError::InvalidInput("rows * cols overflow".into()))?;
+    if output.len() != expected_len {
+        return Err(RviError::OutputLengthMismatch {
+            expected: expected_len,
+            got: output.len(),
+        });
+    }
 
     // Map Kernel::Auto to best batch kernel
     let chosen_kernel = match kern {
@@ -3559,10 +3630,14 @@ pub fn rvi_batch_into(
             matype: (t_start, t_end, t_step),
             devtype: (d_start, d_end, d_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rvi_batch_into: rows * cols overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         let simd = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -3633,11 +3708,14 @@ pub fn rvi_batch_py<'py>(
         devtype: devtype_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rvi_batch: rows * cols overflow"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -3732,7 +3810,7 @@ pub fn register_rvi_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaRvi;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "rvi_cuda_batch_dev")]
@@ -3796,7 +3874,8 @@ pub fn rvi_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok((handle, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3829,5 +3908,5 @@ pub fn rvi_cuda_many_series_one_param_dev_py(
         cuda.rvi_many_series_one_param_time_major_dev(tm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(make_device_array_py(device_id, inner)?)
 }

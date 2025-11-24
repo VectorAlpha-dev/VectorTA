@@ -20,13 +20,14 @@
 //! - **Memory Optimization**: ✓ Uses make_uninit_matrix, init_matrix_prefixes for zero-copy
 //! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
 //! - **WebAssembly**: SIMD128 stub currently falls back to scalar
+//! - **Decision log**: Single-series SIMD compiled but Auto selects Scalar as fastest; CUDA wrapper enabled with typed errors and VRAM handles exported to Python via CAI v3 + DLPack v1.x, keeping numerical outputs identical to scalar.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaWto, CudaWtoBatchResult, DeviceArrayF32Triplet};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -235,16 +236,20 @@ impl WtoBuilder {
 pub enum WtoError {
     #[error("wto: Input data slice is empty.")]
     EmptyInputData,
-
     #[error("wto: All values are NaN.")]
     AllValuesNaN,
-
+    #[error("wto: Invalid input: {0}")]
+    InvalidInput(String),
     #[error("wto: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-
     #[error("wto: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-
+    #[error("wto: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("wto: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("wto: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
     #[error("wto: Computation error: {0}")]
     ComputationError(String),
 }
@@ -296,10 +301,12 @@ pub fn wto_into_slices(
     let (data, channel_length, average_length, first, chosen) = wto_prepare(input, kernel)?;
 
     if wt1.len() != data.len() || wt2.len() != data.len() || hist.len() != data.len() {
-        return Err(WtoError::InvalidPeriod {
-            period: wt1.len(),
-            data_len: data.len(),
-        });
+        let expected = data.len();
+        let got = wt1
+            .len()
+            .max(wt2.len())
+            .max(hist.len());
+        return Err(WtoError::OutputLengthMismatch { expected, got });
     }
 
     // First, initialize ALL output arrays with NaN
@@ -338,11 +345,16 @@ pub fn wto_into(
     let (data, channel_length, average_length, first, chosen) =
         wto_prepare(input, Kernel::Auto)?;
 
-    if wt1_out.len() != data.len() || wt2_out.len() != data.len() || hist_out.len() != data.len() {
-        return Err(WtoError::InvalidPeriod {
-            period: channel_length,
-            data_len: data.len(),
-        });
+    if wt1_out.len() != data.len()
+        || wt2_out.len() != data.len()
+        || hist_out.len() != data.len()
+    {
+        let expected = data.len();
+        let got = wt1_out
+            .len()
+            .max(wt2_out.len())
+            .max(hist_out.len());
+        return Err(WtoError::OutputLengthMismatch { expected, got });
     }
 
     // Prefill warmup prefixes with the crate's canonical quiet-NaN pattern
@@ -1125,7 +1137,10 @@ pub fn wto_unified_js(
     let out = wto(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let cols = close.len();
-    let mut values = Vec::with_capacity(3 * cols);
+    let cap = 3usize
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("overflow in wto_unified_js allocation"))?;
+    let mut values = Vec::with_capacity(cap);
     values.extend_from_slice(&out.wavetrend1);
     values.extend_from_slice(&out.wavetrend2);
     values.extend_from_slice(&out.histogram);
@@ -1180,15 +1195,21 @@ pub fn wto_batch_into(
             channel: (ch_start, ch_end, ch_step),
             average: (av_start, av_end, av_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let out = core::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows * cols overflow in wto_batch_into"))?;
+        let out = core::slice::from_raw_parts_mut(out_ptr, total);
 
         // Fill with WT1 values
         let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
         for (row, combo) in combos.iter().enumerate() {
-            let row_start = row * cols;
+            let row_start = row
+                .checked_mul(cols)
+                .ok_or_else(|| JsValue::from_str("row * cols overflow in wto_batch_into"))?;
             let row_end = row_start + cols;
             let dst = &mut out[row_start..row_end];
             wto_fill_wt1_row(data, combo.clone(), first, detect_best_kernel(), dst)
@@ -1399,8 +1420,12 @@ fn apply_ci_to_members(
 ) -> Result<(), WtoError> {
     let _ = parallel; // parallel hint currently unused after grouping reuse
     for member in members {
+        let offset = member
+            .row
+            .checked_mul(cols)
+            .ok_or_else(|| WtoError::InvalidInput("row * cols overflow in apply_ci_to_members".into()))?;
         let dst =
-            unsafe { core::slice::from_raw_parts_mut(out_ptr.0.add(member.row * cols), cols) };
+            unsafe { core::slice::from_raw_parts_mut(out_ptr.0.add(offset), cols) };
         ema_pinescript_into(ci, member.average_length, start_ci, dst);
     }
     Ok(())
@@ -1788,15 +1813,55 @@ fn wto_fill_wt1_row(
 }
 
 #[inline(always)]
-fn expand_grid(r: &WtoBatchRange) -> Vec<WtoParams> {
-    fn axis_u((s, e, st): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &WtoBatchRange) -> Result<Vec<WtoParams>, WtoError> {
+    fn axis_u((s, e, st): (usize, usize, usize)) -> Result<Vec<usize>, WtoError> {
         if st == 0 || s == e {
-            return vec![s];
+            return Ok(vec![s]);
         }
-        (s..=e).step_by(st).collect()
+        let mut out = Vec::new();
+        if s < e {
+            let mut v = s;
+            loop {
+                if v > e {
+                    break;
+                }
+                out.push(v);
+                let next = v
+                    .checked_add(st)
+                    .ok_or_else(|| WtoError::InvalidRange {
+                        start: s.to_string(),
+                        end: e.to_string(),
+                        step: st.to_string(),
+                    })?;
+                if next == v {
+                    break;
+                }
+                v = next;
+            }
+        } else {
+            let mut v = s;
+            loop {
+                if v < e {
+                    break;
+                }
+                out.push(v);
+                if v - e < st {
+                    break;
+                }
+                v -= st;
+            }
+        }
+        if out.is_empty() {
+            return Err(WtoError::InvalidRange {
+                start: s.to_string(),
+                end: e.to_string(),
+                step: st.to_string(),
+            });
+        }
+        Ok(out)
     }
-    let ch = axis_u(r.channel);
-    let av = axis_u(r.average);
+    let ch = axis_u(r.channel)?;
+    let av = axis_u(r.average)?;
     let mut out = Vec::with_capacity(ch.len() * av.len());
     for &c in &ch {
         for &a in &av {
@@ -1806,7 +1871,14 @@ fn expand_grid(r: &WtoBatchRange) -> Vec<WtoParams> {
             });
         }
     }
-    out
+    if out.is_empty() {
+        return Err(WtoError::InvalidRange {
+            start: r.channel.0.to_string(),
+            end: r.channel.1.to_string(),
+            step: r.channel.2.to_string(),
+        });
+    }
+    Ok(out)
 }
 
 pub fn wto_batch_with_kernel(
@@ -1817,11 +1889,8 @@ pub fn wto_batch_with_kernel(
     let kern = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         x if x.is_batch() => x,
-        _ => {
-            return Err(WtoError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+        other => {
+            return Err(WtoError::InvalidKernelForBatch(other));
         }
     };
     let simd = match kern {
@@ -1843,16 +1912,18 @@ fn wto_batch_inner(
     if data.is_empty() {
         return Err(WtoError::EmptyInputData);
     }
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(WtoError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let cols = data.len();
     let rows = combos.len();
+    if rows
+        .checked_mul(cols)
+        .is_none()
+    {
+        return Err(WtoError::InvalidInput(
+            "rows * cols overflow in wto_batch_inner".into(),
+        ));
+    }
 
     let first = data
         .iter()
@@ -1936,16 +2007,18 @@ pub fn wto_batch_all_outputs_with_kernel(
         return Err(WtoError::EmptyInputData);
     }
 
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(WtoError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let cols = data.len();
     let rows = combos.len();
+    if rows
+        .checked_mul(cols)
+        .is_none()
+    {
+        return Err(WtoError::InvalidInput(
+            "rows * cols overflow in wto_batch_all_outputs_with_kernel".into(),
+        ));
+    }
 
     // Allocate 3 matrices uninitialized
     let mut wt1_mu = make_uninit_matrix(rows, cols);
@@ -1990,7 +2063,9 @@ pub fn wto_batch_all_outputs_with_kernel(
     wto_fill_wt1_grouped(data, &combos, first, kern, true, wt1_out)?;
 
     for row in 0..rows {
-        let row_start = row * cols;
+        let row_start = row
+            .checked_mul(cols)
+            .ok_or_else(|| WtoError::InvalidInput("row * cols overflow in wto_batch_all_outputs_with_kernel".into()))?;
         let row_end = row_start + cols;
 
         let wt1_row = &wt1_out[row_start..row_end];
@@ -2373,17 +2448,22 @@ pub fn wto_cuda_batch_dev_py<'py>(
         average: average_range,
     };
 
-    let CudaWtoBatchResult { outputs, combos } = py.allow_threads(|| {
+    let (CudaWtoBatchResult { outputs, combos }, dev_id) = py.allow_threads(|| {
         let cuda = CudaWto::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.wto_batch_dev(slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let res = cuda
+            .wto_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((res, cuda.device_id()))
     })?;
     let DeviceArrayF32Triplet { wt1, wt2, hist } = outputs;
 
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("wt1", Py::new(py, DeviceArrayF32Py { inner: wt1 })?)?;
-    dict.set_item("wt2", Py::new(py, DeviceArrayF32Py { inner: wt2 })?)?;
-    dict.set_item("hist", Py::new(py, DeviceArrayF32Py { inner: hist })?)?;
+    let wt1_py = make_device_array_py(dev_id as usize, wt1)?;
+    let wt2_py = make_device_array_py(dev_id as usize, wt2)?;
+    let hist_py = make_device_array_py(dev_id as usize, hist)?;
+    dict.set_item("wt1", Py::new(py, wt1_py)?)?;
+    dict.set_item("wt2", Py::new(py, wt2_py)?)?;
+    dict.set_item("hist", Py::new(py, hist_py)?)?;
 
     let channel_vec: Vec<usize> = combos.iter().map(|p| p.channel_length.unwrap()).collect();
     let average_vec: Vec<usize> = combos.iter().map(|p| p.average_length.unwrap()).collect();
@@ -2425,16 +2505,21 @@ pub fn wto_cuda_many_series_one_param_dev_py<'py>(
         average_length: Some(average_length),
     };
 
-    let DeviceArrayF32Triplet { wt1, wt2, hist } = py.allow_threads(|| {
+    let (DeviceArrayF32Triplet { wt1, wt2, hist }, dev_id) = py.allow_threads(|| {
         let cuda = CudaWto::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.wto_many_series_one_param_time_major_dev(flat, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let res = cuda
+            .wto_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((res, cuda.device_id()))
     })?;
 
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("wt1", Py::new(py, DeviceArrayF32Py { inner: wt1 })?)?;
-    dict.set_item("wt2", Py::new(py, DeviceArrayF32Py { inner: wt2 })?)?;
-    dict.set_item("hist", Py::new(py, DeviceArrayF32Py { inner: hist })?)?;
+    let wt1_py = make_device_array_py(dev_id as usize, wt1)?;
+    let wt2_py = make_device_array_py(dev_id as usize, wt2)?;
+    let hist_py = make_device_array_py(dev_id as usize, hist)?;
+    dict.set_item("wt1", Py::new(py, wt1_py)?)?;
+    dict.set_item("wt2", Py::new(py, wt2_py)?)?;
+    dict.set_item("hist", Py::new(py, hist_py)?)?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     dict.set_item("channel_length", channel_length)?;

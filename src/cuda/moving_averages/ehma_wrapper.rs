@@ -1015,6 +1015,23 @@ impl CudaEhma {
             )));
         }
 
+        // VRAM preflight (prices + periods + warms + out) with checked arithmetic
+        let prices_bytes = Self::bytes_for::<f32>(series_len)?;
+        let period_elems = n_combos;
+        let warms_elems = n_combos;
+        let periods_bytes = Self::bytes_for::<i32>(period_elems)?;
+        let warms_bytes = Self::bytes_for::<i32>(warms_elems)?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaEhmaError::InvalidInput("output elems overflow".into()))?;
+        let out_bytes = Self::bytes_for::<f32>(out_elems)?;
+        let required = prices_bytes
+            .checked_add(periods_bytes)
+            .and_then(|x| x.checked_add(warms_bytes))
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaEhmaError::InvalidInput("total bytes overflow".into()))?;
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
+
         let mut periods_i32 = Vec::with_capacity(n_combos);
         let mut warms_i32 = Vec::with_capacity(n_combos);
         for prm in &combos {

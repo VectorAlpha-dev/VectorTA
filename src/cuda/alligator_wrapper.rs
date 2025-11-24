@@ -205,9 +205,15 @@ impl CudaAlligator {
         let to_v = axis(sweep.teeth_offset)?;
         let lp_v = axis(sweep.lips_period)?;
         let lo_v = axis(sweep.lips_offset)?;
-        let mut combos = Vec::with_capacity(
-            jp_v.len() * jo_v.len() * tp_v.len() * to_v.len() * lp_v.len() * lo_v.len(),
-        );
+        let cap = jp_v
+            .len()
+            .checked_mul(jo_v.len())
+            .and_then(|v| v.checked_mul(tp_v.len()))
+            .and_then(|v| v.checked_mul(to_v.len()))
+            .and_then(|v| v.checked_mul(lp_v.len()))
+            .and_then(|v| v.checked_mul(lo_v.len()))
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("parameter grid too large".into()))?;
+        let mut combos = Vec::with_capacity(cap);
         for &jp in &jp_v {
             for &jo in &jo_v {
                 for &tp in &tp_v {
@@ -288,9 +294,15 @@ impl CudaAlligator {
         // Validate launch sizes against device limits (best-effort)
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
-        if block_x > max_threads {
+        let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        if block_x > max_threads || grid_x == 0 || grid_x > max_grid_x {
             return Err(CudaAlligatorError::LaunchConfigTooLarge {
-                gx: grid_x.max(1), gy: 1, gz: 1, bx: block_x, by: 1, bz: 1,
+                gx: grid_x.max(1),
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
             });
         }
         unsafe {
@@ -336,10 +348,28 @@ impl CudaAlligator {
         let n = combos.len();
 
         // VRAM estimate (prices + 6 params + 3 outputs)
-        let prices_bytes = len * std::mem::size_of::<f32>();
-        let params_bytes = 6 * n * std::mem::size_of::<i32>();
-        let out_bytes = 3 * n * len * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
+        let prices_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("prices_bytes overflow".into()))?;
+        let params_elems = n
+            .checked_mul(6)
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("params_elems overflow".into()))?;
+        let params_bytes = params_elems
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("params_bytes overflow".into()))?;
+        let out_elems = n
+            .checked_mul(len)
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("output elements overflow".into()))?;
+        let out_bytes_single = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("out_bytes overflow".into()))?;
+        let out_bytes = out_bytes_single
+            .checked_mul(3)
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("out_bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("total VRAM size overflow".into()))?;
         let headroom = 64usize * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
@@ -376,9 +406,10 @@ impl CudaAlligator {
         let d_lp = DeviceBuffer::from_slice(&lip_p)?;
         let d_lo = DeviceBuffer::from_slice(&lip_o)?;
 
-        let mut d_jaw: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n * len) }?;
-        let mut d_teeth: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n * len) }?;
-        let mut d_lips: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n * len) }?;
+        let out_len = out_elems;
+        let mut d_jaw: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }?;
+        let mut d_teeth: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }?;
+        let mut d_lips: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -428,7 +459,10 @@ impl CudaAlligator {
         if cols == 0 || rows == 0 {
             return Err(CudaAlligatorError::InvalidInput("invalid cols/rows".into()));
         }
-        if data_tm_f32.len() != cols * rows {
+        let expected_len = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("cols*rows overflow".into()))?;
+        if data_tm_f32.len() != expected_len {
             return Err(CudaAlligatorError::InvalidInput(
                 "data length != cols*rows".into(),
             ));
@@ -475,10 +509,15 @@ impl CudaAlligator {
         d_teeth_tm: &mut DeviceBuffer<f32>,
         d_lips_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAlligatorError> {
+        if cols > i32::MAX as usize || rows > i32::MAX as usize {
+            return Err(CudaAlligatorError::InvalidInput(
+                "geometry exceeds i32::MAX".into(),
+            ));
+        }
         let mut func = self
             .module
             .get_function("alligator_many_series_one_param_f32")
-            .map_err(CudaAlligatorError::Cuda)?;
+            .map_err(|_| CudaAlligatorError::MissingKernelSymbol { name: "alligator_many_series_one_param_f32" })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 128,
@@ -486,6 +525,20 @@ impl CudaAlligator {
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        // Validate launch sizes against device limits (best-effort)
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        if block_x > max_threads || grid_x == 0 || grid_x > max_grid_x {
+            return Err(CudaAlligatorError::LaunchConfigTooLarge {
+                gx: grid_x.max(1),
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
         unsafe {
             let mut p_prices = d_prices_tm.as_device_ptr().as_raw();
             let mut jp_i = jp as i32;
@@ -532,11 +585,31 @@ impl CudaAlligator {
         let (first_valids, jp, jo, tp, to, lp, lo) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
+        let total_elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("cols*rows overflow".into()))?;
+        let prices_bytes = total_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("prices_bytes overflow".into()))?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("first_valids bytes overflow".into()))?;
+        let outs_bytes = total_elems
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("outputs bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(first_bytes)
+            .and_then(|v| v.checked_add(outs_bytes))
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("total VRAM size overflow".into()))?;
+        let headroom = 64usize * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
+
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_jaw_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
-        let mut d_teeth_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
-        let mut d_lips_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
+        let mut d_jaw_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
+        let mut d_teeth_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
+        let mut d_lips_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,

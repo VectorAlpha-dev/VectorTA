@@ -4,6 +4,7 @@
 //! - Scalar path optimized: single tight loop, constant-time ring updates, cached prior prices; ~30–55% faster at 100k.
 //! - Single-series SIMD kept as stubs: second-order IIR recursion is loop-carried, so AVX2/AVX512 across time is not beneficial.
 //! - Batch path: precompute mid-price once and reuse across rows; cross-row SIMD deferred; runtime selection remains scalar.
+//! - CUDA path: batch and many-series kernels enabled; PTX wrapper matches scalar within f32 tolerance and exposes Python interop via CUDA Array Interface v3 + DLPack v1.x.
 //!
 //! Implements the Empirical Mode Decomposition indicator with band-pass filtering and moving averages,
 //! yielding upperband, middleband, and lowerband outputs.
@@ -35,8 +36,6 @@
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaEmd, CudaEmdBatchResult, DeviceArrayF32Triple};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -249,6 +248,9 @@ impl EmdBuilder {
 
 #[derive(Debug, Error)]
 pub enum EmdError {
+    #[error("emd: Empty input data")]
+    EmptyInputData,
+
     #[error("emd: All values are NaN.")]
     AllValuesNaN,
 
@@ -266,6 +268,19 @@ pub enum EmdError {
 
     #[error("emd: Invalid input length: expected = {expected}, actual = {actual}")]
     InvalidInputLength { expected: usize, actual: usize },
+
+    #[error("emd: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    // Batch/domain errors
+    #[error("emd: Invalid range (usize): start={start}, end={end}, step={step}")]
+    InvalidRangeU { start: usize, end: usize, step: usize },
+
+    #[error("emd: Invalid range (float): start={start}, end={end}, step={step}")]
+    InvalidRangeF { start: f64, end: f64, step: f64 },
+
+    #[error("emd: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -283,9 +298,9 @@ pub fn emd_into_slices(
 ) -> Result<(), EmdError> {
     let (high, low, period, delta, fraction, first, chosen) = emd_prepare(input, kernel)?;
     if ub.len() != high.len() || mb.len() != high.len() || lb.len() != high.len() {
-        return Err(EmdError::InvalidInputLength {
+        return Err(EmdError::OutputLengthMismatch {
             expected: high.len(),
-            actual: ub.len().min(mb.len()).min(lb.len()),
+            got: ub.len().min(mb.len()).min(lb.len()),
         });
     }
 
@@ -322,11 +337,11 @@ fn emd_prepare<'a>(
     };
 
     let len = high.len();
-    if len == 0 || low.len() != len {
-        return Err(EmdError::InvalidInputLength {
-            expected: len,
-            actual: low.len(),
-        });
+    if len == 0 {
+        return Err(EmdError::EmptyInputData);
+    }
+    if low.len() != len {
+        return Err(EmdError::InvalidInputLength { expected: len, actual: low.len() });
     }
 
     let period = input.get_period();
@@ -441,9 +456,9 @@ pub fn emd_into(
         || middleband_out.len() != high.len()
         || lowerband_out.len() != high.len()
     {
-        return Err(EmdError::InvalidInputLength {
+        return Err(EmdError::OutputLengthMismatch {
             expected: high.len(),
-            actual: upperband_out
+            got: upperband_out
                 .len()
                 .min(middleband_out.len())
                 .min(lowerband_out.len()),
@@ -1231,10 +1246,7 @@ pub fn emd_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(EmdError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(EmdError::InvalidKernelForBatch(k));
         }
     };
     let simd = match kernel {
@@ -1257,43 +1269,69 @@ pub struct EmdBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &EmdBatchRange) -> Vec<EmdParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &EmdBatchRange) -> Result<Vec<EmdParams>, EmdError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, EmdError> {
         if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
-    }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                cur = match cur.checked_add(step) { Some(n) => n, None => break };
+            }
+        } else {
+            // reversed bounds supported
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                match cur.checked_sub(step) { Some(n) => cur = n, None => break }
+            }
         }
-        v
+        if v.is_empty() { Err(EmdError::InvalidRangeU { start, end, step }) } else { Ok(v) }
+    }
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, EmdError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        let mut v = Vec::new();
+        if start < end {
+            let mut x = start;
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += step;
+                if !x.is_finite() { break; }
+            }
+        } else {
+            let mut x = start;
+            while x >= end - 1e-12 {
+                v.push(x);
+                x -= step.abs();
+                if !x.is_finite() { break; }
+            }
+        }
+        if v.is_empty() { Err(EmdError::InvalidRangeF { start, end, step }) } else { Ok(v) }
     }
 
-    let periods = axis_usize(r.period);
-    let deltas = axis_f64(r.delta);
-    let fractions = axis_f64(r.fraction);
+    let periods = axis_usize(r.period)?;
+    let deltas = axis_f64(r.delta)?;
+    let fractions = axis_f64(r.fraction)?;
 
-    let mut out = Vec::with_capacity(periods.len() * deltas.len() * fractions.len());
+    let cap = periods
+        .len()
+        .checked_mul(deltas.len())
+        .and_then(|t| t.checked_mul(fractions.len()))
+        .ok_or(EmdError::InvalidRangeU { start: 0, end: 0, step: 0 })?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &d in &deltas {
             for &f in &fractions {
-                out.push(EmdParams {
-                    period: Some(p),
-                    delta: Some(d),
-                    fraction: Some(f),
-                });
+                out.push(EmdParams { period: Some(p), delta: Some(d), fraction: Some(f) });
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1303,6 +1341,9 @@ pub fn emd_batch_slice(
     sweep: &EmdBatchRange,
     kern: Kernel,
 ) -> Result<EmdBatchOutput, EmdError> {
+    if !kern.is_batch() && kern != Kernel::Auto {
+        return Err(EmdError::InvalidKernelForBatch(kern));
+    }
     emd_batch_inner(high, low, sweep, kern, false)
 }
 
@@ -1313,6 +1354,9 @@ pub fn emd_batch_par_slice(
     sweep: &EmdBatchRange,
     kern: Kernel,
 ) -> Result<EmdBatchOutput, EmdError> {
+    if !kern.is_batch() && kern != Kernel::Auto {
+        return Err(EmdError::InvalidKernelForBatch(kern));
+    }
     emd_batch_inner(high, low, sweep, kern, true)
 }
 
@@ -1324,12 +1368,9 @@ fn emd_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<EmdBatchOutput, EmdError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(EmdError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(EmdError::InvalidRangeU { start: 0, end: 0, step: 0 });
     }
 
     let len = high.len();
@@ -1354,6 +1395,13 @@ fn emd_batch_inner(
 
     let rows = combos.len();
     let cols = len;
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(EmdError::InvalidRangeU {
+            start: rows,
+            end: cols,
+            step: usize::MAX,
+        })?;
 
     // Precompute midpoint prices once for all rows to avoid redundant work.
     let prices: Vec<f64> = high
@@ -1419,11 +1467,11 @@ fn emd_batch_inner(
         #[cfg(target_arch = "wasm32")]
         {
             let ub_rows =
-                unsafe { std::slice::from_raw_parts_mut(ub_ptr as *mut f64, rows * cols) };
+                unsafe { std::slice::from_raw_parts_mut(ub_ptr as *mut f64, total) };
             let mb_rows =
-                unsafe { std::slice::from_raw_parts_mut(mb_ptr as *mut f64, rows * cols) };
+                unsafe { std::slice::from_raw_parts_mut(mb_ptr as *mut f64, total) };
             let lb_rows =
-                unsafe { std::slice::from_raw_parts_mut(lb_ptr as *mut f64, rows * cols) };
+                unsafe { std::slice::from_raw_parts_mut(lb_ptr as *mut f64, total) };
             for row in 0..rows {
                 let prm = &combos[row];
                 let p = prm.period.unwrap();
@@ -1438,9 +1486,9 @@ fn emd_batch_inner(
             }
         }
     } else {
-        let ub_rows = unsafe { std::slice::from_raw_parts_mut(ub_ptr as *mut f64, rows * cols) };
-        let mb_rows = unsafe { std::slice::from_raw_parts_mut(mb_ptr as *mut f64, rows * cols) };
-        let lb_rows = unsafe { std::slice::from_raw_parts_mut(lb_ptr as *mut f64, rows * cols) };
+        let ub_rows = unsafe { std::slice::from_raw_parts_mut(ub_ptr as *mut f64, total) };
+        let mb_rows = unsafe { std::slice::from_raw_parts_mut(mb_ptr as *mut f64, total) };
+        let lb_rows = unsafe { std::slice::from_raw_parts_mut(lb_ptr as *mut f64, total) };
         for row in 0..rows {
             let prm = &combos[row];
             let p = prm.period.unwrap();
@@ -1456,11 +1504,11 @@ fn emd_batch_inner(
     }
 
     let upperband =
-        unsafe { Vec::from_raw_parts(ub_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols) };
+        unsafe { Vec::from_raw_parts(ub_mu.as_mut_ptr() as *mut f64, total, total) };
     let middleband =
-        unsafe { Vec::from_raw_parts(mb_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols) };
+        unsafe { Vec::from_raw_parts(mb_mu.as_mut_ptr() as *mut f64, total, total) };
     let lowerband =
-        unsafe { Vec::from_raw_parts(lb_mu.as_mut_ptr() as *mut f64, rows * cols, rows * cols) };
+        unsafe { Vec::from_raw_parts(lb_mu.as_mut_ptr() as *mut f64, total, total) };
 
     std::mem::forget(ub_mu);
     std::mem::forget(mb_mu);
@@ -1487,12 +1535,9 @@ fn emd_batch_inner_into(
     middleband_out: &mut [f64],
     lowerband_out: &mut [f64],
 ) -> Result<Vec<EmdParams>, EmdError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(EmdError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(EmdError::InvalidRangeU { start: 0, end: 0, step: 0 });
     }
     let len = high.len();
     if low.len() != len {
@@ -1504,13 +1549,20 @@ fn emd_batch_inner_into(
 
     let rows = combos.len();
     let cols = len;
-    if upperband_out.len() != rows * cols
-        || middleband_out.len() != rows * cols
-        || lowerband_out.len() != rows * cols
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(EmdError::InvalidRangeU {
+            start: rows,
+            end: cols,
+            step: usize::MAX,
+        })?;
+    if upperband_out.len() != expected
+        || middleband_out.len() != expected
+        || lowerband_out.len() != expected
     {
-        return Err(EmdError::InvalidInputLength {
-            expected: rows * cols,
-            actual: upperband_out
+        return Err(EmdError::OutputLengthMismatch {
+            expected,
+            got: upperband_out
                 .len()
                 .min(middleband_out.len())
                 .min(lowerband_out.len()),
@@ -3002,13 +3054,16 @@ pub fn emd_batch_py<'py>(
         delta: delta_range,
         fraction: fraction_range,
     };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = hi.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows * cols overflow in emd_batch_py"))?;
 
-    let ub = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let mb = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let lb = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let ub = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let mb = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let lb = unsafe { PyArray1::<f64>::new(py, [total], false) };
 
     let ubm = unsafe { ub.as_slice_mut()? };
     let mbm = unsafe { mb.as_slice_mut()? };
@@ -3063,6 +3118,380 @@ pub fn emd_batch_py<'py>(
     Ok(d)
 }
 
+// ---- Python CUDA Device Handle (CAI v3 + DLPack) ----
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context as _CudaContext;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::sys as _cu;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc as _Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct EmdDeviceArrayF32Py {
+    pub(crate) inner: Option<crate::cuda::moving_averages::DeviceArrayF32>,
+    stream_handle: usize,
+    _ctx_guard: _Arc<_CudaContext>,
+    device_id: u32,
+    pc_guard: EmdPrimaryCtxGuard,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[derive(Copy, Clone)]
+pub struct EmdPrimaryCtxGuard {
+    dev: i32,
+    ctx: _cu::CUcontext,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl EmdPrimaryCtxGuard {
+    fn new(device_id: u32) -> Result<Self, cust::error::CudaError> {
+        unsafe {
+            let mut ctx: _cu::CUcontext = std::ptr::null_mut();
+            let dev = device_id as i32;
+            _cu::cuDevicePrimaryCtxRetain(&mut ctx as *mut _, dev).result()?;
+            Ok(Self { dev, ctx })
+        }
+    }
+
+    #[inline]
+    unsafe fn push_current(&self) {
+        let _ = _cu::cuCtxSetCurrent(self.ctx);
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl Drop for EmdPrimaryCtxGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = _cu::cuDevicePrimaryCtxRelease(self.dev);
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl EmdDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr_val: usize = if inner.rows == 0 || inner.cols == 0 {
+            0
+        } else {
+            inner.device_ptr() as usize
+        };
+        d.set_item("data", (ptr_val, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        Ok((2, self.device_id as i32))
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::ffi::{c_char, c_void};
+
+        if let Some((dev_type, dev_id)) = dl_device {
+            if dev_type != 2 || dev_id as u32 != self.device_id {
+                return Err(PyValueError::new_err("device mismatch in __dlpack__"));
+            }
+        }
+
+        // Synchronize producer stream so consumer need not fence.
+        if self.stream_handle != 0 {
+            unsafe {
+                let _ = _cu::cuStreamSynchronize(self.stream_handle as _cu::CUstream);
+            }
+        }
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        #[derive(Copy, Clone)]
+        struct DLPackVersion {
+            major: u32,
+            minor: u32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+
+        struct HolderV0 {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: crate::cuda::moving_averages::DeviceArrayF32,
+            pc: EmdPrimaryCtxGuard,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: crate::cuda::moving_averages::DeviceArrayF32,
+            pc: EmdPrimaryCtxGuard,
+        }
+
+        extern "C" fn deleter_v0(mt: *mut DLManagedTensor) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder = (*mt).manager_ctx as *mut HolderV0;
+                if !holder.is_null() {
+                    (*holder).pc.push_current();
+                    drop(Box::from_raw(holder));
+                }
+            }
+        }
+
+        extern "C" fn deleter_v1(mt: *mut DLManagedTensorVersioned) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder = (*mt).manager_ctx as *mut HolderV1;
+                if !holder.is_null() {
+                    (*holder).pc.push_current();
+                    drop(Box::from_raw(holder));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_legacy(
+            capsule: *mut pyo3::ffi::PyObject,
+        ) {
+            let name = b"dltensor\0";
+            let ptr =
+                pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, std::ptr::null_mut());
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_versioned(
+            capsule: *mut pyo3::ffi::PyObject,
+        ) {
+            let name = b"dltensor_versioned\0";
+            let ptr =
+                pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensorVersioned;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, std::ptr::null_mut());
+            }
+        }
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let want_v1 = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    version: DLPackVersion { major: 1, minor: 0 },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_v1),
+                    flags: 0,
+                    dl_tensor: DLTensor {
+                        data: if rows == 0 || cols == 0 {
+                            std::ptr::null_mut()
+                        } else {
+                            inner.buf.as_device_ptr().as_raw() as *mut c_void
+                        },
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: self.device_id as i32,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                arr: inner,
+                pc: self.pc_guard,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            holder.managed.manager_ctx =
+                &mut *holder as *mut HolderV1 as *mut c_void;
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            let _keep = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor_versioned),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { deleter_v1(mt_ptr) };
+                return Err(PyValueError::new_err(
+                    "failed to create DLPack v1.x capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mut holder = Box::new(HolderV0 {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: if rows == 0 || cols == 0 {
+                            std::ptr::null_mut()
+                        } else {
+                            inner.buf.as_device_ptr().as_raw() as *mut c_void
+                        },
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: self.device_id as i32,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_v0),
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                arr: inner,
+                pc: self.pc_guard,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            holder.managed.manager_ctx =
+                &mut *holder as *mut HolderV0 as *mut c_void;
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            let _keep = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor_legacy),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { deleter_v0(mt_ptr) };
+                return Err(PyValueError::new_err(
+                    "failed to create DLPack capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl Drop for EmdDeviceArrayF32Py {
+    fn drop(&mut self) {
+        unsafe {
+            self.pc_guard.push_current();
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl EmdDeviceArrayF32Py {
+    pub fn new_from_rust(
+        inner: crate::cuda::moving_averages::DeviceArrayF32,
+        stream_handle: usize,
+        ctx_guard: _Arc<_CudaContext>,
+        device_id: u32,
+    ) -> Self {
+        let pc = EmdPrimaryCtxGuard::new(device_id)
+            .unwrap_or(EmdPrimaryCtxGuard {
+                dev: device_id as i32,
+                ctx: std::ptr::null_mut(),
+            });
+        Self {
+            inner: Some(inner),
+            stream_handle,
+            _ctx_guard: ctx_guard,
+            device_id,
+            pc_guard: pc,
+        }
+    }
+}
+
 // ==================== PYTHON CUDA BINDINGS ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "emd_cuda_batch_dev")]
@@ -3090,10 +3519,14 @@ pub fn emd_cuda_batch_dev_py<'py>(
         delta: delta_range,
         fraction: fraction_range,
     };
-    let CudaEmdBatchResult { outputs, combos } = py.allow_threads(|| {
+    let (outputs, combos, dev_id, ctx, stream_h) = py.allow_threads(|| {
         let cuda = CudaEmd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.emd_batch_dev(hi, lo, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let dev_id = cuda.device_id();
+        let ctx = cuda.context_arc();
+        let res = cuda
+            .emd_batch_dev(hi, lo, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()));
+        res.map(|r| (r.outputs, r.combos, dev_id, ctx, cuda.stream_handle_usize()))
     })?;
     let DeviceArrayF32Triple {
         upper,
@@ -3101,12 +3534,18 @@ pub fn emd_cuda_batch_dev_py<'py>(
         lower,
     } = outputs;
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("upperband", Py::new(py, DeviceArrayF32Py { inner: upper })?)?;
+    dict.set_item(
+        "upperband",
+        Py::new(py, EmdDeviceArrayF32Py::new_from_rust(upper, stream_h, ctx.clone(), dev_id))?,
+    )?;
     dict.set_item(
         "middleband",
-        Py::new(py, DeviceArrayF32Py { inner: middle })?,
+        Py::new(py, EmdDeviceArrayF32Py::new_from_rust(middle, stream_h, ctx.clone(), dev_id))?,
     )?;
-    dict.set_item("lowerband", Py::new(py, DeviceArrayF32Py { inner: lower })?)?;
+    dict.set_item(
+        "lowerband",
+        Py::new(py, EmdDeviceArrayF32Py::new_from_rust(lower, stream_h, ctx, dev_id))?,
+    )?;
     // Flatten parameters
     let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
     let deltas: Vec<f64> = combos.iter().map(|c| c.delta.unwrap()).collect();
@@ -3162,9 +3601,13 @@ pub fn emd_cuda_many_series_one_param_dev_py<'py>(
         delta: Some(delta),
         fraction: Some(fraction),
     };
-    let outputs = py.allow_threads(|| {
+    let (outputs, dev_id, ctx, stream_h) = py.allow_threads(|| {
         let cuda = CudaEmd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.emd_many_series_one_param_time_major_dev(flat, cols, rows, &params, &first_valids)
+        let dev_id = cuda.device_id();
+        let ctx = cuda.context_arc();
+        cuda
+            .emd_many_series_one_param_time_major_dev(flat, cols, rows, &params, &first_valids)
+            .map(|o| (o, dev_id, ctx, cuda.stream_handle_usize()))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let DeviceArrayF32Triple {
@@ -3173,12 +3616,18 @@ pub fn emd_cuda_many_series_one_param_dev_py<'py>(
         lower,
     } = outputs;
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("upperband", Py::new(py, DeviceArrayF32Py { inner: upper })?)?;
+    dict.set_item(
+        "upperband",
+        Py::new(py, EmdDeviceArrayF32Py::new_from_rust(upper, stream_h, ctx.clone(), dev_id))?,
+    )?;
     dict.set_item(
         "middleband",
-        Py::new(py, DeviceArrayF32Py { inner: middle })?,
+        Py::new(py, EmdDeviceArrayF32Py::new_from_rust(middle, stream_h, ctx.clone(), dev_id))?,
     )?;
-    dict.set_item("lowerband", Py::new(py, DeviceArrayF32Py { inner: lower })?)?;
+    dict.set_item(
+        "lowerband",
+        Py::new(py, EmdDeviceArrayF32Py::new_from_rust(lower, stream_h, ctx, dev_id))?,
+    )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     dict.set_item("period", period)?;
@@ -3369,14 +3818,17 @@ pub fn emd_batch_unified_js(
         delta: cfg.delta_range,
         fraction: cfg.fraction_range,
     };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows_p = combos.len();
     let cols = high.len();
+    let total = rows_p
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows * cols overflow in emd_batch_unified_js"))?;
 
     // allocate three planes
-    let mut ub = vec![f64::NAN; rows_p * cols];
-    let mut mb = vec![f64::NAN; rows_p * cols];
-    let mut lb = vec![f64::NAN; rows_p * cols];
+    let mut ub = vec![f64::NAN; total];
+    let mut mb = vec![f64::NAN; total];
+    let mut lb = vec![f64::NAN; total];
 
     emd_batch_inner_into(
         high,
@@ -3445,10 +3897,12 @@ pub fn emd_batch_into(
         };
 
         // Calculate dimensions
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let total_len = rows * cols;
+        let total_len = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows * cols overflow in emd_batch_into"))?;
 
         // Get output buffer slices
         let upper_slice = std::slice::from_raw_parts_mut(upper_ptr, total_len);

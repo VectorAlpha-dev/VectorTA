@@ -1214,7 +1214,6 @@ pub fn cvi_cuda_batch_dev_py(
         cuda.cvi_batch_dev(high_slice, low_slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-
     Ok(DeviceArrayF32Py { inner })
 }
 
@@ -1251,7 +1250,6 @@ pub fn cvi_cuda_many_series_one_param_dev_py(
         cuda.cvi_many_series_one_param_time_major_dev(high_slice, low_slice, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-
     Ok(DeviceArrayF32Py { inner })
 }
 

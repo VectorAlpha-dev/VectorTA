@@ -227,6 +227,8 @@ impl GaussianBuilder {
 
 #[derive(Debug, Error)]
 pub enum GaussianError {
+    #[error("gaussian: Input data slice is empty.")]
+    EmptyInputData,
     #[error("gaussian: No data provided to Gaussian filter.")]
     NoData,
     #[error("gaussian: Invalid period: period = {period}, data length = {data_len}")]

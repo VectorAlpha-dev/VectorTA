@@ -26,22 +26,28 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaCkspError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaCkspError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaCkspError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaCkspError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaCkspError {}
 
 // Simple pair of device arrays for (long, short)
 pub struct DeviceArrayF32Pair {
@@ -80,17 +86,16 @@ impl Default for CudaCkspPolicy {
 pub struct CudaCksp {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     policy: CudaCkspPolicy,
     device_id: u32,
 }
 
 impl CudaCksp {
     pub fn new(device_id: usize) -> Result<Self, CudaCkspError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cksp_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
@@ -98,11 +103,16 @@ impl CudaCksp {
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
-            Err(_) => Module::from_ptx(ptx, &[]).map_err(|e| CudaCkspError::Cuda(e.to_string()))?,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
+            }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        Ok(Self { module, stream, _context: context, policy: CudaCkspPolicy::default(), device_id: device_id as u32 })
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+        Ok(Self { module, stream, context, policy: CudaCkspPolicy::default(), device_id: device_id as u32 })
     }
 
     pub fn new_with_policy(
@@ -113,6 +123,9 @@ impl CudaCksp {
         s.policy = policy;
         Ok(s)
     }
+
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -151,7 +164,7 @@ impl CudaCksp {
         let first_valid = first_valid_hlc(high, low, close)
             .ok_or_else(|| CudaCkspError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = expand_cksp_combos(sweep);
+        let combos = expand_cksp_combos(sweep)?;
         if combos.is_empty() {
             return Err(CudaCkspError::InvalidInput(
                 "no parameter combinations".into(),
@@ -163,6 +176,7 @@ impl CudaCksp {
         let mut x_f32 = Vec::with_capacity(combos.len());
         let mut q_i32 = Vec::with_capacity(combos.len());
         let mut max_q: usize = 0;
+        let valid = len - first_valid;
         for prm in &combos {
             let p = prm.p.unwrap_or(10);
             let q = prm.q.unwrap_or(9);
@@ -170,12 +184,15 @@ impl CudaCksp {
             if p == 0 || q == 0 {
                 return Err(CudaCkspError::InvalidInput("p and q must be > 0".into()));
             }
-            if p > len || q > len {
-                return Err(CudaCkspError::InvalidInput("p/q exceed data length".into()));
-            }
-            if len - first_valid < p {
+            let warm_rel = p
+                .checked_add(q)
+                .and_then(|v| v.checked_sub(1))
+                .ok_or_else(|| {
+                    CudaCkspError::InvalidInput("warmup overflow (p+q too large)".into())
+                })?;
+            if valid <= warm_rel {
                 return Err(CudaCkspError::InvalidInput(
-                    "not enough valid data for ATR warmup".into(),
+                    "not enough valid data for CKSP warmup".into(),
                 ));
             }
             p_i32.push(p as i32);
@@ -185,15 +202,31 @@ impl CudaCksp {
         }
 
         // Dynamic shared memory requirement per CTA
-        let cap_max = (max_q + 1) as usize;
-        let shmem_bytes = 4 * cap_max * std::mem::size_of::<i32>()
-            + 2 * cap_max * std::mem::size_of::<f32>();
+        let cap_max = max_q
+            .checked_add(1)
+            .ok_or_else(|| CudaCkspError::InvalidInput("cap_max overflow".into()))?
+            as usize;
+        let sh_i32 = cap_max
+            .checked_mul(4usize)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<i32>()))
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("shared memory size overflow (i32)".into())
+            })?;
+        let sh_f32 = cap_max
+            .checked_mul(2usize)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("shared memory size overflow (f32)".into())
+            })?;
+        let shmem_bytes = sh_i32
+            .checked_add(sh_f32)
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("shared memory size overflow".into())
+            })?;
 
         // Check device limit (no opt-in here)
-        let dev = Device::get_device(self.device_id).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let max_shmem = dev
-            .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))? as usize;
+        let dev = Device::get_device(self.device_id)?;
+        let max_shmem = dev.get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)? as usize;
         if shmem_bytes > max_shmem {
             return Err(CudaCkspError::InvalidInput(format!(
                 "q too large for device dynamic shared memory: needs {} bytes (> {} bytes)",
@@ -202,46 +235,82 @@ impl CudaCksp {
         }
 
         // VRAM check (inputs + params + outputs + optional preTR buffer)
-        let in_bytes = 3 * len * std::mem::size_of::<f32>();
-        let params_bytes =
-            combos.len() * (2 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
-        let out_bytes = 2 * combos.len() * len * std::mem::size_of::<f32>();
+        let f32_sz = std::mem::size_of::<f32>();
+        let i32_sz = std::mem::size_of::<i32>();
+        let in_bytes = len
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(f32_sz))
+            .ok_or_else(|| CudaCkspError::InvalidInput("input byte size overflow".into()))?;
+        let params_per = 2usize
+            .checked_mul(i32_sz)
+            .and_then(|v| v.checked_add(f32_sz))
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("parameter byte size overflow".into())
+            })?;
+        let params_bytes = combos
+            .len()
+            .checked_mul(params_per)
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("parameter buffer size overflow".into())
+            })?;
+        let out_row_bytes = len
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(f32_sz))
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("output row byte size overflow".into())
+            })?;
+        let out_bytes = combos
+            .len()
+            .checked_mul(out_row_bytes)
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("output buffer size overflow".into())
+            })?;
         let use_pretr = combos.len() >= 2;
-        let extra_tr_bytes = if use_pretr { len * std::mem::size_of::<f32>() } else { 0 };
-        let required = in_bytes + params_bytes + out_bytes + extra_tr_bytes;
+        let extra_tr_bytes = if use_pretr {
+            len.checked_mul(f32_sz)
+                .ok_or_else(|| {
+                    CudaCkspError::InvalidInput("TR buffer size overflow".into())
+                })?
+        } else {
+            0
+        };
+        let required = in_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .and_then(|v| v.checked_add(extra_tr_bytes))
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("total VRAM size overflow".into())
+            })?;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaCkspError::InvalidInput(
-                "insufficient device memory for cksp batch".into(),
-            ));
+            if let Ok((free, _)) = mem_get_info() {
+                return Err(CudaCkspError::OutOfMemory {
+                    required,
+                    free,
+                    headroom: 64 * 1024 * 1024,
+                });
+            } else {
+                return Err(CudaCkspError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
         // H2D (async)
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_p = unsafe { DeviceBuffer::from_slice_async(&p_i32, &self.stream) }
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_x = unsafe { DeviceBuffer::from_slice_async(&x_f32, &self.stream) }
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_q = unsafe { DeviceBuffer::from_slice_async(&q_i32, &self.stream) }
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }?;
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }?;
+        let d_p = unsafe { DeviceBuffer::from_slice_async(&p_i32, &self.stream) }?;
+        let d_x = unsafe { DeviceBuffer::from_slice_async(&x_f32, &self.stream) }?;
+        let d_q = unsafe { DeviceBuffer::from_slice_async(&q_i32, &self.stream) }?;
 
-        let elems = combos.len() * len;
-        let mut d_long: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
-                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let mut d_short: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
-                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let elems = combos.len().checked_mul(len).ok_or_else(|| CudaCkspError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_long: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_short: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         // Optional precompute TR once per series
         let mut d_tr_opt: Option<DeviceBuffer<f32>> = None;
         if use_pretr {
-            let mut d_tr = unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }
-                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+            let mut d_tr = unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
             self.launch_tr_kernel(&d_high, &d_low, &d_close, len as i32, first_valid as i32, &mut d_tr)?;
             d_tr_opt = Some(d_tr);
         }
@@ -250,6 +319,9 @@ impl CudaCksp {
         let rows = combos.len();
         let y_limit = 65_535usize;
         let mut start = 0usize;
+        let cap_i32: i32 = cap_max
+            .try_into()
+            .map_err(|_| CudaCkspError::InvalidInput("cap_max too large for i32".into()))?;
         while start < rows {
             let count = (rows - start).min(y_limit);
             self.launch_batch_kernel_subrange(
@@ -264,7 +336,7 @@ impl CudaCksp {
                 &d_q,
                 start,
                 count,
-                (max_q + 1) as i32,
+                cap_i32,
                 &mut d_long,
                 &mut d_short,
                 shmem_bytes as u32,
@@ -272,9 +344,7 @@ impl CudaCksp {
             start += count;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32Pair {
@@ -320,7 +390,10 @@ impl CudaCksp {
         } else {
             ("cksp_batch_f32", None)
         };
-        let func = self.module.get_function(func_name).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let func = self
+            .module
+            .get_function(func_name)
+            .map_err(|_| CudaCkspError::MissingKernelSymbol { name: func_name })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 256u32,
@@ -328,6 +401,13 @@ impl CudaCksp {
         };
         let grid: GridSize = (1u32, n_rows as u32, 1u32).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        // Optional: validate launch configuration against device attributes
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        if block_x > max_threads {
+            return Err(CudaCkspError::LaunchConfigTooLarge { gx: 1, gy: n_rows as u32, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
 
         unsafe {
             let mut hp = d_high.as_device_ptr().as_raw();
@@ -386,9 +466,7 @@ impl CudaCksp {
                 &mut args_storage[..12]
             };
 
-            self.stream
-                .launch(&func, grid, block, shmem_bytes, args)
-                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, shmem_bytes, args)?;
         }
         Ok(())
     }
@@ -406,9 +484,12 @@ impl CudaCksp {
         if rows == 0 || cols == 0 {
             return Err(CudaCkspError::InvalidInput("empty dims".into()));
         }
-        if high_tm.len() != rows * cols
-            || low_tm.len() != rows * cols
-            || close_tm.len() != rows * cols
+        let elems = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaCkspError::InvalidInput("rows*cols overflow".into()))?;
+        if high_tm.len() != elems
+            || low_tm.len() != elems
+            || close_tm.len() != elems
         {
             return Err(CudaCkspError::InvalidInput(
                 "time-major inputs must be rows*cols in length".into(),
@@ -434,30 +515,53 @@ impl CudaCksp {
             }
         }
 
-        let in_bytes = 3 * rows * cols * std::mem::size_of::<f32>();
-        let out_bytes = 2 * rows * cols * std::mem::size_of::<f32>();
-        let aux_bytes = rows * std::mem::size_of::<i32>();
-        let required = in_bytes + out_bytes + aux_bytes;
+        let f32_sz = std::mem::size_of::<f32>();
+        let i32_sz = std::mem::size_of::<i32>();
+        let in_bytes = rows
+            .checked_mul(cols)
+            .and_then(|v| v.checked_mul(3))
+            .and_then(|v| v.checked_mul(f32_sz))
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("input byte size overflow (many-series)".into())
+            })?;
+        let out_bytes = rows
+            .checked_mul(cols)
+            .and_then(|v| v.checked_mul(2))
+            .and_then(|v| v.checked_mul(f32_sz))
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("output byte size overflow (many-series)".into())
+            })?;
+        let aux_bytes = rows
+            .checked_mul(i32_sz)
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("aux byte size overflow (many-series)".into())
+            })?;
+        let required = in_bytes
+            .checked_add(out_bytes)
+            .and_then(|v| v.checked_add(aux_bytes))
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("total VRAM size overflow (many-series)".into())
+            })?;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaCkspError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
+            if let Ok((free, _)) = mem_get_info() {
+                return Err(CudaCkspError::OutOfMemory {
+                    required,
+                    free,
+                    headroom: 64 * 1024 * 1024,
+                });
+            } else {
+                return Err(CudaCkspError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_close = unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let mut d_long: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * cols, &self.stream) }
-                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let mut d_short: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * cols, &self.stream) }
-                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }?;
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }?;
+        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
+        let mut d_long: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_short: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         self.launch_many_series_kernel(
             &d_high,
@@ -474,9 +578,7 @@ impl CudaCksp {
             &mut d_short,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Pair {
             long: DeviceArrayF32 {
@@ -511,11 +613,33 @@ impl CudaCksp {
         let func = self
             .module
             .get_function("cksp_many_series_one_param_f32")
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCkspError::MissingKernelSymbol { name: "cksp_many_series_one_param_f32" })?;
 
         // dyn-SMEM identical to batch layout
-        let shmem_usize = (4 * cap_max as usize * std::mem::size_of::<i32>())
-            + (2 * cap_max as usize * std::mem::size_of::<f32>());
+        let cap = cap_max as usize;
+        let sh_i32 = cap
+            .checked_mul(4usize)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<i32>()))
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput(
+                    "shared memory size overflow (many-series i32)".into(),
+                )
+            })?;
+        let sh_f32 = cap
+            .checked_mul(2usize)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput(
+                    "shared memory size overflow (many-series f32)".into(),
+                )
+            })?;
+        let shmem_usize = sh_i32
+            .checked_add(sh_f32)
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput(
+                    "shared memory size overflow (many-series)".into(),
+                )
+            })?;
         let shmem: u32 = shmem_usize.try_into().unwrap_or(u32::MAX);
 
         // Launch advisor: prefer CUDA's suggestion, but allow explicit override
@@ -528,6 +652,13 @@ impl CudaCksp {
         };
         let grid: GridSize = (num_series as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        // Optional: validate launch configuration
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        if block_x > max_threads {
+            return Err(CudaCkspError::LaunchConfigTooLarge { gx: num_series as u32, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
 
         unsafe {
             let mut hp = d_high_tm.as_device_ptr().as_raw();
@@ -556,9 +687,7 @@ impl CudaCksp {
                 &mut ol as *mut _ as *mut c_void,
                 &mut os as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, shmem, args)
-                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, shmem, args)?;
         }
         Ok(())
     }
@@ -589,7 +718,7 @@ impl CudaCksp {
         let func = self
             .module
             .get_function("tr_from_hlc_f32")
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCkspError::MissingKernelSymbol { name: "tr_from_hlc_f32" })?;
 
         // Parallel grid for TR precompute
         let block_x = 256u32;
@@ -612,70 +741,81 @@ impl CudaCksp {
                 &mut fv as *mut _ as *mut c_void,
                 &mut tp as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
 }
 
-fn expand_cksp_combos(r: &CkspBatchRange) -> Vec<CkspParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_cksp_combos(r: &CkspBatchRange) -> Result<Vec<CkspParams>, CudaCkspError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaCkspError> {
         if step == 0 || start == end {
-            return vec![start];
-        }
-        if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
-    }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
-        }
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start <= end {
+            let stp = step.max(1);
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                cur = match cur.checked_add(stp) { Some(n) => n, None => break };
+            }
+        } else {
+            let stp = step.max(1);
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                if cur <= end { break; }
+                cur = match cur.checked_sub(stp) { Some(n) => n, None => break };
+                if cur < end { break; }
+            }
         }
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if v.is_empty() {
+            return Err(CudaCkspError::InvalidInput("empty usize axis expansion".into()));
         }
-        v
+        Ok(v)
     }
-    let ps = axis_usize(r.p);
-    let xs = axis_f64(r.x);
-    let qs = axis_usize(r.q);
-    let mut out = Vec::with_capacity(ps.len() * xs.len() * qs.len());
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaCkspError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        let mut v = Vec::new();
+        if start <= end {
+            let mut x = start;
+            while x <= end + 1e-12 {
+                v.push(x);
+                x = x + step;
+            }
+        } else {
+            let mut x = start;
+            while x >= end - 1e-12 {
+                v.push(x);
+                x = x - step.abs();
+            }
+        }
+        if v.is_empty() {
+            return Err(CudaCkspError::InvalidInput("empty f64 axis expansion".into()));
+        }
+        Ok(v)
+    }
+
+    let ps = axis_usize(r.p)?;
+    let xs = axis_f64(r.x)?;
+    let qs = axis_usize(r.q)?;
+    let cap = ps
+        .len()
+        .checked_mul(xs.len())
+        .and_then(|t| t.checked_mul(qs.len()))
+        .ok_or_else(|| CudaCkspError::InvalidInput("parameter grid too large".into()))?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &ps {
         for &x in &xs {
             for &q in &qs {
-                out.push(CkspParams {
-                    p: Some(p),
-                    x: Some(x),
-                    q: Some(q),
-                });
+                out.push(CkspParams { p: Some(p), x: Some(x), q: Some(q) });
             }
         }
     }
-    for &p in &ps {
-        for &x in &xs {
-            for &q in &qs {
-                out.push(CkspParams {
-                    p: Some(p),
-                    x: Some(x),
-                    q: Some(q),
-                });
-            }
-        }
-    }
-    out
+    Ok(out)
 }
 
 // ---------- Benches ----------

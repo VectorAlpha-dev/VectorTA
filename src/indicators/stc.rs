@@ -26,7 +26,7 @@
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaStc;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -269,11 +269,19 @@ impl StcBuilder {
 #[derive(Debug, Error)]
 pub enum StcError {
     #[error("stc: Empty data provided.")]
-    EmptyData,
+    EmptyInputData,
     #[error("stc: All values are NaN.")]
     AllValuesNaN,
+    #[error("stc: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
     #[error("stc: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("stc: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("stc: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("stc: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
     #[error("stc: Internal error: {0}")]
     Internal(String),
 }
@@ -287,7 +295,7 @@ pub fn stc_with_kernel(input: &StcInput, kernel: Kernel) -> Result<StcOutput, St
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
-        return Err(StcError::EmptyData);
+        return Err(StcError::EmptyInputData);
     }
     let first = data
         .iter()
@@ -364,7 +372,7 @@ pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
-        return Err(StcError::EmptyData);
+        return Err(StcError::EmptyInputData);
     }
 
     let first = data
@@ -372,11 +380,10 @@ pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result
         .position(|x| !x.is_nan())
         .ok_or(StcError::AllValuesNaN)?;
     if dst.len() != len {
-        return Err(StcError::Internal(format!(
-            "dst len {} != src len {}",
-            dst.len(),
-            len
-        )));
+        return Err(StcError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
 
     let needed = input
@@ -1103,7 +1110,7 @@ pub fn stc_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(StcError::Internal("Invalid kernel".to_string())),
+        _ => return Err(StcError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1140,18 +1147,49 @@ impl StcBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &StcBatchRange) -> Vec<StcParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &StcBatchRange) -> Result<Vec<StcParams>, StcError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, StcError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
+        }
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(StcError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let fasts = axis(r.fast_period);
-    let slows = axis(r.slow_period);
-    let ks = axis(r.k_period);
-    let ds = axis(r.d_period);
-    let mut out = Vec::with_capacity(fasts.len() * slows.len() * ks.len() * ds.len());
+
+    let fasts = axis_usize(r.fast_period)?;
+    let slows = axis_usize(r.slow_period)?;
+    let ks = axis_usize(r.k_period)?;
+    let ds = axis_usize(r.d_period)?;
+
+    let cap = fasts
+        .len()
+        .checked_mul(slows.len())
+        .and_then(|v| v.checked_mul(ks.len()))
+        .and_then(|v| v.checked_mul(ds.len()))
+        .ok_or_else(|| StcError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &f in &fasts {
         for &s in &slows {
             for &k in &ks {
@@ -1168,7 +1206,7 @@ fn expand_grid(r: &StcBatchRange) -> Vec<StcParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1196,11 +1234,12 @@ fn stc_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<StcBatchOutput, StcError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(StcError::NotEnoughValidData {
-            needed: 1,
-            valid: 0,
+        return Err(StcError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
         });
     }
     let first = data
@@ -1227,6 +1266,12 @@ fn stc_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+
+    let _ = rows.checked_mul(cols).ok_or_else(|| StcError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
@@ -2004,11 +2049,14 @@ pub fn stc_batch_py<'py>(
         d_period: d_period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("stc_batch: rows*cols overflow"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -2142,7 +2190,8 @@ pub fn stc_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok((handle, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2177,7 +2226,7 @@ pub fn stc_cuda_many_series_one_param_dev_py<'py>(
         cuda.stc_many_series_one_param_time_major_dev(tm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 // Helper function for batch processing
@@ -2189,17 +2238,18 @@ fn stc_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<StcParams>, StcError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(StcError::NotEnoughValidData {
-            needed: 1,
-            valid: 0,
+        return Err(StcError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
         });
     }
 
     let len = data.len();
     if len == 0 {
-        return Err(StcError::EmptyData);
+        return Err(StcError::EmptyInputData);
     }
     let first = data
         .iter()
@@ -2227,12 +2277,16 @@ fn stc_batch_inner_into(
 
     let rows = combos.len();
     let cols = len;
-    if out.len() != rows * cols {
-        return Err(StcError::Internal(format!(
-            "out len {} != rows*cols {}",
-            out.len(),
-            rows * cols
-        )));
+    let expected = rows.checked_mul(cols).ok_or_else(|| StcError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
+    if out.len() != expected {
+        return Err(StcError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
     // init NaN prefixes on the destination matrix

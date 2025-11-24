@@ -26,23 +26,36 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaVlmaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error(
+        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
+    )]
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaVlmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaVlmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaVlmaError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaVlmaError {}
 
 // -------- Kernel selection policy (kept for ALMA parity/debug; single impl under the hood) --------
 
@@ -97,10 +110,9 @@ pub struct CudaVlma {
 
 impl CudaVlma {
     pub fn new(device_id: usize) -> Result<Self, CudaVlmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vlma_kernel.ptx"));
         let jit_opts = &[
@@ -110,17 +122,17 @@ impl CudaVlma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) =
+                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -156,9 +168,7 @@ impl CudaVlma {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaVlmaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
 
     #[inline]
@@ -207,15 +217,73 @@ impl CudaVlma {
         }
     }
     #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+    #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
             return true;
         }
-        if let Ok((free, _total)) = mem_get_info() {
+        if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
         } else {
             true
         }
+    }
+
+    #[inline]
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaVlmaError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaVlmaError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
     }
 
     // ----- Host-side helpers -----
@@ -243,11 +311,13 @@ impl CudaVlma {
         (ps, pss, pn)
     }
 
-    fn expand_supported_combos(sweep: &VlmaBatchRange) -> Vec<VlmaParams> {
-        expand_grid_vlma(sweep)
+    fn expand_supported_combos(sweep: &VlmaBatchRange) -> Result<Vec<VlmaParams>, CudaVlmaError> {
+        let combos = expand_grid_vlma(sweep)
+            .map_err(|e| CudaVlmaError::InvalidInput(e.to_string()))?;
+        Ok(combos
             .into_iter()
             .filter(|p| p.matype.as_deref() == Some("sma") && p.devtype == Some(0))
-            .collect()
+            .collect())
     }
 
     // ----- Kernel launches -----
@@ -267,7 +337,9 @@ impl CudaVlma {
         let func = self
             .module
             .get_function("vlma_batch_sma_std_prefix_f32")
-            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVlmaError::MissingKernelSymbol {
+                name: "vlma_batch_sma_std_prefix_f32",
+            })?;
 
         // Chunk combos to respect grid limits (y/x either way). We use grid.x here.
         let bx = match self.policy.batch {
@@ -280,6 +352,8 @@ impl CudaVlma {
             let this = (n_combos - launched).min(65_535usize);
             let grid: GridSize = (this as u32, 1, 1).into();
             let block: BlockSize = (bx, 1, 1).into();
+
+            self.validate_launch(grid.x, grid.y, grid.z, block.x, block.y, block.z)?;
 
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -315,9 +389,7 @@ impl CudaVlma {
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
 
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
 
             launched += this;
@@ -341,13 +413,17 @@ impl CudaVlma {
         let func = self
             .module
             .get_function("vlma_many_series_one_param_f32")
-            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVlmaError::MissingKernelSymbol {
+                name: "vlma_many_series_one_param_f32",
+            })?;
         let bx = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
             ManySeriesKernelPolicy::Auto => 128,
         };
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (bx, 1, 1).into();
+
+        self.validate_launch(grid.x, grid.y, grid.z, block.x, block.y, block.z)?;
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -366,9 +442,7 @@ impl CudaVlma {
                 &mut rows_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         self.last_many = Some(ManySeriesKernelSelected::TimeMajor { block_x: bx });
         self.maybe_log_many();
@@ -391,7 +465,7 @@ impl CudaVlma {
             .ok_or_else(|| CudaVlmaError::InvalidInput("all values are NaN".into()))?;
 
         // Supported combos only: SMA + stddev (devtype=0)
-        let combos = Self::expand_supported_combos(sweep);
+        let combos = Self::expand_supported_combos(sweep)?;
         if combos.is_empty() {
             return Err(CudaVlmaError::InvalidInput(
                 "no supported parameter combinations (require matype='sma', devtype=0)".into(),
@@ -420,22 +494,42 @@ impl CudaVlma {
         let (ps, pss, pn) = Self::build_prefixes(data_f32);
         let n = len;
         let m = combos.len();
-        let bytes = n * 4 + (n + 1) * 8 * 2 + (n + 1) * 4 + m * 4 * 2 + (m * n) * 4;
+        let prices_b = n
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaVlmaError::InvalidInput("prices size overflow".into()))?;
+        let prefixes_b = (n + 1)
+            .checked_mul(std::mem::size_of::<f64>() * 2 + std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaVlmaError::InvalidInput("prefix size overflow".into()))?;
+        let periods_b = m
+            .checked_mul(std::mem::size_of::<i32>() * 2)
+            .ok_or_else(|| CudaVlmaError::InvalidInput("periods size overflow".into()))?;
+        let out_b = m
+            .checked_mul(n)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaVlmaError::InvalidInput("output size overflow".into()))?;
+        let bytes = prices_b
+            .checked_add(prefixes_b)
+            .and_then(|x| x.checked_add(periods_b))
+            .and_then(|x| x.checked_add(out_b))
+            .ok_or_else(|| CudaVlmaError::InvalidInput("total VRAM size overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // 64MB
         if !Self::will_fit(bytes, headroom) {
-            return Err(CudaVlmaError::InvalidInput(format!(
-                "estimated VRAM {:.2} MB exceeds available",
-                (bytes as f64) / (1024.0 * 1024.0)
-            )));
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaVlmaError::OutOfMemory {
+                    required: bytes,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaVlmaError::InvalidInput("insufficient device memory".into()));
+            }
         }
 
         // Upload inputs
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let d_ps = DeviceBuffer::from_slice(&ps).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let d_pss =
-            DeviceBuffer::from_slice(&pss).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let d_pn = DeviceBuffer::from_slice(&pn).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let d_ps = DeviceBuffer::from_slice(&ps)?;
+        let d_pss = DeviceBuffer::from_slice(&pss)?;
+        let d_pn = DeviceBuffer::from_slice(&pn)?;
         let min_periods: Vec<i32> = combos
             .iter()
             .map(|c| c.min_period.unwrap_or(1) as i32)
@@ -444,14 +538,14 @@ impl CudaVlma {
             .iter()
             .map(|c| c.max_period.unwrap() as i32)
             .collect();
-        let d_min = DeviceBuffer::from_slice(&min_periods)
-            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let d_max = DeviceBuffer::from_slice(&max_periods)
-            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        let d_min = DeviceBuffer::from_slice(&min_periods)?;
+        let d_max = DeviceBuffer::from_slice(&max_periods)?;
 
         // Output buffer
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(m * n) }
-            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        let total_elems = m
+            .checked_mul(n)
+            .ok_or_else(|| CudaVlmaError::InvalidInput("m * n overflowed".into()))?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(total_elems) }?;
 
         // Launch
         self.launch_batch(
@@ -484,7 +578,11 @@ impl CudaVlma {
         if cols == 0 || rows == 0 {
             return Err(CudaVlmaError::InvalidInput("empty matrix".into()));
         }
-        if data_tm_f32.len() != cols * rows {
+        if cols
+            .checked_mul(rows)
+            .map(|n| n != data_tm_f32.len())
+            .unwrap_or(true)
+        {
             return Err(CudaVlmaError::InvalidInput(
                 "flat input length mismatch".into(),
             ));
@@ -525,17 +623,34 @@ impl CudaVlma {
         }
 
         // VRAM estimate: input + first_valids + output
-        let bytes = (cols * rows) * 4 + cols * 4 + (cols * rows) * 4;
-        if !Self::will_fit(bytes, 32 * 1024 * 1024) {
-            return Err(CudaVlmaError::InvalidInput("insufficient VRAM".into()));
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaVlmaError::InvalidInput("cols * rows overflowed".into()))?;
+        let bytes_in_out = elems
+            .checked_mul(std::mem::size_of::<f32>() * 2)
+            .ok_or_else(|| CudaVlmaError::InvalidInput("VRAM size overflow".into()))?;
+        let bytes_first = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaVlmaError::InvalidInput("first_valid size overflow".into()))?;
+        let bytes = bytes_in_out
+            .checked_add(bytes_first)
+            .ok_or_else(|| CudaVlmaError::InvalidInput("total VRAM size overflow".into()))?;
+        let headroom = 32 * 1024 * 1024;
+        if !Self::will_fit(bytes, headroom) {
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaVlmaError::OutOfMemory {
+                    required: bytes,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaVlmaError::InvalidInput("insufficient device memory".into()));
+            }
         }
 
-        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
-            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
         self.launch_many_series(
             &d_prices_tm,
