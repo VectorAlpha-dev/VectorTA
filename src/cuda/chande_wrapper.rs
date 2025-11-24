@@ -20,22 +20,29 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaChandeError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: isize, end: isize, step: isize },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaChandeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaChandeError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaChandeError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaChandeError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -66,7 +73,7 @@ impl Default for CudaChandePolicy {
 pub struct CudaChande {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: std::sync::Arc<Context>,
     device_id: u32,
     policy: CudaChandePolicy,
 
@@ -79,10 +86,9 @@ pub struct CudaChande {
 
 impl CudaChande {
     pub fn new(device_id: usize) -> Result<Self, CudaChandeError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = std::sync::Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/chande_kernel.ptx"));
         let jit_opts = &[
@@ -92,24 +98,21 @@ impl CudaChande {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaChandeError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaChandePolicy::default(),
-            // NEW: ring-buffer workspace cache
             dq_idx: None,
             dq_val: None,
             dq_combo_cap: 0,
@@ -120,11 +123,12 @@ impl CudaChande {
     pub fn set_policy(&mut self, policy: CudaChandePolicy) {
         self.policy = policy;
     }
-    pub fn synchronize(&self) -> Result<(), CudaChandeError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaChandeError::Cuda(e.to_string()))
-    }
+    pub fn synchronize(&self) -> Result<(), CudaChandeError> { Ok(self.stream.synchronize()?) }
+
+    #[inline]
+    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     fn first_valid_hlc(high: &[f32], low: &[f32], close: &[f32]) -> Result<usize, CudaChandeError> {
         if high.is_empty() || low.is_empty() || close.is_empty() {
@@ -142,10 +146,95 @@ impl CudaChande {
         Err(CudaChandeError::InvalidInput("all values are NaN".into()))
     }
 
-    fn device_will_fit(bytes: usize, headroom: usize) -> bool {
-        let check = match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && v.to_lowercase() != "false", Err(_) => true };
-        if !check { return true; }
-        if let Ok((free, _)) = mem_get_info() { bytes.saturating_add(headroom) <= free } else { true }
+    fn axis_usize_range(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, CudaChandeError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let vals: Vec<usize> = (start..=end).step_by(step).collect();
+            if vals.is_empty() {
+                return Err(CudaChandeError::InvalidRange {
+                    start: start as isize,
+                    end: end as isize,
+                    step: step as isize,
+                });
+            }
+            return Ok(vals);
+        }
+        let mut vals = Vec::new();
+        let s = step.max(1);
+        let mut cur = start;
+        while cur >= end {
+            vals.push(cur);
+            if cur < s {
+                break;
+            }
+            cur -= s;
+            if cur == usize::MAX {
+                break;
+            }
+        }
+        if vals.is_empty() {
+            return Err(CudaChandeError::InvalidRange {
+                start: start as isize,
+                end: end as isize,
+                step: step as isize,
+            });
+        }
+        Ok(vals)
+    }
+
+    fn axis_f64_range(
+        (start, end, step): (f64, f64, f64),
+    ) -> Result<Vec<f32>, CudaChandeError> {
+        if step.abs() < f64::EPSILON || (start - end).abs() < f64::EPSILON {
+            return Ok(vec![start as f32]);
+        }
+        let mut v = Vec::new();
+        if start < end {
+            let mut x = start;
+            while x <= end + 1e-12 {
+                v.push(x as f32);
+                x += step;
+            }
+        } else {
+            let mut x = start;
+            let st = -step.abs();
+            while x >= end - 1e-12 {
+                v.push(x as f32);
+                x += st;
+            }
+        }
+        if v.is_empty() {
+            return Err(CudaChandeError::InvalidRange {
+                start: start as isize,
+                end: end as isize,
+                step: step as isize,
+            });
+        }
+        Ok(v)
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaChandeError> {
+        let check = match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        };
+        if !check {
+            return Ok(());
+        }
+        if let Ok((free, _)) = mem_get_info() {
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaChandeError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+            }
+        } else {
+            Ok(())
+        }
     }
 
     #[inline]
@@ -158,38 +247,67 @@ impl CudaChande {
         let need = combos
             .checked_mul(queue_cap)
             .ok_or_else(|| CudaChandeError::InvalidInput("dq size overflow".into()))?;
-        self.dq_idx = Some(DeviceBuffer::<i32>::zeroed(need).map_err(|e| CudaChandeError::Cuda(e.to_string()))?);
-        self.dq_val = Some(DeviceBuffer::<f32>::zeroed(need).map_err(|e| CudaChandeError::Cuda(e.to_string()))?);
+        self.dq_idx = Some(DeviceBuffer::<i32>::zeroed(need)?);
+        self.dq_val = Some(DeviceBuffer::<f32>::zeroed(need)?);
         self.dq_combo_cap = combos;
         self.dq_cap = queue_cap;
         Ok(())
     }
 
-    fn will_fit_full_output_one_series(&self, n_combos: usize, len: usize, queue_cap: usize) -> bool {
-        let in_bytes = 3usize * len * std::mem::size_of::<f32>();
-        let params_bytes = n_combos * (3 * std::mem::size_of::<i32>() + 2 * std::mem::size_of::<f32>());
-        let out_bytes = n_combos * len * std::mem::size_of::<f32>();
-        let dq_bytes = n_combos * queue_cap * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
+    fn will_fit_full_output_one_series(
+        &self,
+        n_combos: usize,
+        len: usize,
+        queue_cap: usize,
+    ) -> Result<(), CudaChandeError> {
+        let elt_f32 = std::mem::size_of::<f32>();
+        let elt_i32 = std::mem::size_of::<i32>();
+
+        let in_bytes = 3usize
+            .checked_mul(len)
+            .and_then(|n| n.checked_mul(elt_f32))
+            .ok_or_else(|| CudaChandeError::InvalidInput("size overflow (inputs)".into()))?;
+        let params_bytes = n_combos
+            .checked_mul(3 * elt_i32 + 2 * elt_f32)
+            .ok_or_else(|| CudaChandeError::InvalidInput("size overflow (params)".into()))?;
+        let out_bytes = n_combos
+            .checked_mul(len)
+            .and_then(|n| n.checked_mul(elt_f32))
+            .ok_or_else(|| CudaChandeError::InvalidInput("size overflow (outputs)".into()))?;
+        let dq_bytes = n_combos
+            .checked_mul(queue_cap)
+            .and_then(|n| n.checked_mul(elt_i32 + elt_f32))
+            .ok_or_else(|| CudaChandeError::InvalidInput("size overflow (workspace)".into()))?;
+
         let headroom = 64usize * 1024 * 1024;
-        Self::device_will_fit(in_bytes + params_bytes + out_bytes + dq_bytes, headroom)
+        let need = in_bytes
+            .checked_add(params_bytes)
+            .and_then(|n| n.checked_add(out_bytes))
+            .and_then(|n| n.checked_add(dq_bytes))
+            .ok_or_else(|| CudaChandeError::InvalidInput("size overflow (total)".into()))?;
+        Self::will_fit(need, headroom)
     }
 
     fn chunk_size_for_batch(n_combos: usize, len: usize) -> usize {
         // Inputs: 3×len f32; params: periods/mults/dirs/alphas/warm per combo; outputs: combos×len f32.
-        let in_bytes = 3 * len * std::mem::size_of::<f32>();
-        let params_bytes =
-            n_combos * (std::mem::size_of::<i32>() * 3 + std::mem::size_of::<f32>() * 2);
-        let params_bytes =
-            n_combos * (std::mem::size_of::<i32>() * 3 + std::mem::size_of::<f32>() * 2);
-        let out_per_combo = len * std::mem::size_of::<f32>();
+        let in_bytes = 3usize
+            .checked_mul(len)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .unwrap_or(usize::MAX);
+        let params_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>() * 3 + std::mem::size_of::<f32>() * 2)
+            .unwrap_or(usize::MAX);
+        let out_per_combo = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .unwrap_or(usize::MAX);
         let headroom = 64 * 1024 * 1024;
         let mut chunk = n_combos.max(1);
         while chunk > 1 {
-            let need = in_bytes + params_bytes + chunk * out_per_combo + headroom;
-            if Self::device_will_fit(need, 0) {
-                break;
-            }
-            if Self::device_will_fit(need, 0) {
+            let need = in_bytes
+                .saturating_add(params_bytes)
+                .saturating_add(chunk.saturating_mul(out_per_combo))
+                .saturating_add(headroom);
+            if Self::will_fit(need, 0).is_ok() {
                 break;
             }
             chunk = (chunk + 1) / 2;
@@ -206,52 +324,21 @@ impl CudaChande {
         direction: &str,
     ) -> Result<DeviceArrayF32, CudaChandeError> {
         if high.len() != low.len() || low.len() != close.len() {
-            return Err(CudaChandeError::InvalidInput(
-                "input length mismatch".into(),
-            ));
-            return Err(CudaChandeError::InvalidInput(
-                "input length mismatch".into(),
-            ));
+            return Err(CudaChandeError::InvalidInput("input length mismatch".into()));
         }
         let len = high.len();
         let first_valid = Self::first_valid_hlc(high, low, close)?;
-        // Expand params on host
+        // Expand params on host (robust range rules: zero step => static, reversed bounds supported)
         let (ps, pe, pst) = sweep.period;
         let (ms, me, mst) = sweep.mult;
-        if ps == 0 {
-            return Err(CudaChandeError::InvalidInput("period must be > 0".into()));
-        }
         if !(direction.eq_ignore_ascii_case("long") || direction.eq_ignore_ascii_case("short")) {
             return Err(CudaChandeError::InvalidInput(
                 "direction must be 'long' or 'short'".into(),
             ));
         }
         let dir_flag = if direction.eq_ignore_ascii_case("long") { 1i32 } else { 0i32 };
-        let periods: Vec<usize> = if pst == 0 || ps == pe { vec![ps] } else { (ps..=pe).step_by(pst).collect() };
-        let dir_flag = if direction.eq_ignore_ascii_case("long") {
-            1i32
-        } else {
-            0i32
-        };
-        let periods: Vec<usize> = if pst == 0 || ps == pe {
-            vec![ps]
-        } else {
-            (ps..=pe).step_by(pst).collect()
-        };
-        let mults_host: Vec<f32> = if mst.abs() < f64::EPSILON || (ms - me).abs() < f64::EPSILON {
-            vec![ms as f32]
-        } else {
-            let mut v = Vec::new();
-            let mut x = ms;
-            while x <= me + 1e-12 {
-                v.push(x as f32);
-                x += mst;
-            }
-            v
-        };
-        if periods.is_empty() || mults_host.is_empty() {
-            return Err(CudaChandeError::InvalidInput("no parameter combos".into()));
-        }
+        let periods = Self::axis_usize_range((ps, pe, pst))?;
+        let mults_host = Self::axis_f64_range((ms, me, mst))?;
         let mut h_periods = Vec::<i32>::new();
         let mut h_alphas = Vec::<f32>::new();
         let mut h_warms = Vec::<i32>::new();
@@ -280,13 +367,13 @@ impl CudaChande {
         let n_combos = h_periods.len();
 
         // Device buffers (inputs & params)
-        let d_high  = DeviceBuffer::from_slice(high).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_low   = DeviceBuffer::from_slice(low).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&h_periods).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_mults   = DeviceBuffer::from_slice(&h_mults).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_dirs    = DeviceBuffer::from_slice(&h_dirs).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_alphas  = DeviceBuffer::from_slice(&h_alphas).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+        let d_high  = DeviceBuffer::from_slice(high)?;
+        let d_low   = DeviceBuffer::from_slice(low)?;
+        let d_close = DeviceBuffer::from_slice(close)?;
+        let d_periods = DeviceBuffer::from_slice(&h_periods)?;
+        let d_mults   = DeviceBuffer::from_slice(&h_mults)?;
+        let d_dirs    = DeviceBuffer::from_slice(&h_dirs)?;
+        let d_alphas  = DeviceBuffer::from_slice(&h_alphas)?;
 
         // Check for new kernels and compute queue_cap for deque buffers
         let have_oneseries = self.module.get_function("chande_one_series_many_params_f32").is_ok();
@@ -295,27 +382,38 @@ impl CudaChande {
 
         // VRAM checks and workspace ensure
         if have_oneseries || have_oneseries_tr {
-            if !self.will_fit_full_output_one_series(n_combos, len, queue_cap) {
-                return Err(CudaChandeError::Cuda("insufficient device memory for output+workspace".into()));
-            }
+            self.will_fit_full_output_one_series(n_combos, len, queue_cap)?;
             self.ensure_workspace(n_combos, queue_cap)?;
         } else {
-            let in_bytes = 3 * len * std::mem::size_of::<f32>();
-            let params_bytes = n_combos * (3 * std::mem::size_of::<i32>() + 2 * std::mem::size_of::<f32>());
-            let out_bytes = n_combos * len * std::mem::size_of::<f32>();
+            let in_bytes = 3usize
+                .checked_mul(len).and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+                .ok_or_else(|| CudaChandeError::InvalidInput("size overflow (inputs)".into()))?;
+            let params_bytes = n_combos
+                .checked_mul(3 * std::mem::size_of::<i32>() + 2 * std::mem::size_of::<f32>())
+                .ok_or_else(|| CudaChandeError::InvalidInput("size overflow (params)".into()))?;
+            let out_bytes = n_combos
+                .checked_mul(len)
+                .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+                .ok_or_else(|| CudaChandeError::InvalidInput("size overflow (outputs)".into()))?;
             let headroom = 64 * 1024 * 1024;
-            if !Self::device_will_fit(in_bytes + params_bytes + out_bytes, headroom) {
-                return Err(CudaChandeError::Cuda("insufficient device memory for output".into()));
-            }
+            let need = in_bytes
+                .checked_add(params_bytes)
+                .and_then(|n| n.checked_add(out_bytes))
+                .ok_or_else(|| CudaChandeError::InvalidInput("size overflow (total)".into()))?;
+            Self::will_fit(need, headroom)?;
         }
 
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }
-            .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+        let total = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaChandeError::InvalidInput("n_combos*len overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
 
         if have_oneseries {
             // Fast path: on-the-fly TR, no extra copy
-            let func = self.module.get_function("chande_one_series_many_params_f32")
-                .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+            let func = self
+                .module
+                .get_function("chande_one_series_many_params_f32")
+                .map_err(|_| CudaChandeError::MissingKernelSymbol { name: "chande_one_series_many_params_f32" })?;
             let warps_needed = ((n_combos + 31) / 32) as u32;
             let warps_per_block = match self.policy.batch {
                 BatchKernelPolicy::Plain { block_x } => (block_x.max(32) / 32),
@@ -324,6 +422,7 @@ impl CudaChande {
             .max(1);
             let block_x = warps_per_block * 32;
             let grid_x = ((warps_needed + warps_per_block - 1) / warps_per_block).max(1);
+            if block_x > 1024 { return Err(CudaChandeError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 }); }
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
 
@@ -361,9 +460,7 @@ impl CudaChande {
                     &mut dq_val_ptr as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
         } else {
             // Fallback to legacy batch implementation
@@ -373,7 +470,7 @@ impl CudaChande {
             } else {
                 self.module
                     .get_function("chande_batch_f32")
-                    .map_err(|e| CudaChandeError::Cuda(e.to_string()))?
+                    .map_err(|_| CudaChandeError::MissingKernelSymbol { name: "chande_batch_f32" })?
             };
 
             let d_tr: Option<DeviceBuffer<f32>> = if use_tr {
@@ -394,7 +491,7 @@ impl CudaChande {
                     }
                     prev_c = close[t];
                 }
-                Some(DeviceBuffer::from_slice(&tr).map_err(|e| CudaChandeError::Cuda(e.to_string()))?)
+                Some(DeviceBuffer::from_slice(&tr)?)
             } else { None };
 
             // No VRAM-driven chunking anymore; we validated full output.
@@ -427,7 +524,7 @@ impl CudaChande {
                         let mut alphas_ptr  = d_alphas.as_device_ptr().as_raw()
                             .wrapping_add((launched * std::mem::size_of::<f32>()) as u64);
                         let warms_slice = &h_warms[launched..(launched + cur)];
-                        let d_warms   = DeviceBuffer::from_slice(warms_slice).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+                        let d_warms   = DeviceBuffer::from_slice(warms_slice)?;
                         let mut warms_ptr = d_warms.as_device_ptr().as_raw();
 
                         let args: &mut [*mut c_void] = &mut [
@@ -444,8 +541,7 @@ impl CudaChande {
                             &mut cur_i as *mut _ as *mut c_void,
                             &mut out_ptr as *mut _ as *mut c_void,
                         ];
-                        self.stream.launch(&func, grid, block, 0, args)
-                            .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+                        self.stream.launch(&func, grid, block, 0, args)?;
                     } else {
                         let mut high_ptr = d_high.as_device_ptr().as_raw();
                         let mut low_ptr  = d_low.as_device_ptr().as_raw();
@@ -459,7 +555,7 @@ impl CudaChande {
                         let mut alphas_ptr  = d_alphas.as_device_ptr().as_raw()
                             .wrapping_add((launched * std::mem::size_of::<f32>()) as u64);
                         let warms_slice = &h_warms[launched..(launched + cur)];
-                        let d_warms   = DeviceBuffer::from_slice(warms_slice).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+                        let d_warms   = DeviceBuffer::from_slice(warms_slice)?;
                         let mut warms_ptr = d_warms.as_device_ptr().as_raw();
 
                         let args: &mut [*mut c_void] = &mut [
@@ -476,13 +572,14 @@ impl CudaChande {
                             &mut cur_i as *mut _ as *mut c_void,
                             &mut out_ptr as *mut _ as *mut c_void,
                         ];
-                        self.stream.launch(&func, grid, block, 0, args)
-                            .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+                        self.stream.launch(&func, grid, block, 0, args)?;
                     }
                 }
                 launched += cur;
             }
         }
+
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -565,22 +662,27 @@ impl CudaChande {
             ));
         }
 
-        let d_high = DeviceBuffer::from_slice(high_tm).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_low  = DeviceBuffer::from_slice(low_tm).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_close= DeviceBuffer::from_slice(close_tm).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_fv   = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high_tm)?;
+        let d_low  = DeviceBuffer::from_slice(low_tm)?;
+        let d_close= DeviceBuffer::from_slice(close_tm)?;
+        let d_fv   = DeviceBuffer::from_slice(&first_valids)?;
+        let total = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaChandeError::InvalidInput("cols*rows overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
 
         let func = self
             .module
             .get_function("chande_many_series_one_param_f32")
-            .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaChandeError::MissingKernelSymbol { name: "chande_many_series_one_param_f32" })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             ManySeriesKernelPolicy::Auto => 256,
         };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        if block_x > 1024 {
+            return Err(CudaChandeError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -611,10 +713,10 @@ impl CudaChande {
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
+
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,

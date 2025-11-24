@@ -27,6 +27,7 @@
 //! - Streaming performance: O(1) updates; batch uses per-row deques.
 //! - Memory: minimal allocations via `alloc_with_nan_prefix` and uninit-matrix helpers.
 //! - Batch: supported; no row-shared precompute beyond ATR and per-row extrema; further wins unlikely.
+//! - CUDA/Python: CUDA wrappers use typed errors + VRAM checks; `CeDeviceArrayF32Py` exposes CAI v3 and DLPack v1.x capsules with primary-context guards.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -63,7 +64,290 @@ use thiserror::Error;
 use crate::cuda::{CudaCeError, CudaChandelierExit};
 use crate::indicators::atr::{atr_with_kernel, AtrInput, AtrParams};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32 as DeviceArrayF32Cuda;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context as CudaContext;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct CeDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32Cuda,
+    pub(crate) _ctx: Arc<CudaContext>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl CeDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = &self.inner;
+        let d = PyDict::new(py);
+        let item = std::mem::size_of::<f32>();
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (inner.cols * item, item))?;
+        let size = inner.rows.saturating_mul(inner.cols);
+        let ptr_val: usize = if size == 0 {
+            0
+        } else {
+            inner.buf.as_device_ptr().as_raw() as usize
+        };
+        d.set_item("data", (ptr_val, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        Ok((2, self.device_id as i32))
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<PyObject>,
+        max_version: Option<(i32, i32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLPackVersion {
+            major: u32,
+            minor: u32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        // Decide whether to use versioned capsules based on negotiation.
+        let use_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+
+        // Producer stream is synchronized (no pending work), so we ignore the stream hint.
+        let _ = stream;
+        let _ = dl_device;
+        let _ = copy;
+
+        // Move the VRAM buffer into the capsule manager so the consumer owns it.
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32Cuda {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
+
+        // Determine allocation device and retain primary context for safe frees.
+        let (dev_type, dev_id) = self.__dlpack_device__()?;
+        debug_assert_eq!(dev_type, 2);
+        let mut retained: cust::sys::CUcontext = null_mut();
+        unsafe {
+            let _ = cust::sys::cuDevicePrimaryCtxRetain(&mut retained as *mut _, dev_id);
+        }
+
+        // Build common tensor state (2-D, contiguous, strides in elements).
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let size = (rows as usize).saturating_mul(cols as usize);
+        let data_ptr = if size == 0 {
+            std::ptr::null_mut()
+        } else {
+            inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+        };
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1_i64]);
+
+        struct Manager {
+            ctx: cust::sys::CUcontext,
+            device_id: i32,
+            _buf: DeviceBuffer<f32>,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+        }
+
+        unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() {
+                return;
+            }
+            let mgr = (*p).manager_ctx as *mut Manager;
+            if !mgr.is_null() {
+                let mut old: cust::sys::CUcontext = null_mut();
+                let _ = cust::sys::cuCtxPushCurrent((*mgr).ctx);
+                let boxed: Box<Manager> = Box::from_raw(mgr);
+                let dev_id = boxed.device_id;
+                let _ = cust::sys::cuCtxPopCurrent(&mut old as *mut _);
+                let _ = cust::sys::cuDevicePrimaryCtxRelease(dev_id);
+            }
+            let _ = Box::from_raw(p);
+        }
+
+        unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mgr = (*p).manager_ctx as *mut Manager;
+            if !mgr.is_null() {
+                let mut old: cust::sys::CUcontext = null_mut();
+                let _ = cust::sys::cuCtxPushCurrent((*mgr).ctx);
+                let boxed: Box<Manager> = Box::from_raw(mgr);
+                let dev_id = boxed.device_id;
+                let _ = cust::sys::cuCtxPopCurrent(&mut old as *mut _);
+                let _ = cust::sys::cuDevicePrimaryCtxRelease(dev_id);
+            }
+            let _ = Box::from_raw(p);
+        }
+
+        unsafe extern "C" fn capsule_dtor(capsule: *mut pyo3::ffi::PyObject) {
+            use std::ffi::CString;
+
+            let vname = CString::new("dltensor_versioned").unwrap();
+            let legacy = CString::new("dltensor").unwrap();
+
+            let ptr_v = pyo3::ffi::PyCapsule_GetPointer(capsule, vname.as_ptr());
+            if !ptr_v.is_null() {
+                let mt = ptr_v as *mut DLManagedTensorVersioned;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                return;
+            }
+            let ptr_l = pyo3::ffi::PyCapsule_GetPointer(capsule, legacy.as_ptr());
+            if !ptr_l.is_null() {
+                let mt = ptr_l as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+            }
+        }
+
+        // Prepare manager and capsule contents.
+        let mgr = Box::new(Manager {
+            ctx: retained,
+            device_id: dev_id,
+            _buf: inner.buf,
+            _shape: shape,
+            _strides: strides,
+        });
+        let mgr_ptr = Box::into_raw(mgr);
+
+        if use_versioned {
+            let mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 2 },
+                manager_ctx: mgr_ptr as *mut _,
+                deleter: Some(deleter_v1),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: dev_type,
+                        device_id: dev_id,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: unsafe { (*mgr_ptr)._shape.as_mut_ptr() },
+                    strides: unsafe { (*mgr_ptr)._strides.as_mut_ptr() },
+                    byte_offset: 0,
+                },
+            });
+            let raw = Box::into_raw(mt);
+            let name = std::ffi::CString::new("dltensor_versioned").unwrap();
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    raw as *mut std::ffi::c_void,
+                    name.as_ptr(),
+                    Some(capsule_dtor),
+                )
+            };
+            if cap.is_null() {
+                unsafe { deleter_v1(raw) };
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: dev_type,
+                        device_id: dev_id,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: unsafe { (*mgr_ptr)._shape.as_mut_ptr() },
+                    strides: unsafe { (*mgr_ptr)._strides.as_mut_ptr() },
+                    byte_offset: 0,
+                },
+                manager_ctx: mgr_ptr as *mut _,
+                deleter: Some(deleter_legacy),
+            });
+            let raw = Box::into_raw(mt);
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    raw as *mut std::ffi::c_void,
+                    name.as_ptr(),
+                    Some(capsule_dtor),
+                )
+            };
+            if cap.is_null() {
+                unsafe { deleter_legacy(raw) };
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        }
+    }
+}
 
 impl<'a> AsRef<[f64]> for ChandelierExitInput<'a> {
     #[inline(always)]
@@ -535,6 +819,15 @@ pub enum ChandelierExitError {
 
     #[error("chandelier_exit: ATR calculation error: {0}")]
     AtrError(String),
+
+    #[error("chandelier_exit: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("chandelier_exit: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+
+    #[error("chandelier_exit: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 // NaN-skipping helper functions to match Pine Script's ta.highest/ta.lowest behavior
@@ -1129,8 +1422,8 @@ pub fn chandelier_exit_with_kernel(
 /// Compute Chandelier Exit into caller-provided buffers (no allocations).
 ///
 /// - Preserves NaN warmups exactly like `chandelier_exit()`.
-/// - `long_out.len()` and `short_out.len()` must equal the input length; returns the
-///   module's `InvalidPeriod` length error on mismatch.
+/// - `long_out.len()` and `short_out.len()` must equal the input length; returns
+///   `OutputLengthMismatch` on mismatch.
 /// - Uses `Kernel::Auto` for dispatch and calls the existing compute-into path.
 #[cfg(not(feature = "wasm"))]
 #[inline]
@@ -1153,9 +1446,9 @@ pub fn chandelier_exit_into_slices(
     let (h, l, c, period, mult, use_close, first, chosen) = ce_prepare(input, kern)?;
     let len = c.len();
     if long_dst.len() != len || short_dst.len() != len {
-        return Err(ChandelierExitError::InvalidPeriod {
-            period: long_dst.len(),
-            data_len: len,
+        return Err(ChandelierExitError::OutputLengthMismatch {
+            expected: len,
+            got: long_dst.len().max(short_dst.len()),
         });
     }
     let atr_in = AtrInput::from_slices(
@@ -1314,10 +1607,17 @@ pub fn chandelier_exit_into_flat(
     kern: Kernel,
 ) -> Result<(), ChandelierExitError> {
     let len = input.as_ref().len();
-    if flat_out.len() != 2 * len {
-        return Err(ChandelierExitError::InvalidPeriod {
-            period: flat_out.len(),
-            data_len: 2 * len,
+    let expected = len
+        .checked_mul(2)
+        .ok_or(ChandelierExitError::InvalidRange {
+            start: "rows".into(),
+            end: "cols".into(),
+            step: "mul overflow".into(),
+        })?;
+    if flat_out.len() != expected {
+        return Err(ChandelierExitError::OutputLengthMismatch {
+            expected,
+            got: flat_out.len(),
         });
     }
     let (long_dst, short_dst) = flat_out.split_at_mut(len);
@@ -1433,29 +1733,95 @@ impl CeBatchOutput {
 }
 
 #[inline(always)]
-fn expand_ce(r: &CeBatchRange) -> Vec<ChandelierExitParams> {
-    fn axis_usize(t: (usize, usize, usize)) -> Vec<usize> {
+fn expand_ce_checked(r: &CeBatchRange) -> Result<Vec<ChandelierExitParams>, ChandelierExitError> {
+    fn axis_usize(t: (usize, usize, usize)) -> Result<Vec<usize>, ChandelierExitError> {
         if t.2 == 0 || t.0 == t.1 {
-            return vec![t.0];
+            return Ok(vec![t.0]);
         }
-        (t.0..=t.1).step_by(t.2).collect()
+        let (start, end, step) = (t.0, t.1, t.2);
+        let mut v = Vec::new();
+        if start < end {
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                match x.checked_add(step) {
+                    Some(nx) => x = nx,
+                    None => {
+                        return Err(ChandelierExitError::InvalidRange {
+                            start: start.to_string(),
+                            end: end.to_string(),
+                            step: step.to_string(),
+                        })
+                    }
+                }
+            }
+        } else {
+            let mut x = start;
+            while x >= end {
+                v.push(x);
+                if x < step {
+                    break; // avoid underflow; next would wrap
+                }
+                x -= step;
+                if x == usize::MAX {
+                    return Err(ChandelierExitError::InvalidRange {
+                        start: start.to_string(),
+                        end: end.to_string(),
+                        step: step.to_string(),
+                    });
+                }
+            }
+        }
+        if v.is_empty() {
+            return Err(ChandelierExitError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    fn axis_f64(t: (f64, f64, f64)) -> Vec<f64> {
-        if t.2.abs() < 1e-12 || (t.0 - t.1).abs() < 1e-12 {
-            return vec![t.0];
+    fn axis_f64(t: (f64, f64, f64)) -> Result<Vec<f64>, ChandelierExitError> {
+        let (start, end, step) = (t.0, t.1, t.2);
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut x = t.0;
-        while x <= t.1 + 1e-12 {
+        // choose direction based on bounds when step is positive; respect sign if negative
+        let s = if step > 0.0 { if start <= end { step } else { -step } } else { step };
+        let mut x = start;
+        // guard against too many steps
+        let mut iters = 0usize;
+        while iters < 1_000_000 {
+            if (s > 0.0 && x > end + 1e-12) || (s < 0.0 && x < end - 1e-12) {
+                break;
+            }
             v.push(x);
-            x += t.2;
+            x += s;
+            iters += 1;
         }
-        v
+        if v.is_empty() {
+            return Err(ChandelierExitError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let mults = axis_f64(r.mult);
+    let periods = axis_usize(r.period)?;
+    let mults = axis_f64(r.mult)?;
     let uses = vec![r.use_close.0]; // static
-    let mut out = Vec::with_capacity(periods.len() * mults.len() * uses.len());
+    let cap = periods
+        .len()
+        .checked_mul(mults.len())
+        .and_then(|x| x.checked_mul(uses.len()))
+        .ok_or(ChandelierExitError::InvalidRange {
+            start: "periods".into(),
+            end: "mults".into(),
+            step: "cap overflow".into(),
+        })?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &m in &mults {
             for &u in &uses {
@@ -1467,7 +1833,14 @@ fn expand_ce(r: &CeBatchRange) -> Vec<ChandelierExitParams> {
             }
         }
     }
-    out
+    if out.is_empty() {
+        return Err(ChandelierExitError::InvalidRange {
+            start: r.period.0.to_string(),
+            end: r.period.1.to_string(),
+            step: r.period.2.to_string(),
+        });
+    }
+    Ok(out)
 }
 
 // Single-threaded batch processing
@@ -1505,13 +1878,7 @@ pub fn ce_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        // match alma.rs: use a sentinel error instead of silently falling back
-        _ => {
-            return Err(ChandelierExitError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(ChandelierExitError::InvalidKernelForBatch(k)),
     };
 
     let simd = match kernel {
@@ -1540,13 +1907,7 @@ fn ce_batch_inner(
             close_len: c.len(),
         });
     }
-    let combos = expand_ce(sweep);
-    if combos.is_empty() {
-        return Err(ChandelierExitError::NotEnoughValidData {
-            needed: 1,
-            valid: 0,
-        });
-    }
+    let combos = expand_ce_checked(sweep)?;
     let cols = c.len();
     if cols == 0 {
         return Err(ChandelierExitError::EmptyInputData);
@@ -1563,7 +1924,22 @@ fn ce_batch_inner(
         w
     };
 
-    let rows = 2 * combos.len();
+    let rows = combos
+        .len()
+        .checked_mul(2)
+        .ok_or(ChandelierExitError::InvalidRange {
+            start: "combos".into(),
+            end: "2".into(),
+            step: "mul overflow".into(),
+        })?;
+    // Guard rows*cols overflow
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(ChandelierExitError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "mul overflow".into(),
+        })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
@@ -1953,11 +2329,17 @@ pub fn chandelier_exit_batch_py<'py>(
     };
 
     // Expand once; no CeBatchOutput allocation
-    let combos = expand_ce(&sweep);
-    let rows = 2 * combos.len();
+    let combos = expand_ce_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let rows = combos
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| PyValueError::new_err("rows*2 overflow in chandelier_exit_batch_py"))?;
     let cols = c.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow in chandelier_exit_batch_py"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -2207,7 +2589,10 @@ pub fn ce_js(
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = 2usize;
     let cols = close.len();
-    let mut values = vec![f64::NAN; rows * cols];
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows*cols overflow in ce_js"))?;
+    let mut values = vec![f64::NAN; total];
     values[..cols].copy_from_slice(&out.long_stop);
     values[cols..].copy_from_slice(&out.short_stop);
     serde_wasm_bindgen::to_value(&CeResult { values, rows, cols })
@@ -2227,7 +2612,7 @@ pub fn chandelier_exit_cuda_batch_dev_py<'py>(
     mult_range: (f64, f64, f64),
     use_close: bool,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+) -> PyResult<(CeDeviceArrayF32Py, Bound<'py, PyDict>)> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2241,10 +2626,13 @@ pub fn chandelier_exit_cuda_batch_dev_py<'py>(
         mult: mult_range,
         use_close: (use_close, use_close, false),
     };
-    let (inner, combos) = py.allow_threads(|| {
-        let cuda =
-            CudaChandelierExit::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaChandelierExit::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.chandelier_exit_batch_dev(h, l, c, &sweep)
+            .map(|(a,b)| (a,b,ctx,dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
@@ -2273,7 +2661,7 @@ pub fn chandelier_exit_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((DeviceArrayF32Py { inner }, d))
+    Ok((CeDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id }, d))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2290,7 +2678,7 @@ pub fn chandelier_exit_cuda_many_series_one_param_dev_py<'py>(
     mult: f64,
     use_close: bool,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<CeDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2298,9 +2686,11 @@ pub fn chandelier_exit_cuda_many_series_one_param_dev_py<'py>(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
-        let cuda =
-            CudaChandelierExit::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaChandelierExit::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.chandelier_exit_many_series_one_param_time_major_dev(
             h,
             l,
@@ -2311,9 +2701,10 @@ pub fn chandelier_exit_cuda_many_series_one_param_dev_py<'py>(
             mult as f32,
             use_close,
         )
+        .map(|a| (a, ctx, dev_id))
         .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(CeDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id })
 }
 
 #[cfg(feature = "wasm")]
@@ -2360,12 +2751,15 @@ pub fn ce_into(
         let h = std::slice::from_raw_parts(high_ptr, len);
         let l = std::slice::from_raw_parts(low_ptr, len);
         let c = std::slice::from_raw_parts(close_ptr, len);
+        let total = len
+            .checked_mul(2)
+            .ok_or_else(|| JsValue::from_str("2*len overflow in ce_into"))?;
 
         let alias = out_ptr == high_ptr as *mut f64
             || out_ptr == low_ptr as *mut f64
             || out_ptr == close_ptr as *mut f64;
         if alias {
-            let mut tmp = vec![f64::NAN; 2 * len];
+            let mut tmp = vec![f64::NAN; total];
             let params = ChandelierExitParams {
                 period: Some(period),
                 mult: Some(mult),
@@ -2376,11 +2770,11 @@ pub fn ce_into(
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             tmp[..len].copy_from_slice(&result.long_stop);
             tmp[len..].copy_from_slice(&result.short_stop);
-            std::ptr::copy_nonoverlapping(tmp.as_ptr(), out_ptr, 2 * len);
+            std::ptr::copy_nonoverlapping(tmp.as_ptr(), out_ptr, total);
             return Ok(());
         }
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, 2 * len);
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         let params = ChandelierExitParams {
             period: Some(period),
             mult: Some(mult),
@@ -2434,10 +2828,16 @@ pub fn ce_batch_into(
             mult: (mult_start, mult_end, mult_step),
             use_close: (use_close, use_close, false),
         };
-        let combos = expand_ce(&sweep);
-        let rows = 2 * combos.len();
+        let combos = expand_ce_checked(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let rows = combos.len().checked_mul(2).ok_or_else(|| {
+            JsValue::from_str("rows*2 overflow in ce_batch_into")
+        })?;
         let cols = len;
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows.checked_mul(cols).ok_or_else(|| {
+            JsValue::from_str("rows*cols overflow in ce_batch_into")
+        })?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         ce_batch_inner_into(h, l, c, &combos, detect_best_kernel(), out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)
@@ -2468,11 +2868,17 @@ pub fn ce_batch_unified_js(
         mult: cfg.mult_range,
         use_close: (cfg.use_close, cfg.use_close, false),
     };
-    let combos = expand_ce(&sweep);
-    let rows = 2 * combos.len();
+    let combos = expand_ce_checked(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let rows = combos
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| JsValue::from_str("rows*2 overflow in ce_batch_unified_js"))?;
     let cols = close.len();
-
-    let mut values = vec![f64::NAN; rows * cols];
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows*cols overflow in ce_batch_unified_js"))?;
+    let mut values = vec![f64::NAN; total];
     ce_batch_inner_into(high, low, close, &combos, detect_best_kernel(), &mut values)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

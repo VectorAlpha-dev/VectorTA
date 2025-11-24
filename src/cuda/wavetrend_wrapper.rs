@@ -4,6 +4,7 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::wavetrend::{WavetrendBatchRange, WavetrendParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -11,25 +12,29 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaWavetrendError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaWavetrendError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaWavetrendError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaWavetrendError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaWavetrendError {}
 
 // -------- Kernel selection policy (parity with ALMA style) --------
 
@@ -72,7 +77,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaWavetrend {
     module: Module,
     stream: Stream,
-    _context: Context,
+    ctx: Arc<Context>,
     device_id: u32,
     policy: CudaWavetrendPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -96,11 +101,10 @@ struct PreparedBatch {
 
 impl CudaWavetrend {
     pub fn new(device_id: usize) -> Result<Self, CudaWavetrendError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
 
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/wavetrend_kernel.ptx"));
         // High optimization with context-derived target, then graceful fallbacks.
@@ -111,22 +115,19 @@ impl CudaWavetrend {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            ctx: context,
             device_id: device_id as u32,
             policy: CudaWavetrendPolicy::default(),
             last_batch: None,
@@ -150,6 +151,8 @@ impl CudaWavetrend {
     pub fn policy(&self) -> &CudaWavetrendPolicy {
         &self.policy
     }
+    pub fn context_arc(&self) -> Arc<Context> { self.ctx.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -198,15 +201,35 @@ impl CudaWavetrend {
         }
     }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaWavetrendError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Ok((free, _total)) = mem_get_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaWavetrendError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
         } else {
-            true
+            Ok(())
         }
+    }
+
+    #[inline]
+    fn checked_mul(a: usize, b: usize, what: &'static str) -> Result<usize, CudaWavetrendError> {
+        a.checked_mul(b)
+            .ok_or_else(|| CudaWavetrendError::InvalidInput(format!("{what} overflow")))
+    }
+
+    #[inline]
+    fn checked_add(a: usize, b: usize, what: &'static str) -> Result<usize, CudaWavetrendError> {
+        a.checked_add(b)
+            .ok_or_else(|| CudaWavetrendError::InvalidInput(format!("{what} overflow")))
     }
 
     pub fn wavetrend_batch_dev(
@@ -222,41 +245,40 @@ impl CudaWavetrend {
         let rows = combos.len();
 
         // VRAM estimate and guard
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let params_bytes =
-            3 * rows * std::mem::size_of::<i32>() + rows * std::mem::size_of::<f32>();
-        let out_bytes = 3 * rows * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
+        let sizeof_f32 = std::mem::size_of::<f32>();
+        let sizeof_i32 = std::mem::size_of::<i32>();
+        let prices_bytes = Self::checked_mul(series_len, sizeof_f32, "prices_bytes")?;
+        let param_i32_count = Self::checked_mul(3, rows, "params_i32_count")?;
+        let param_i32_bytes =
+            Self::checked_mul(param_i32_count, sizeof_i32, "params_i32_bytes")?;
+        let param_f32_bytes = Self::checked_mul(rows, sizeof_f32, "params_f32_bytes")?;
+        let params_bytes = Self::checked_add(param_i32_bytes, param_f32_bytes, "params_bytes")?;
+        let elems_per_out = Self::checked_mul(rows, series_len, "rows*series_len")?;
+        let out_elems = Self::checked_mul(3, elems_per_out, "out_elems")?;
+        let out_bytes = Self::checked_mul(out_elems, sizeof_f32, "out_bytes")?;
+        let required = Self::checked_add(
+            Self::checked_add(prices_bytes, params_bytes, "prices+params_bytes")?,
+            out_bytes,
+            "total_bytes",
+        )?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaWavetrendError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                required as f64 / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(required, headroom)?;
 
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
 
         let (channels, averages, mas, factors) = Self::build_param_arrays(&combos)?;
-        let d_channels = unsafe { DeviceBuffer::from_slice_async(&channels, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let d_averages = unsafe { DeviceBuffer::from_slice_async(&averages, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let d_mas = unsafe { DeviceBuffer::from_slice_async(&mas, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let d_factors = unsafe { DeviceBuffer::from_slice_async(&factors, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        let d_channels = unsafe { DeviceBuffer::from_slice_async(&channels, &self.stream) }?;
+        let d_averages = unsafe { DeviceBuffer::from_slice_async(&averages, &self.stream) }?;
+        let d_mas = unsafe { DeviceBuffer::from_slice_async(&mas, &self.stream) }?;
+        let d_factors = unsafe { DeviceBuffer::from_slice_async(&factors, &self.stream) }?;
 
+        let elems = Self::checked_mul(rows, series_len, "rows*series_len")?;
         let mut d_wt1: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * series_len, &self.stream) }
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
         let mut d_wt2: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * series_len, &self.stream) }
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
         let mut d_wt_diff: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * series_len, &self.stream) }
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         self.launch_kernel(
             &d_prices,
@@ -272,9 +294,7 @@ impl CudaWavetrend {
             &mut d_wt_diff,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(CudaWavetrendBatch {
             wt1: DeviceArrayF32 {
@@ -307,7 +327,9 @@ impl CudaWavetrend {
         let batch = self.wavetrend_batch_dev(data_f32, sweep)?;
         let rows = batch.wt1.rows;
         let cols = batch.wt1.cols;
-        let expected = rows * cols;
+        let expected = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaWavetrendError::InvalidInput("rows*cols overflow".into()))?;
         if out_wt1.len() != expected || out_wt2.len() != expected || out_wt_diff.len() != expected {
             return Err(CudaWavetrendError::InvalidInput(format!(
                 "output slices have wrong length (expected {})",
@@ -315,21 +337,9 @@ impl CudaWavetrend {
             )));
         }
 
-        batch
-            .wt1
-            .buf
-            .copy_to(out_wt1)
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        batch
-            .wt2
-            .buf
-            .copy_to(out_wt2)
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        batch
-            .wt_diff
-            .buf
-            .copy_to(out_wt_diff)
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        batch.wt1.buf.copy_to(out_wt1)?;
+        batch.wt2.buf.copy_to(out_wt2)?;
+        batch.wt_diff.buf.copy_to(out_wt_diff)?;
 
         Ok((rows, cols, batch.combos))
     }
@@ -346,7 +356,9 @@ impl CudaWavetrend {
         let batch = self.wavetrend_batch_dev(data_f32, sweep)?;
         let rows = batch.wt1.rows;
         let cols = batch.wt1.cols;
-        let expected = rows * cols;
+        let expected = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaWavetrendError::InvalidInput("rows*cols overflow".into()))?;
         if out_wt1.len() != expected || out_wt2.len() != expected || out_wt_diff.len() != expected {
             return Err(CudaWavetrendError::InvalidInput(format!(
                 "pinned output buffers have wrong length (expected {})",
@@ -357,22 +369,17 @@ impl CudaWavetrend {
             batch
                 .wt1
                 .buf
-                .async_copy_to(out_wt1.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+                .async_copy_to(out_wt1.as_mut_slice(), &self.stream)?;
             batch
                 .wt2
                 .buf
-                .async_copy_to(out_wt2.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+                .async_copy_to(out_wt2.as_mut_slice(), &self.stream)?;
             batch
                 .wt_diff
                 .buf
-                .async_copy_to(out_wt_diff.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+                .async_copy_to(out_wt_diff.as_mut_slice(), &self.stream)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok((rows, cols, batch.combos))
     }
 
@@ -405,14 +412,10 @@ impl CudaWavetrend {
         }
 
         let (channels, averages, mas, factors) = Self::build_param_arrays(combos)?;
-        let d_channels = unsafe { DeviceBuffer::from_slice_async(&channels, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let d_averages = unsafe { DeviceBuffer::from_slice_async(&averages, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let d_mas = unsafe { DeviceBuffer::from_slice_async(&mas, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let d_factors = unsafe { DeviceBuffer::from_slice_async(&factors, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        let d_channels = unsafe { DeviceBuffer::from_slice_async(&channels, &self.stream) }?;
+        let d_averages = unsafe { DeviceBuffer::from_slice_async(&averages, &self.stream) }?;
+        let d_mas = unsafe { DeviceBuffer::from_slice_async(&mas, &self.stream) }?;
+        let d_factors = unsafe { DeviceBuffer::from_slice_async(&factors, &self.stream) }?;
 
         self.launch_kernel(
             d_prices,
@@ -428,9 +431,8 @@ impl CudaWavetrend {
             d_wt_diff,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -480,13 +482,11 @@ impl CudaWavetrend {
         let func = self
             .module
             .get_function("wavetrend_batch_f32")
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaWavetrendError::MissingKernelSymbol { name: "wavetrend_batch_f32" })?;
 
         // Occupancy-based suggestion
         let auto_block_x = {
-            let (bs, _mg) = func
-                .suggested_launch_configuration(0, (0, 0, 0).into())
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+            let (bs, _mg) = func.suggested_launch_configuration(0, (0, 0, 0).into())?;
             bs.clamp(32, 1024)
         };
         let block_x = match self.policy.batch {
@@ -494,11 +494,21 @@ impl CudaWavetrend {
             BatchKernelPolicy::Auto => auto_block_x,
         };
 
-        // Full rows in one launch; clamp to device limit
-        let max_grid_x = Device::get_device(self.device_id)
-            .and_then(|d| d.get_attribute(DeviceAttribute::MaxGridDimX))
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))? as u32;
-        let grid_x = (((rows as u32) + block_x - 1) / block_x).max(1).min(max_grid_x);
+        // Full rows in one launch; enforce device limit
+        let dev = Device::get_device(self.device_id)?;
+        let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let wanted_grid_x = ((rows as u32) + block_x - 1) / block_x;
+        if wanted_grid_x == 0 || wanted_grid_x > max_grid_x {
+            return Err(CudaWavetrendError::LaunchConfigTooLarge {
+                gx: wanted_grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
+        let grid_x = wanted_grid_x;
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -534,9 +544,7 @@ impl CudaWavetrend {
                 &mut wt2_ptr as *mut _ as *mut c_void,
                 &mut diff_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -553,7 +561,7 @@ impl CudaWavetrend {
             .position(|x| !x.is_nan())
             .ok_or_else(|| CudaWavetrendError::InvalidInput("all values are NaN".into()))?;
         let series_len = data.len();
-        let combos = Self::expand_range(sweep);
+        let combos = Self::expand_range(sweep)?;
         if combos.is_empty() {
             return Err(CudaWavetrendError::InvalidInput(
                 "no parameter combinations".into(),
@@ -620,35 +628,82 @@ impl CudaWavetrend {
         Ok((channels, averages, mas, factors))
     }
 
-    fn expand_range(sweep: &WavetrendBatchRange) -> Vec<WavetrendParams> {
-        fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
+    fn expand_range(sweep: &WavetrendBatchRange) -> Result<Vec<WavetrendParams>, CudaWavetrendError> {
+        fn axis_usize(axis: (usize, usize, usize)) -> Result<Vec<usize>, CudaWavetrendError> {
             let (start, end, step) = axis;
             if step == 0 || start == end {
-                return vec![start];
+                return Ok(vec![start]);
             }
-            (start..=end).step_by(step).collect()
+            if start < end {
+                let st = step.max(1);
+                return Ok((start..=end).step_by(st).collect());
+            }
+            let st = step.max(1) as isize;
+            let mut v = Vec::new();
+            let mut x = start as isize;
+            let end_i = end as isize;
+            while x >= end_i {
+                v.push(x as usize);
+                x -= st;
+            }
+            if v.is_empty() {
+                return Err(CudaWavetrendError::InvalidInput(format!(
+                    "invalid usize range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            Ok(v)
         }
-        fn axis_f64(axis: (f64, f64, f64)) -> Vec<f64> {
+        fn axis_f64(axis: (f64, f64, f64)) -> Result<Vec<f64>, CudaWavetrendError> {
             let (start, end, step) = axis;
             if step.abs() < f64::EPSILON || (start - end).abs() < f64::EPSILON {
-                return vec![start];
+                return Ok(vec![start]);
+            }
+            if start < end {
+                let mut out = Vec::new();
+                let mut v = start;
+                let st = step.abs();
+                while v <= end + 1e-12 {
+                    out.push(v);
+                    v += st;
+                }
+                if out.is_empty() {
+                    return Err(CudaWavetrendError::InvalidInput(format!(
+                        "invalid f64 range: start={}, end={}, step={}",
+                        start, end, step
+                    )));
+                }
+                return Ok(out);
             }
             let mut out = Vec::new();
             let mut v = start;
-            while v <= end + f64::EPSILON {
+            let st = step.abs();
+            while v + 1e-12 >= end {
                 out.push(v);
-                v += step;
+                v -= st;
             }
-            out
+            if out.is_empty() {
+                return Err(CudaWavetrendError::InvalidInput(format!(
+                    "invalid f64 range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            Ok(out)
         }
 
-        let channels = axis_usize(sweep.channel_length);
-        let averages = axis_usize(sweep.average_length);
-        let mas = axis_usize(sweep.ma_length);
-        let factors = axis_f64(sweep.factor);
+        let channels = axis_usize(sweep.channel_length)?;
+        let averages = axis_usize(sweep.average_length)?;
+        let mas = axis_usize(sweep.ma_length)?;
+        let factors = axis_f64(sweep.factor)?;
 
-        let mut combos =
-            Vec::with_capacity(channels.len() * averages.len() * mas.len() * factors.len());
+        let cap = channels
+            .len()
+            .checked_mul(averages.len())
+            .and_then(|x| x.checked_mul(mas.len()))
+            .and_then(|x| x.checked_mul(factors.len()))
+            .ok_or_else(|| CudaWavetrendError::InvalidInput("combo capacity overflow".into()))?;
+
+        let mut combos = Vec::with_capacity(cap);
         for &ch in &channels {
             for &avg in &averages {
                 for &ma in &mas {
@@ -663,7 +718,7 @@ impl CudaWavetrend {
                 }
             }
         }
-        combos
+        Ok(combos)
     }
 
     // ---------- Many-series × one-param (time-major) ----------
@@ -678,27 +733,30 @@ impl CudaWavetrend {
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
         // VRAM estimate: inputs + first_valids + 3 outputs
-        let elems = cols * rows;
-        let in_bytes = elems * std::mem::size_of::<f32>();
-        let fv_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = 3 * elems * std::mem::size_of::<f32>();
-        let required = in_bytes + fv_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaWavetrendError::InvalidInput(
-                "insufficient device memory for wavetrend many-series".into(),
-            ));
-        }
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaWavetrendError::InvalidInput("rows*cols overflow".into()))?;
+        let sizeof_f32 = std::mem::size_of::<f32>();
+        let sizeof_i32 = std::mem::size_of::<i32>();
+        let in_bytes = Self::checked_mul(elems, sizeof_f32, "in_bytes")?;
+        let fv_bytes = Self::checked_mul(cols, sizeof_i32, "first_valids_bytes")?;
+        let out_elems = Self::checked_mul(3, elems, "out_elems")?;
+        let out_bytes = Self::checked_mul(out_elems, sizeof_f32, "out_bytes")?;
+        let required = Self::checked_add(
+            Self::checked_add(in_bytes, fv_bytes, "in+fv_bytes")?,
+            out_bytes,
+            "total_bytes",
+        )?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let mut d_wt1: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let mut d_wt2: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let mut d_wt_diff: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
+        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
+        let mut d_wt1: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_wt2: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_wt_diff: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         self.launch_many_series_kernel(
             &d_prices,
@@ -713,9 +771,7 @@ impl CudaWavetrend {
             &mut d_wt2,
             &mut d_wt_diff,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {
@@ -756,16 +812,9 @@ impl CudaWavetrend {
         }
         let (wt1, wt2, wt_diff) =
             self.wavetrend_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, params)?;
-        wt1.buf
-            .copy_to(wt1_tm)
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        wt2.buf
-            .copy_to(wt2_tm)
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        wt_diff
-            .buf
-            .copy_to(wt_diff_tm)
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        wt1.buf.copy_to(wt1_tm)?;
+        wt2.buf.copy_to(wt2_tm)?;
+        wt_diff.buf.copy_to(wt_diff_tm)?;
         Ok(())
     }
 
@@ -792,19 +841,15 @@ impl CudaWavetrend {
             self.wavetrend_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, params)?;
         unsafe {
             wt1.buf
-                .async_copy_to(out_wt1_tm.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+                .async_copy_to(out_wt1_tm.as_mut_slice(), &self.stream)?;
             wt2.buf
-                .async_copy_to(out_wt2_tm.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+                .async_copy_to(out_wt2_tm.as_mut_slice(), &self.stream)?;
             wt_diff
                 .buf
-                .async_copy_to(out_wt_diff_tm.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+                .async_copy_to(out_wt_diff_tm.as_mut_slice(), &self.stream)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
     }
 
     fn prepare_many_series_inputs(
@@ -882,20 +927,33 @@ impl CudaWavetrend {
         let func = self
             .module
             .get_function("wavetrend_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaWavetrendError::MissingKernelSymbol {
+                name: "wavetrend_many_series_one_param_time_major_f32",
+            })?;
 
         // Occupancy-based suggestion for block size
         let auto_block_x = {
-            let (bs, _mg) = func
-                .suggested_launch_configuration(0, (0, 0, 0).into())
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+            let (bs, _mg) = func.suggested_launch_configuration(0, (0, 0, 0).into())?;
             bs.clamp(32, 1024)
         };
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
             ManySeriesKernelPolicy::Auto => auto_block_x,
         };
-        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let dev = Device::get_device(self.device_id)?;
+        let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let wanted_grid_x = ((cols as u32) + block_x - 1) / block_x;
+        if wanted_grid_x == 0 || wanted_grid_x > max_grid_x {
+            return Err(CudaWavetrendError::LaunchConfigTooLarge {
+                gx: wanted_grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
+        let grid_x = wanted_grid_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
@@ -923,9 +981,7 @@ impl CudaWavetrend {
                 &mut p_wt2 as *mut _ as *mut c_void,
                 &mut p_diff as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         // Record selection and maybe log
         unsafe {

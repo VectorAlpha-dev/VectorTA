@@ -20,6 +20,12 @@
 //!   unchanged; warmup handling remains identical.
 //! - **Streaming update**: O(1) per update using fixed-size rings for abs-diff
 //!   sum and (period−1) lag. Matches batch/scalar semantics exactly.
+//! - **CUDA**: Wrapper uses typed errors, RAII primary context, pre‑launch
+//!   VRAM checks, and explicit symbol resolution; Python handle keeps
+//!   `Arc<Context>` and `device_id`.
+//! - **Interop**: CUDA Array Interface v3 (byte strides) and DLPack v1.x with
+//!   version negotiation ("dltensor_versioned" vs legacy "dltensor"). Producer
+//!   synchronizes before return; no stream exposed.
 //!
 //! Decision: Streaming enabled (ring buffers) — identical outputs vs batch; O(1)
 //! updates by maintaining rolling |Δ| and (period−1) lagged price.
@@ -1482,9 +1488,17 @@ impl DeviceArrayF32KamaPy {
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
 
-    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<usize>) -> PyResult<pyo3::PyObject> {
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<pyo3::PyObject> {
         use pyo3::ffi as pyffi;
-        use std::ffi::{c_void, CString};
+        use std::ffi::{c_void, CStr, CString};
 
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
@@ -1524,6 +1538,45 @@ impl DeviceArrayF32KamaPy {
             drop(mt);
         }
 
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            if capsule.is_null() { return; }
+            let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule);
+            if name_ptr.is_null() { return; }
+            let name = CStr::from_ptr(name_ptr);
+            // Only call deleter if still the original name (not renamed to used_*)
+            let call = match name.to_str() {
+                Ok("dltensor") | Ok("dltensor_versioned") => true,
+                _ => false,
+            };
+            if !call { return; }
+            // Retrieve pointer using the same name
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name_ptr) as *mut DLManagedTensor;
+            if ptr.is_null() { return; }
+            // Invoke the DLPack deleter
+            if let Some(d) = unsafe { (*ptr).deleter } {
+                unsafe { d(ptr) };
+            }
+        }
+
+        // Validate optional device and copy semantics
+        if let Some((dev_ty, dev_id)) = dl_device {
+            // 2 == kDLCUDA
+            if dev_ty != 2 || dev_id as u32 != slf._device_id {
+                if matches!(copy, Some(true)) {
+                    return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                        "copy across devices not implemented",
+                    ));
+                } else {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "dl_device does not match allocation device_id",
+                    ));
+                }
+            }
+        }
+
+        // No pending GPU work: producer synchronizes internally; ignore stream
+        let _ = stream;
+
         let rows = slf.inner.rows as i64;
         let cols = slf.inner.cols as i64;
         let mut shape_box = Box::new([rows, cols]);
@@ -1535,7 +1588,8 @@ impl DeviceArrayF32KamaPy {
         let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
 
         let tensor = DLTensor {
-            data: slf.inner.buf.as_device_ptr().as_raw() as *mut c_void,
+            // DLPack: data must be NULL for size-zero tensors
+            data: if rows == 0 || cols == 0 { std::ptr::null_mut() } else { slf.inner.buf.as_device_ptr().as_raw() as *mut c_void },
             device: DLDevice { device_type: 2, device_id: slf._device_id as i32 },
             ndim: 2,
             dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
@@ -1545,9 +1599,11 @@ impl DeviceArrayF32KamaPy {
         };
         let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
         let ptr = Box::into_raw(mt) as *mut c_void;
+        // Capsule name per negotiation: versioned if max_version >= (1,0)
+        let use_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
         unsafe {
-            let name = CString::new("dltensor").unwrap();
-            let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+            let cap_name = if use_versioned { CString::new("dltensor_versioned").unwrap() } else { CString::new("dltensor").unwrap() };
+            let cap = pyffi::PyCapsule_New(ptr, cap_name.as_ptr(), Some(capsule_destructor));
             if cap.is_null() {
                 let _ = Box::from_raw(ptr as *mut DLManagedTensor);
                 return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));

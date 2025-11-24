@@ -16,7 +16,7 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::prb::{PrbBatchRange, PrbParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -25,21 +25,28 @@ use cust::stream::{Stream, StreamFlags};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaPrbError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaPrbError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaPrbError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaPrbError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaPrbError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -69,30 +76,29 @@ impl Default for CudaPrbPolicy {
 pub struct CudaPrb {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaPrbPolicy,
 }
 
 impl CudaPrb {
     pub fn new(device_id: usize) -> Result<Self, CudaPrbError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/prb_kernel.ptx"));
         // Let the JIT run at its default maximum optimization and
         // target the active context's architecture.
         let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaPrbPolicy::default(),
         })
     }
@@ -106,10 +112,16 @@ impl CudaPrb {
         &self.policy
     }
     #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+    #[inline]
     pub fn synchronize(&self) -> Result<(), CudaPrbError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
 
     #[inline]
@@ -120,48 +132,111 @@ impl CudaPrb {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
-    #[inline]
-    fn will_fit(required: usize, headroom: usize) -> bool {
+    fn will_fit(required: usize, headroom: usize) -> Result<(), CudaPrbError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
-        if let Some((free, _)) = Self::device_mem_info() {
-            required.saturating_add(headroom) <= free
-        } else {
-            true
+        match mem_get_info() {
+            Ok((free, _total)) => {
+                let need = required.saturating_add(headroom);
+                if need > free {
+                    Err(CudaPrbError::OutOfMemory {
+                        required: need,
+                        free,
+                        headroom,
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+            Err(_) => Ok(()),
         }
     }
 
     // -------- Helpers --------
-    fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
+    fn axis_usize(a: (usize, usize, usize)) -> Result<Vec<usize>, CudaPrbError> {
+        let (s, e, st) = a;
         if st == 0 || s == e {
-            vec![s]
-        } else {
-            (s..=e).step_by(st).collect()
+            return Ok(vec![s]);
         }
-    }
-    fn axis_i32((s, e, st): (i32, i32, i32)) -> Vec<i32> {
-        if st == 0 || s == e {
-            vec![s]
-        } else {
-            let mut v = Vec::new();
-            let mut x = s;
-            while x <= e {
-                v.push(x);
-                x += st;
+        let mut out = Vec::new();
+        if s < e {
+            let mut v = s;
+            let step = st.max(1);
+            while v <= e {
+                out.push(v);
+                let next = match v.checked_add(step) {
+                    Some(n) if n != v => n,
+                    _ => break,
+                };
+                v = next;
             }
-            v
+        } else {
+            let mut v = s as isize;
+            let end_i = e as isize;
+            let step = (st as isize).max(1);
+            while v >= end_i {
+                out.push(v as usize);
+                v -= step;
+            }
         }
+        if out.is_empty() {
+            return Err(CudaPrbError::InvalidInput(format!(
+                "invalid range: start={}, end={}, step={}",
+                s, e, st
+            )));
+        }
+        Ok(out)
     }
-    fn expand_grid(range: &PrbBatchRange, smooth_flag: bool) -> Vec<PrbParams> {
-        let sps = Self::axis_usize(range.smooth_period);
-        let rps = Self::axis_usize(range.regression_period);
-        let pos = Self::axis_usize(range.polynomial_order);
-        let ros = Self::axis_i32(range.regression_offset);
-        let mut out = Vec::with_capacity(sps.len() * rps.len() * pos.len() * ros.len());
+    fn axis_i32(a: (i32, i32, i32)) -> Result<Vec<i32>, CudaPrbError> {
+        let (s, e, st) = a;
+        if st == 0 || s == e {
+            return Ok(vec![s]);
+        }
+        let mut out = Vec::new();
+        if s < e {
+            let mut x = s;
+            let step = st.max(1);
+            while x <= e {
+                out.push(x);
+                let next = match x.checked_add(step) {
+                    Some(n) if n != x => n,
+                    _ => break,
+                };
+                x = next;
+            }
+        } else {
+            let mut x = s;
+            let step = st.abs().max(1);
+            while x >= e {
+                out.push(x);
+                let next = match x.checked_sub(step) {
+                    Some(n) if n != x => n,
+                    _ => break,
+                };
+                x = next;
+            }
+        }
+        if out.is_empty() {
+            return Err(CudaPrbError::InvalidInput(format!(
+                "invalid range: start={}, end={}, step={}",
+                s, e, st
+            )));
+        }
+        Ok(out)
+    }
+    fn expand_grid(range: &PrbBatchRange, smooth_flag: bool) -> Result<Vec<PrbParams>, CudaPrbError> {
+        let sps = Self::axis_usize(range.smooth_period)?;
+        let rps = Self::axis_usize(range.regression_period)?;
+        let pos = Self::axis_usize(range.polynomial_order)?;
+        let ros = Self::axis_i32(range.regression_offset)?;
+        let cap = sps
+            .len()
+            .checked_mul(rps.len())
+            .and_then(|x| x.checked_mul(pos.len()))
+            .and_then(|x| x.checked_mul(ros.len()))
+            .ok_or_else(|| CudaPrbError::InvalidInput("rows*cols overflow".into()))?;
+        let mut out = Vec::with_capacity(cap);
         for &sp in &sps {
             for &rp in &rps {
                 for &po in &pos {
@@ -179,7 +254,12 @@ impl CudaPrb {
                 }
             }
         }
-        out
+        if out.is_empty() {
+            return Err(CudaPrbError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        Ok(out)
     }
 
     fn ssf_filter_f32(data: &[f32], period: usize, first: usize) -> Vec<f32> {
@@ -310,12 +390,7 @@ impl CudaPrb {
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaPrbError::InvalidInput("all values are NaN".into()))?;
-        let combos = Self::expand_grid(sweep, smooth_data);
-        if combos.is_empty() {
-            return Err(CudaPrbError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = Self::expand_grid(sweep, smooth_data)?;
 
         // Validate params; collect unique (n,k) and unique smooth_period
         let mut uniq_nk: BTreeSet<(usize, usize)> = BTreeSet::new();
@@ -350,29 +425,35 @@ impl CudaPrb {
         }
 
         // Allocate output buffers on device once
-        let total_elems = combos.len() * len;
-        let bytes_inputs = len * std::mem::size_of::<f32>();
-        let bytes_out = 3 * total_elems * std::mem::size_of::<f32>();
-        let bytes_params = combos.len() * (3 * std::mem::size_of::<i32>() + 64); // rough
-        let required = bytes_inputs + bytes_out + bytes_params + 64 * 1024; // plus contig/a_inv
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaPrbError::InvalidInput(
-                "insufficient VRAM for PRB batch".into(),
-            ));
-        }
+        let total_elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaPrbError::InvalidInput("rows*cols overflow".into()))?;
+        let bytes_inputs = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPrbError::InvalidInput("input bytes overflow".into()))?;
+        let bytes_out = 3usize
+            .checked_mul(total_elems)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaPrbError::InvalidInput("output bytes overflow".into()))?;
+        let bytes_params = combos
+            .len()
+            .checked_mul(3 * std::mem::size_of::<i32>() + 64)
+            .ok_or_else(|| CudaPrbError::InvalidInput("params bytes overflow".into()))?;
+        let required = bytes_inputs
+            .checked_add(bytes_out)
+            .and_then(|x| x.checked_add(bytes_params))
+            .and_then(|x| x.checked_add(64 * 1024))
+            .ok_or_else(|| CudaPrbError::InvalidInput("required bytes overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        let mut d_main: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-        let mut d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-        let mut d_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        let mut d_main: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
+        let mut d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
+        let mut d_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
         // Persistent device staging (reused per group)
-        let mut d_src: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-        let mut d_contig: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        let mut d_src: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        let mut d_contig: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
         // Keep pinned host buffers alive until the final synchronize()
         // to satisfy async copy lifetime guarantees for page-locked memory.
@@ -401,17 +482,15 @@ impl CudaPrb {
             };
 
             // H2D for this group using pinned host buffers for async copies
-            let h_src = LockedBuffer::from_slice(&source)
-                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-            let h_contig = LockedBuffer::from_slice(&contig)
-                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+            let h_src = LockedBuffer::from_slice(&source)?;
+            let h_contig = LockedBuffer::from_slice(&contig)?;
             unsafe {
                 d_src
                     .async_copy_from(h_src.as_slice(), &self.stream)
-                    .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+                    ?;
                 d_contig
                     .async_copy_from(h_contig.as_slice(), &self.stream)
-                    .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+                    ?;
             }
             // keep pinned buffers alive until final stream synchronize
             h_src_keepalive.push(h_src);
@@ -437,28 +516,35 @@ impl CudaPrb {
                 a_invs.extend_from_slice(ainv);
                 row_map.push(row as i32);
             }
-            let d_periods = DeviceBuffer::from_slice(&periods)
-                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-            let d_orders =
-                DeviceBuffer::from_slice(&orders).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-            let d_offsets = DeviceBuffer::from_slice(&offsets)
-                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-            let d_ainv =
-                DeviceBuffer::from_slice(&a_invs).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-            let d_rowmap = DeviceBuffer::from_slice(&row_map)
-                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+            let d_periods = DeviceBuffer::from_slice(&periods)?;
+            let d_orders = DeviceBuffer::from_slice(&orders)?;
+            let d_offsets = DeviceBuffer::from_slice(&offsets)?;
+            let d_ainv = DeviceBuffer::from_slice(&a_invs)?;
+            let d_rowmap = DeviceBuffer::from_slice(&row_map)?;
 
             // Launch kernel: grid.y chunking to <= 65535
             let func = self
                 .module
                 .get_function("prb_batch_f32")
-                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaPrbError::MissingKernelSymbol { name: "prb_batch_f32" })?;
             let block_x: u32 = match self.policy.batch {
                 BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
                 _ => 1,
             };
             let grid_x: u32 = 1;
             let block: BlockSize = (block_x, 1, 1).into();
+            let dev = Device::get_device(self.device_id)?;
+            let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+            if block_x > max_bx {
+                return Err(CudaPrbError::LaunchConfigTooLarge {
+                    gx: grid_x,
+                    gy: 1,
+                    gz: 1,
+                    bx: block_x,
+                    by: 1,
+                    bz: 1,
+                });
+            }
 
             const MAX_GRID_Y: usize = 65_535; // y/z limited to 65,535
             let mut start = 0usize;
@@ -515,9 +601,7 @@ impl CudaPrb {
                         &mut p_out_u as *mut _ as *mut c_void,
                         &mut p_out_l as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&func, grid, block, 0, &mut args)
-                        .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+                    self.stream.launch(&func, grid, block, 0, &mut args)?;
                 }
                 start += chunk;
             }
@@ -531,9 +615,7 @@ impl CudaPrb {
         }
 
         // Single end-of-path synchronize; safe to drop pinned keepalive buffers afterwards
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         drop(h_src_keepalive);
         drop(h_contig_keepalive);
 
@@ -566,7 +648,10 @@ impl CudaPrb {
         if cols == 0 || rows == 0 {
             return Err(CudaPrbError::InvalidInput("empty grid".into()));
         }
-        if data_tm_f32.len() != cols * rows {
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaPrbError::InvalidInput("cols*rows overflow".into()))?;
+        if data_tm_f32.len() != elems {
             return Err(CudaPrbError::InvalidInput("data length mismatch".into()));
         }
         let n = params.regression_period.unwrap_or(100);
@@ -598,7 +683,7 @@ impl CudaPrb {
         // Host smoothing (single smooth_period per call)
         let smooth = params.smooth_data.unwrap_or(true);
         let sp = params.smooth_period.unwrap_or(10);
-        let mut sm_tm = vec![f32::NAN; cols * rows];
+        let mut sm_tm = vec![f32::NAN; elems];
         if smooth {
             for s in 0..cols {
                 let fv = firsts[s];
@@ -619,7 +704,7 @@ impl CudaPrb {
             sm_tm.copy_from_slice(data_tm_f32);
         }
         let contig_tm = {
-            let mut v = vec![0i32; cols * rows];
+            let mut v = vec![0i32; elems];
             for s in 0..cols {
                 let mut c = 0i32;
                 for t in 0..rows {
@@ -638,44 +723,54 @@ impl CudaPrb {
         let ainv = Self::build_a_inv(n, k);
         // Use pinned+async copies for the big time-major grids
         let mut d_prices_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(cols * rows) }
-                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(elems) }?;
         let mut d_contig_tm: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::uninitialized(cols * rows) }
-                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-        let h_prices_tm = LockedBuffer::from_slice(&sm_tm)
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-        let h_contig_tm = LockedBuffer::from_slice(&contig_tm)
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let h_prices_tm = LockedBuffer::from_slice(&sm_tm)?;
+        let h_contig_tm = LockedBuffer::from_slice(&contig_tm)?;
         unsafe {
             d_prices_tm
                 .async_copy_from(h_prices_tm.as_slice(), &self.stream)
-                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+                ?;
             d_contig_tm
                 .async_copy_from(h_contig_tm.as_slice(), &self.stream)
-                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+                ?;
         }
-        let d_ainv =
-            DeviceBuffer::from_slice(&ainv).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-        let mut d_m: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-        let mut d_u: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-        let mut d_l: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        let d_ainv = DeviceBuffer::from_slice(&ainv)?;
+        let mut d_m: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_u: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_l: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         let func = self
             .module
             .get_function("prb_many_series_one_param_f32")
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPrbError::MissingKernelSymbol {
+                name: "prb_many_series_one_param_f32",
+            })?;
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 256,
         };
-        let grid: GridSize = (((cols as u32) + block_x - 1) / block_x, 1, 1).into();
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let dev = Device::get_device(self.device_id)?;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        if block_x > max_bx || grid_x > max_gx {
+            return Err(CudaPrbError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
+        let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let d_firsts =
-            DeviceBuffer::from_slice(&firsts).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        let d_firsts = DeviceBuffer::from_slice(&firsts)?;
         unsafe {
             let mut p_tm = d_prices_tm.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
@@ -709,13 +804,9 @@ impl CudaPrb {
                 &mut p_u as *mut _ as *mut c_void,
                 &mut p_l as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         drop(h_prices_tm);
         drop(h_contig_tm);
         Ok((

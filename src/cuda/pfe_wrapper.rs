@@ -13,30 +13,36 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::pfe::PfeBatchRange;
 use cust::context::Context;
 use cust::device::Device;
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use std::error::Error;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaPfeError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaPfeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Cuda(e) => write!(f, "CUDA error: {}", e),
-            Self::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl Error for CudaPfeError {}
 
 #[derive(Clone, Debug)]
 struct PfeCombo {
@@ -47,15 +53,15 @@ struct PfeCombo {
 pub struct CudaPfe {
     pub(crate) module: Module,
     pub(crate) stream: Stream,
-    _ctx: Context,
+    context: Arc<Context>,
+    device_id: u32,
 }
 
 impl CudaPfe {
     pub fn new(device_id: usize) -> Result<Self, CudaPfeError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-        let ctx = Context::new(device).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/pfe_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
@@ -63,18 +69,56 @@ impl CudaPfe {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _ctx: ctx,
+            context,
+            device_id: device_id as u32,
         })
     }
 
-    fn expand_grid(range: &PfeBatchRange) -> Vec<PfeCombo> {
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaPfeError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        match mem_get_info() {
+            Ok((free, _)) => {
+                if required_bytes.saturating_add(headroom_bytes) <= free {
+                    Ok(())
+                } else {
+                    Err(CudaPfeError::OutOfMemory {
+                        required: required_bytes,
+                        free,
+                        headroom: headroom_bytes,
+                    })
+                }
+            }
+            Err(_) => Ok(()),
+        }
+    }
+
+    fn expand_grid(range: &PfeBatchRange) -> Result<Vec<PfeCombo>, CudaPfeError> {
         let axis = |a: (usize, usize, usize)| -> Vec<usize> {
             let (s, e, st) = a;
             if st == 0 || s == e {
@@ -85,7 +129,16 @@ impl CudaPfe {
         };
         let periods = axis(range.period);
         let smoothings = axis(range.smoothing);
-        let mut out = Vec::with_capacity(periods.len() * smoothings.len());
+        if periods.is_empty() || smoothings.is_empty() {
+            return Err(CudaPfeError::InvalidInput(
+                "empty parameter expansion".into(),
+            ));
+        }
+        let cap = periods
+            .len()
+            .checked_mul(smoothings.len())
+            .ok_or_else(|| CudaPfeError::InvalidInput("rows*cols overflow".into()))?;
+        let mut out = Vec::with_capacity(cap);
         for &p in &periods {
             for &s in &smoothings {
                 out.push(PfeCombo {
@@ -94,21 +147,12 @@ impl CudaPfe {
                 });
             }
         }
-        out
+        Ok(out)
     }
 
     #[inline]
     fn first_valid(data: &[f32]) -> Option<usize> {
         data.iter().position(|v| !v.is_nan())
-    }
-
-    #[inline]
-    fn will_fit(total_bytes: usize, headroom: usize) -> bool {
-        if let Ok((free, _)) = mem_get_info() {
-            total_bytes.saturating_add(headroom) <= free
-        } else {
-            true
-        }
     }
 
     #[inline]
@@ -145,12 +189,7 @@ impl CudaPfe {
         let len = data_f32.len();
         let first_valid = Self::first_valid(data_f32)
             .ok_or_else(|| CudaPfeError::InvalidInput("all NaN".into()))?;
-        let combos = Self::expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaPfeError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = Self::expand_grid(sweep)?;
         // Validate parameters
         for c in &combos {
             let p = c.period as usize;
@@ -166,6 +205,34 @@ impl CudaPfe {
             }
         }
 
+        // VRAM sizing (rough estimate for main fast path):
+        // - data_f32: len * f32
+        // - periods + smooths: 2 * combos * i32
+        // - steps / prefixes / output in fast path: ~ (3 * len * f32) + combos * len * f32
+        let len_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
+        let combo_i32 = combos
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
+        let combo_f32 = combos
+            .len()
+            .checked_mul(len)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaPfeError::InvalidInput("rows*cols overflow".into()))?;
+        let aux_f32 = len_bytes
+            .checked_mul(3)
+            .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
+        let required = len_bytes
+            .checked_add(combo_i32)
+            .and_then(|x| x.checked_add(combo_i32))
+            .and_then(|x| x.checked_add(aux_f32))
+            .and_then(|x| x.checked_add(combo_f32))
+            .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
+        let headroom = 64usize << 20;
+        Self::will_fit(required, headroom)?;
+
         // Fast path: device-built steps + dual-FP32 prefix + many-params kernel
         if let (Ok(func_steps), Ok(func_pref), Ok(func_main)) = (
             self.module.get_function("pfe_build_steps_f32"),
@@ -176,18 +243,14 @@ impl CudaPfe {
             let data_filled = Self::clone_fill_head_with_first_valid(data_f32, first_valid);
 
             // Device inputs
-            let d_data = DeviceBuffer::from_slice(&data_filled)
-                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            let d_data = DeviceBuffer::from_slice(&data_filled)?;
             let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
             let smooths: Vec<i32> = combos.iter().map(|c| c.smoothing).collect();
-            let d_periods = DeviceBuffer::from_slice(&periods)
-                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-            let d_smooths = DeviceBuffer::from_slice(&smooths)
-                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            let d_periods = DeviceBuffer::from_slice(&periods)?;
+            let d_smooths = DeviceBuffer::from_slice(&smooths)?;
 
             // 1) steps[t] in parallel
-            let mut d_steps: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            let mut d_steps: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
             let block_x: u32 = 256;
             let grid_x: u32 = (((len as u32) + block_x - 1) / block_x).max(1);
             let grid_1d: GridSize = (grid_x, 1, 1).into();
@@ -201,16 +264,12 @@ impl CudaPfe {
                     &mut len_i as *mut _ as *mut c_void,
                     &mut steps_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func_steps, grid_1d, block_1d, 0, args)
-                    .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+                self.stream.launch(&func_steps, grid_1d, block_1d, 0, args)?;
             }
 
             // 2) dual-FP32 prefix (serial)
-            let mut d_pref_hi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-            let mut d_pref_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            let mut d_pref_hi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+            let mut d_pref_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
             unsafe {
                 let mut steps_ptr = d_steps.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
@@ -224,16 +283,16 @@ impl CudaPfe {
                 ];
                 let grid_one: GridSize = (1u32, 1u32, 1u32).into();
                 let block_one: BlockSize = (1u32, 1u32, 1u32).into();
-                self.stream
-                    .launch(&func_pref, grid_one, block_one, 0, args)
-                    .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+                self.stream.launch(&func_pref, grid_one, block_one, 0, args)?;
             }
             drop(d_steps);
 
             // 3) outputs
-            let total_out = combos.len() * len;
-            let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }
-                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            let total_out = combos
+                .len()
+                .checked_mul(len)
+                .ok_or_else(|| CudaPfeError::InvalidInput("rows*cols overflow".into()))?;
+            let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }?;
 
             // 4) main many-params kernel
             let block_x: u32 = 256;
@@ -261,16 +320,16 @@ impl CudaPfe {
                     &mut ncomb_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func_main, grid_np, block_np, 0, args)
-                    .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+                self.stream.launch(&func_main, grid_np, block_np, 0, args)?;
             }
 
-            self.stream
-                .synchronize()
-                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            self.stream.synchronize()?;
 
-            return Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len });
+            return Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            });
         }
 
         // Fallback: existing prefix/rolling pathways
@@ -282,20 +341,18 @@ impl CudaPfe {
         }
 
         // Device buffers
-        let d_data =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-        let d_prefix =
-            DeviceBuffer::from_slice(&prefix).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        let d_data = DeviceBuffer::from_slice(data_f32)?;
+        let d_prefix = DeviceBuffer::from_slice(&prefix)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
         let smooths: Vec<i32> = combos.iter().map(|c| c.smoothing).collect();
-        let d_periods =
-            DeviceBuffer::from_slice(&periods).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-        let d_smooths =
-            DeviceBuffer::from_slice(&smooths).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let d_smooths = DeviceBuffer::from_slice(&smooths)?;
 
-        let total_out = combos.len() * len;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }
-            .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        let total_out = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaPfeError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }?;
 
         if let Ok(func) = self.module.get_function("pfe_batch_prefix_f32") {
             let block_x: u32 = 256;
@@ -321,15 +378,15 @@ impl CudaPfe {
                     &mut ncomb_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
         } else {
             let func = self
                 .module
                 .get_function("pfe_batch_f32")
-                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaPfeError::MissingKernelSymbol {
+                    name: "pfe_batch_f32",
+                })?;
             let chunk = Self::chunk_rows(combos.len(), len);
             let mut launched = 0usize;
             while launched < combos.len() {
@@ -364,17 +421,13 @@ impl CudaPfe {
                         &mut ncomb_i as *mut _ as *mut c_void,
                         &mut out_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&func, grid, block, 0, args)
-                        .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+                    self.stream.launch(&func, grid, block, 0, args)?;
                 }
                 launched += cur;
             }
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -423,16 +476,30 @@ impl CudaPfe {
             fvs[s] = fv as i32;
         }
 
-        let d_tm =
-            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&fvs).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
-            .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        let bytes_tm = expected
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
+        let bytes_fv = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
+        let bytes_out = bytes_tm;
+        let required = bytes_tm
+            .checked_add(bytes_fv)
+            .and_then(|x| x.checked_add(bytes_out))
+            .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
+        let headroom = 64usize << 20;
+        Self::will_fit(required, headroom)?;
+
+        let d_tm = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_fv = DeviceBuffer::from_slice(&fvs)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }?;
 
         let func = self
             .module
             .get_function("pfe_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPfeError::MissingKernelSymbol {
+                name: "pfe_many_series_one_param_time_major_f32",
+            })?;
         let block_x: u32 = 256;
         let grid_x: u32 = (((cols as u32) + block_x - 1) / block_x).max(1);
         let grid: GridSize = (grid_x, 1, 1).into();
@@ -454,13 +521,9 @@ impl CudaPfe {
                 &mut s_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -470,9 +533,7 @@ impl CudaPfe {
     }
 
     pub fn synchronize(&self) -> Result<(), CudaPfeError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPfeError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
 }
 

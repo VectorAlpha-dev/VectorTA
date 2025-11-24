@@ -10,14 +10,15 @@
 //!
 //! ## Returns
 //! - **`Ok(KeltnerOutput)`** on success (`upper_band`, `middle_band`, `lower_band` vectors)
-//! - **`Err(KeltnerError)`** on failure
+//! - **`Err(KeltnerError)`** on failure (typed errors for empty input, NaNs, invalid periods/ranges, and batch misuse)
 //!
 //! ## Developer Status
 //! - **SIMD Kernels**: AVX2/AVX512 present as stubs delegating to scalar. Due to time-recursive EMA/SMA/ATR, SIMD offers marginal gains; runtime short-circuits to scalar.
 //! - **Scalar**: Loop-jammed EMA/SMA + ATR RMA in a single pass; uses mul_add and unchecked indexing in tight loops.
-//! - **Batch**: Row-specific optimization precomputes TR once and reuses per row; >5% faster at 100k vs non-shared TR.
+//! - **Batch**: Row-specific optimization precomputes TR once and reuses per row; >5% faster at 100k vs non-shared TR with checked sweep ranges.
 //! - **Streaming**: Enabled. Exact EMA seeding (SMA of first n) + Wilder RMA with fused mul_add; matches batch outputs to ~1e-9 in tests.
-//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
+//! - **CUDA/Python**: CUDA batch/many-series wrappers with VRAM handles exposing CUDA Array Interface v3 + DLPack v1.x for CuPy/PyTorch/JAX interop.
+//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix) with checked sizes for batch matrices.
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -53,7 +54,11 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::keltner_wrapper::CudaKeltner;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 // Input & data types
 
@@ -235,15 +240,23 @@ impl KeltnerBuilder {
 #[derive(Debug, Error)]
 pub enum KeltnerError {
     #[error("keltner: empty data provided.")]
-    KeltnerEmptyData,
+    EmptyInputData,
     #[error("keltner: invalid period: period = {period}, data length = {data_len}")]
-    KeltnerInvalidPeriod { period: usize, data_len: usize },
+    InvalidPeriod { period: usize, data_len: usize },
     #[error("keltner: not enough valid data: needed = {needed}, valid = {valid}")]
-    KeltnerNotEnoughValidData { needed: usize, valid: usize },
+    NotEnoughValidData { needed: usize, valid: usize },
     #[error("keltner: all values are NaN.")]
-    KeltnerAllValuesNaN,
+    AllValuesNaN,
+    #[error("keltner: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("keltner: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("keltner: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("keltner: invalid input: {0}")]
+    InvalidInput(String),
     #[error("keltner: MA error: {0}")]
-    KeltnerMaError(String),
+    MaError(String),
 }
 
 // Core indicator API
@@ -261,13 +274,13 @@ pub fn keltner_with_kernel(
         KeltnerData::Candles { candles, source } => (
             candles
                 .select_candle_field("high")
-                .map_err(|e| KeltnerError::KeltnerMaError(e.to_string()))?,
+                .map_err(|e| KeltnerError::MaError(e.to_string()))?,
             candles
                 .select_candle_field("low")
-                .map_err(|e| KeltnerError::KeltnerMaError(e.to_string()))?,
+                .map_err(|e| KeltnerError::MaError(e.to_string()))?,
             candles
                 .select_candle_field("close")
-                .map_err(|e| KeltnerError::KeltnerMaError(e.to_string()))?,
+                .map_err(|e| KeltnerError::MaError(e.to_string()))?,
             source_type(candles, source),
         ),
         KeltnerData::Slice(h, l, c, s) => (*h, *l, *c, *s),
@@ -275,10 +288,10 @@ pub fn keltner_with_kernel(
     let period = input.get_period();
     let len = close.len();
     if len == 0 {
-        return Err(KeltnerError::KeltnerEmptyData);
+        return Err(KeltnerError::EmptyInputData);
     }
     if period == 0 || period > len {
-        return Err(KeltnerError::KeltnerInvalidPeriod {
+        return Err(KeltnerError::InvalidPeriod {
             period,
             data_len: len,
         });
@@ -286,10 +299,10 @@ pub fn keltner_with_kernel(
     let first = close
         .iter()
         .position(|x| !x.is_nan())
-        .ok_or(KeltnerError::KeltnerAllValuesNaN)?;
+        .ok_or(KeltnerError::AllValuesNaN)?;
 
     if (len - first) < period {
-        return Err(KeltnerError::KeltnerNotEnoughValidData {
+        return Err(KeltnerError::NotEnoughValidData {
             needed: period,
             valid: len - first,
         });
@@ -387,13 +400,13 @@ pub fn keltner_into_slice(
         KeltnerData::Candles { candles, source } => (
             candles
                 .select_candle_field("high")
-                .map_err(|e| KeltnerError::KeltnerMaError(e.to_string()))?,
+                .map_err(|e| KeltnerError::MaError(e.to_string()))?,
             candles
                 .select_candle_field("low")
-                .map_err(|e| KeltnerError::KeltnerMaError(e.to_string()))?,
+                .map_err(|e| KeltnerError::MaError(e.to_string()))?,
             candles
                 .select_candle_field("close")
-                .map_err(|e| KeltnerError::KeltnerMaError(e.to_string()))?,
+                .map_err(|e| KeltnerError::MaError(e.to_string()))?,
             source_type(candles, source),
         ),
         KeltnerData::Slice(h, l, c, s) => (*h, *l, *c, *s),
@@ -403,18 +416,18 @@ pub fn keltner_into_slice(
     let len = close.len();
 
     if len == 0 {
-        return Err(KeltnerError::KeltnerEmptyData);
+        return Err(KeltnerError::EmptyInputData);
     }
 
     if upper_dst.len() != len || middle_dst.len() != len || lower_dst.len() != len {
-        return Err(KeltnerError::KeltnerInvalidPeriod {
-            period: 0,
-            data_len: len,
+        return Err(KeltnerError::OutputLengthMismatch {
+            expected: len,
+            got: upper_dst.len().max(middle_dst.len()).max(lower_dst.len()),
         });
     }
 
     if period == 0 || period > len {
-        return Err(KeltnerError::KeltnerInvalidPeriod {
+        return Err(KeltnerError::InvalidPeriod {
             period,
             data_len: len,
         });
@@ -423,10 +436,10 @@ pub fn keltner_into_slice(
     let first = close
         .iter()
         .position(|x| !x.is_nan())
-        .ok_or(KeltnerError::KeltnerAllValuesNaN)?;
+        .ok_or(KeltnerError::AllValuesNaN)?;
 
     if (len - first) < period {
-        return Err(KeltnerError::KeltnerNotEnoughValidData {
+        return Err(KeltnerError::NotEnoughValidData {
             needed: period,
             valid: len - first,
         });
@@ -1166,13 +1179,13 @@ impl KeltnerBatchBuilder {
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<KeltnerBatchOutput, KeltnerError> {
         let h = c
             .select_candle_field("high")
-            .map_err(|e| KeltnerError::KeltnerMaError(e.to_string()))?;
+            .map_err(|e| KeltnerError::MaError(e.to_string()))?;
         let l = c
             .select_candle_field("low")
-            .map_err(|e| KeltnerError::KeltnerMaError(e.to_string()))?;
+            .map_err(|e| KeltnerError::MaError(e.to_string()))?;
         let cl = c
             .select_candle_field("close")
-            .map_err(|e| KeltnerError::KeltnerMaError(e.to_string()))?;
+            .map_err(|e| KeltnerError::MaError(e.to_string()))?;
         let src_v = source_type(c, src);
         self.apply_slice(&h, &l, &cl, src_v)
     }
@@ -1227,28 +1240,82 @@ impl KeltnerBatchOutput {
     }
 }
 
-fn expand_grid(r: &KeltnerBatchRange) -> Vec<KeltnerParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &KeltnerBatchRange) -> Result<Vec<KeltnerParams>, KeltnerError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, KeltnerError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
+        }
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(KeltnerError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, KeltnerError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(KeltnerError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
         }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
+        let st = step.abs();
+        while x + 1e-12 >= end {
             v.push(x);
-            x += step;
+            x -= st;
         }
-        v
+        if v.is_empty() {
+            return Err(KeltnerError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let mults = axis_f64(r.multiplier);
-    let mut out = Vec::with_capacity(periods.len() * mults.len());
+
+    let periods = axis_usize(r.period)?;
+    let mults = axis_f64(r.multiplier)?;
+
+    let cap = periods
+        .len()
+        .checked_mul(mults.len())
+        .ok_or_else(|| KeltnerError::InvalidRange {
+            start: "rows".into(),
+            end: "cols".into(),
+            step: "rows*cols".into(),
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &m in &mults {
             out.push(KeltnerParams {
@@ -1258,7 +1325,7 @@ fn expand_grid(r: &KeltnerBatchRange) -> Vec<KeltnerParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn keltner_batch_with_kernel(
@@ -1273,10 +1340,7 @@ pub fn keltner_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(KeltnerError::KeltnerInvalidPeriod {
-                period: 0,
-                data_len: 0,
-            });
+            return Err(KeltnerError::InvalidKernelForBatch(k));
         }
     };
     let simd = match kernel {
@@ -1318,21 +1382,22 @@ fn keltner_batch_inner(
     parallel: bool,
     ma_type: Option<&str>,
 ) -> Result<KeltnerBatchOutput, KeltnerError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(KeltnerError::KeltnerInvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(KeltnerError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
         });
     }
     let len = close.len();
     let first = close
         .iter()
         .position(|x| !x.is_nan())
-        .ok_or(KeltnerError::KeltnerAllValuesNaN)?;
+        .ok_or(KeltnerError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if len - first < max_p {
-        return Err(KeltnerError::KeltnerNotEnoughValidData {
+        return Err(KeltnerError::NotEnoughValidData {
             needed: max_p,
             valid: len - first,
         });
@@ -1340,11 +1405,28 @@ fn keltner_batch_inner(
     let rows = combos.len();
     let cols = len;
 
+    rows
+        .checked_mul(cols)
+        .ok_or_else(|| KeltnerError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
+
     // Calculate warmup periods for each row
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.period.unwrap() - 1)
-        .collect();
+        .map(|c| {
+            let p = c.period.unwrap();
+            first
+                .checked_add(p.saturating_sub(1))
+                .ok_or_else(|| KeltnerError::InvalidRange {
+                    start: first.to_string(),
+                    end: p.to_string(),
+                    step: "first+period-1".into(),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Allocate uninitialized matrices and initialize NaN prefixes
     let mut upper_mu = make_uninit_matrix(rows, cols);
@@ -1619,10 +1701,7 @@ impl KeltnerStream {
             .to_lowercase();
 
         if period == 0 {
-            return Err(KeltnerError::KeltnerInvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(KeltnerError::InvalidPeriod { period, data_len: 0 });
         }
 
         let pf = period as f64;
@@ -2654,6 +2733,231 @@ mod tests {
 
 // Python bindings
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+pub struct KeltnerDeviceArrayF32 {
+    pub inner: DeviceArrayF32,
+    pub context: Arc<Context>,
+    pub device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct KeltnerDeviceArrayF32Py {
+    pub(crate) inner: KeltnerDeviceArrayF32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl KeltnerDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = &self.inner.inner;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // Producer kernels synchronize before returning, so we omit `stream` per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        Ok((2, self.inner.device_id as i32))
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use cust::memory::DeviceBuffer;
+        use std::os::raw::c_char;
+        use std::os::raw::c_void;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32,
+            _ctx_guard: cust::sys::CUcontext,
+            _device_id: u32,
+            _context: Arc<Context>,
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() {
+                    if !(*holder_ptr)._ctx_guard.is_null() {
+                        let dev = (*holder_ptr)._device_id as i32;
+                        let _ = cust::sys::cuDevicePrimaryCtxRelease(dev);
+                    }
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            use std::ffi::CStr;
+
+            if capsule.is_null() {
+                return;
+            }
+            let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule);
+            if name_ptr.is_null() {
+                return;
+            }
+            let name = CStr::from_ptr(name_ptr);
+            let bytes = name.to_bytes();
+            let is_legacy = bytes == b"dltensor";
+            let is_versioned = bytes == b"dltensor_versioned";
+            if !is_legacy && !is_versioned {
+                // Capsule has been consumed/renamed (e.g., "used_dltensor[_versioned]"); skip deleter.
+                return;
+            }
+            let key = if is_versioned {
+                b"dltensor_versioned\0".as_ptr() as *const c_char
+            } else {
+                b"dltensor\0".as_ptr() as *const c_char
+            };
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, key);
+            if ptr.is_null() {
+                return;
+            }
+            let mt = ptr as *mut DLManagedTensor;
+            if let Some(del) = unsafe { (*mt).deleter } {
+                del(mt);
+            }
+            unsafe {
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        // Move VRAM handle into Holder (one-shot DLPack export).
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner.inner,
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
+
+        // Retain primary context for the allocation device.
+        let dev = self.inner.device_id as i32;
+        let mut retained_ctx: cust::sys::CUcontext = std::ptr::null_mut();
+        unsafe {
+            let _ = cust::sys::cuDevicePrimaryCtxRetain(&mut retained_ctx, dev);
+        }
+
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: if inner.rows == 0 || inner.cols == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        inner.buf.as_device_ptr().as_raw() as *mut c_void
+                    },
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: dev,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [inner.rows as i64, inner.cols as i64],
+            strides: [inner.cols as i64, 1],
+            arr: inner,
+            _ctx_guard: retained_ctx,
+            _device_id: self.inner.device_id,
+            _context: self.inner.context.clone(),
+        });
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut c_void;
+        let _ = Box::into_raw(holder);
+
+        let wants_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        let name = if wants_versioned {
+            b"dltensor_versioned\0"
+        } else {
+            b"dltensor\0"
+        };
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut c_void,
+                name.as_ptr() as *const c_char,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe {
+                dl_managed_deleter(mt_ptr);
+            }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "keltner")]
 #[pyo3(signature = (high, low, close, source, period, multiplier, ma_type="ema", kernel=None))]
@@ -2774,9 +3078,12 @@ pub fn keltner_batch_py<'py>(
     let cols = out.cols;
 
     // Materialize into PyArrays without extra copies
-    let up_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let mid_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let low_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let up_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let mid_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let low_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
 
     unsafe { up_arr.as_slice_mut()? }.copy_from_slice(&out.upper_band);
     unsafe { mid_arr.as_slice_mut()? }.copy_from_slice(&out.middle_band);
@@ -2836,8 +3143,11 @@ pub fn keltner_cuda_batch_dev_py<'py>(
         period: period_range,
         multiplier: multiplier_range,
     };
-    let (up, mid, low, rows, cols) = py.allow_threads(|| {
-        let cuda = CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (up, mid, low, rows, cols, ctx, dev_id) = py.allow_threads(|| {
+        let cuda =
+            CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         let res = cuda
             .keltner_batch_dev(h, l, c, s, &sweep, ma_type)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2849,12 +3159,50 @@ pub fn keltner_cuda_batch_dev_py<'py>(
             res.outputs.lower,
             rows,
             cols,
+            ctx,
+            dev_id,
         ))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item("upper", Py::new(py, DeviceArrayF32Py { inner: up })?)?;
-    dict.set_item("middle", Py::new(py, DeviceArrayF32Py { inner: mid })?)?;
-    dict.set_item("lower", Py::new(py, DeviceArrayF32Py { inner: low })?)?;
+    dict.set_item(
+        "upper",
+        Py::new(
+            py,
+            KeltnerDeviceArrayF32Py {
+                inner: KeltnerDeviceArrayF32 {
+                    inner: up,
+                    context: ctx.clone(),
+                    device_id: dev_id,
+                },
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "middle",
+        Py::new(
+            py,
+            KeltnerDeviceArrayF32Py {
+                inner: KeltnerDeviceArrayF32 {
+                    inner: mid,
+                    context: ctx.clone(),
+                    device_id: dev_id,
+                },
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "lower",
+        Py::new(
+            py,
+            KeltnerDeviceArrayF32Py {
+                inner: KeltnerDeviceArrayF32 {
+                    inner: low,
+                    context: ctx,
+                    device_id: dev_id,
+                },
+            },
+        )?,
+    )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     Ok(dict)
@@ -2875,7 +3223,7 @@ pub fn keltner_cuda_many_series_one_param_dev_py(
     multiplier: f32,
     ma_type: &str,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(KeltnerDeviceArrayF32Py, KeltnerDeviceArrayF32Py, KeltnerDeviceArrayF32Py)> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2891,19 +3239,40 @@ pub fn keltner_cuda_many_series_one_param_dev_py(
     {
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
-    let (up, mid, low) = py.allow_threads(|| {
-        let cuda = CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (up, mid, low, ctx, dev_id) = py.allow_threads(|| {
+        let cuda =
+            CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         let trip = cuda
             .keltner_many_series_one_param_time_major_dev(
                 ht, lt, ct, st, cols, rows, period, multiplier, ma_type,
             )
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((trip.upper, trip.middle, trip.lower))
+        Ok::<_, PyErr>((trip.upper, trip.middle, trip.lower, ctx, dev_id))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: up },
-        DeviceArrayF32Py { inner: mid },
-        DeviceArrayF32Py { inner: low },
+        KeltnerDeviceArrayF32Py {
+            inner: KeltnerDeviceArrayF32 {
+                inner: up,
+                context: ctx.clone(),
+                device_id: dev_id,
+            },
+        },
+        KeltnerDeviceArrayF32Py {
+            inner: KeltnerDeviceArrayF32 {
+                inner: mid,
+                context: ctx.clone(),
+                device_id: dev_id,
+            },
+        },
+        KeltnerDeviceArrayF32Py {
+            inner: KeltnerDeviceArrayF32 {
+                inner: low,
+                context: ctx,
+                device_id: dev_id,
+            },
+        },
     ))
 }
 

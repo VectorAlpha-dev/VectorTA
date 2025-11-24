@@ -12,31 +12,36 @@
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::indicators::reverse_rsi::{ReverseRsiBatchRange, ReverseRsiParams};
 use cust::context::{CacheConfig, Context};
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, Function, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaReverseRsiError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("not implemented")]
+    NotImplemented,
+    #[error("out of memory: required={required}B, free={free}B, headroom={headroom}B")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buffer on {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
 }
-
-impl fmt::Display for CudaReverseRsiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaReverseRsiError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaReverseRsiError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaReverseRsiError {}
 
 // Minimal policy surface mirroring other oscillators
 #[derive(Clone, Copy, Debug)]
@@ -76,7 +81,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaReverseRsi {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaReverseRsiPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -86,31 +92,38 @@ pub struct CudaReverseRsi {
 
 impl CudaReverseRsi {
     pub fn new(device_id: usize) -> Result<Self, CudaReverseRsiError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/reverse_rsi_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) =
+                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
+            }
+        };
 
         // Favor L1 as working sets are read-mostly
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaReverseRsiPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -132,9 +145,18 @@ impl CudaReverseRsi {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaReverseRsiError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     #[inline]
@@ -190,38 +212,118 @@ impl CudaReverseRsi {
         mem_get_info().ok()
     }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaReverseRsiError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+            let needed = required_bytes
+                .saturating_add(headroom_bytes);
+            if needed <= free {
+                Ok(())
+            } else {
+                Err(CudaReverseRsiError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
         } else {
-            true
+            Ok(())
         }
+    }
+
+    #[inline]
+    fn validate_launch_dims(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaReverseRsiError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        let (gx, gy, gz) = grid;
+        let (bx, by, bz) = block;
+        if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 {
+            return Err(CudaReverseRsiError::InvalidInput(
+                "zero-sized grid or block".into(),
+            ));
+        }
+        if gx > max_gx || gy > max_gy || gz > max_gz || bx > max_bx || by > max_by || bz > max_bz
+        {
+            return Err(CudaReverseRsiError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
     }
 
     // ---- Batch (one series × many params) ----
 
-    fn expand_grid(sweep: &ReverseRsiBatchRange) -> Vec<ReverseRsiParams> {
+    fn expand_grid(sweep: &ReverseRsiBatchRange) -> Result<Vec<ReverseRsiParams>, CudaReverseRsiError> {
         let (ls, le, lp) = sweep.rsi_length_range;
         let (vs, ve, vp) = sweep.rsi_level_range;
+
         let lengths: Vec<usize> = if lp == 0 {
             vec![ls]
-        } else {
+        } else if ls <= le {
             (ls..=le).step_by(lp).collect()
+        } else {
+            let mut v = Vec::new();
+            let mut x = ls;
+            while x >= le {
+                v.push(x);
+                match x.checked_sub(lp) {
+                    Some(nx) => {
+                        x = nx;
+                    }
+                    None => break,
+                }
+                if x < le {
+                    break;
+                }
+            }
+            v
         };
+
         let mut levels: Vec<f64> = Vec::new();
         if vp == 0.0 {
             levels.push(vs)
-        } else {
+        } else if vp > 0.0 {
             let mut x = vs;
-            while x <= ve {
+            while x <= ve + 1e-12 {
                 levels.push(x);
                 x += vp;
             }
+        } else {
+            let mut x = vs;
+            while x >= ve - 1e-12 {
+                levels.push(x);
+                x += vp; // negative step
+            }
         }
-        let mut combos = Vec::with_capacity(lengths.len() * levels.len());
+
+        if lengths.is_empty() || levels.is_empty() {
+            return Err(CudaReverseRsiError::InvalidInput(
+                "empty sweep range for reverse_rsi".into(),
+            ));
+        }
+
+        let cap = lengths
+            .len()
+            .checked_mul(levels.len())
+            .ok_or_else(|| CudaReverseRsiError::InvalidInput("lengths*levels overflow".into()))?;
+
+        let mut combos = Vec::with_capacity(cap);
         for &l in &lengths {
             for &v in &levels {
                 combos.push(ReverseRsiParams {
@@ -230,7 +332,7 @@ impl CudaReverseRsi {
                 });
             }
         }
-        combos
+        Ok(combos)
     }
 
     fn prepare_batch_inputs(
@@ -245,12 +347,7 @@ impl CudaReverseRsi {
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaReverseRsiError::InvalidInput("all values are NaN".into()))?;
-        let combos = Self::expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaReverseRsiError::InvalidInput(
-                "no parameter combos".into(),
-            ));
-        }
+        let combos = Self::expand_grid(sweep)?;
         // Validate feasibility for at least max length
         let max_len = combos
             .iter()
@@ -262,7 +359,12 @@ impl CudaReverseRsi {
             .map(|p| p.rsi_length.unwrap_or(14))
             .max()
             .unwrap_or(14);
-        let ema_len = (2 * max_len).saturating_sub(1);
+        let ema_len = (2usize)
+            .checked_mul(max_len)
+            .and_then(|v| v.checked_sub(1))
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("ema_len overflow in prepare_batch_inputs".into())
+            })?;
         if len - first_valid <= ema_len {
             return Err(CudaReverseRsiError::InvalidInput(format!(
                 "not enough valid data: needed > {}, have {}",
@@ -286,13 +388,18 @@ impl CudaReverseRsi {
         let mut func: Function = self
             .module
             .get_function("reverse_rsi_batch_f32")
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaReverseRsiError::MissingKernelSymbol { name: "reverse_rsi_batch_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         // Dynamic shared memory required by the kernel's async tiling path.
         // Keep TILE consistent with the kernel (TILE=256).
         const TILE: usize = 256;
-        let shmem_bytes: usize = 4 * TILE * std::mem::size_of::<f32>();
+        let shmem_bytes: usize = 4usize
+            .checked_mul(TILE)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("shmem byte size overflow".into())
+            })?;
 
         // Block size via occupancy suggestion or env override RRSI_BLOCK_X.
         let block_x: u32 = match std::env::var("RRSI_BLOCK_X").ok().as_deref() {
@@ -300,8 +407,7 @@ impl CudaReverseRsi {
                 // Feed dynamic shared memory into occupancy so suggested block size
                 // respects per-block SMEM usage.
                 let (_min_grid, suggested) = func
-                    .suggested_launch_configuration(shmem_bytes, BlockSize::xyz(0, 0, 0))
-                    .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+                    .suggested_launch_configuration(shmem_bytes, BlockSize::xyz(0, 0, 0))?;
                 suggested
             }
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
@@ -309,6 +415,7 @@ impl CudaReverseRsi {
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
 
         // Record selection for introspection
         unsafe {
@@ -340,8 +447,7 @@ impl CudaReverseRsi {
             ];
             // Pass dynamic shared memory size for kernels using extern __shared__
             self.stream
-                .launch(&func, grid, block, (shmem_bytes as u32), args)
-                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+                .launch(&func, grid, block, (shmem_bytes as u32), args)?;
         }
 
         Ok(())
@@ -356,25 +462,39 @@ impl CudaReverseRsi {
         let rows = combos.len();
 
         // VRAM estimate: prices + lengths + levels + out
-        let bytes = len * std::mem::size_of::<f32>()
-            + rows * std::mem::size_of::<i32>()
-            + rows * std::mem::size_of::<f32>()
-            + rows * len * std::mem::size_of::<f32>();
+        let prices_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("price byte size overflow".into())
+            })?;
+        let lengths_bytes = rows
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("lengths byte size overflow".into())
+            })?;
+        let levels_bytes = rows
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("levels byte size overflow".into())
+            })?;
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaReverseRsiError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("out byte size overflow".into())
+            })?;
+        let bytes = prices_bytes
+            .checked_add(lengths_bytes)
+            .and_then(|v| v.checked_add(levels_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("aggregate byte size overflow".into())
+            })?;
         let headroom = 64 * 1024 * 1024; // 64MB
-        if !Self::will_fit(bytes, headroom) {
-            return Err(CudaReverseRsiError::InvalidInput(
-                "insufficient VRAM for reverse_rsi batch".into(),
-            ));
-        }
+        Self::will_fit(bytes, headroom)?;
 
-        let lengths_i32: Vec<i32> = combos
-            .iter()
-            .map(|c| c.rsi_length.unwrap_or(14) as i32)
-            .collect();
-        let levels_f32: Vec<f32> = combos
-            .iter()
-            .map(|c| c.rsi_level.unwrap_or(50.0) as f32)
-            .collect();
         let lengths_i32: Vec<i32> = combos
             .iter()
             .map(|c| c.rsi_length.unwrap_or(14) as i32)
@@ -385,48 +505,22 @@ impl CudaReverseRsi {
             .collect();
 
         // Pinned host buffers + async H2D
-        let h_prices = LockedBuffer::from_slice(prices)
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let h_lens = LockedBuffer::from_slice(&lengths_i32)
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let h_lvls = LockedBuffer::from_slice(&levels_f32)
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let h_prices = LockedBuffer::from_slice(prices)
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let h_lens = LockedBuffer::from_slice(&lengths_i32)
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let h_lvls = LockedBuffer::from_slice(&levels_f32)
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+        let h_prices = LockedBuffer::from_slice(prices)?;
+        let h_lens = LockedBuffer::from_slice(&lengths_i32)?;
+        let h_lvls = LockedBuffer::from_slice(&levels_f32)?;
 
-        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let mut d_lengths = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let mut d_levels = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows, &self.stream) }
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
+        let mut d_lengths =
+            unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }?;
+        let mut d_levels =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(rows, &self.stream) }?;
         let mut d_out =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }
-                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream) }?;
 
         unsafe {
-            d_prices
-                .async_copy_from(&h_prices, &self.stream)
-                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-            d_lengths
-                .async_copy_from(&h_lens, &self.stream)
-                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-            d_levels
-                .async_copy_from(&h_lvls, &self.stream)
-                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-            d_prices
-                .async_copy_from(&h_prices, &self.stream)
-                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-            d_lengths
-                .async_copy_from(&h_lens, &self.stream)
-                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-            d_levels
-                .async_copy_from(&h_lvls, &self.stream)
-                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+            d_prices.async_copy_from(&h_prices, &self.stream)?;
+            d_lengths.async_copy_from(&h_lens, &self.stream)?;
+            d_levels.async_copy_from(&h_lvls, &self.stream)?;
         }
 
         self.launch_batch_kernel(
@@ -439,9 +533,7 @@ impl CudaReverseRsi {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {
@@ -461,7 +553,12 @@ impl CudaReverseRsi {
         rows: usize,
         params: &ReverseRsiParams,
     ) -> Result<(Vec<i32>, i32, f32), CudaReverseRsiError> {
-        if prices_tm.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("cols*rows overflow in prepare_many_series_inputs".into())
+            })?;
+        if prices_tm.len() != expected {
             return Err(CudaReverseRsiError::InvalidInput(
                 "time-major input has wrong size".into(),
             ));
@@ -503,14 +600,15 @@ impl CudaReverseRsi {
         let mut func: Function = self
             .module
             .get_function("reverse_rsi_many_series_one_param_f32")
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaReverseRsiError::MissingKernelSymbol {
+                name: "reverse_rsi_many_series_one_param_f32",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let block_x: u32 = match std::env::var("RRSI_MANY_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
                 let (_min, suggested) = func
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-                    .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
                 suggested
             }
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
@@ -518,6 +616,7 @@ impl CudaReverseRsi {
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
 
         unsafe {
             (*(self as *const _ as *mut CudaReverseRsi)).last_many =
@@ -543,8 +642,7 @@ impl CudaReverseRsi {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+                .launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -562,37 +660,51 @@ impl CudaReverseRsi {
             Self::prepare_many_series_inputs(prices_tm, cols, rows, params)?;
 
         // VRAM estimate
-        let elems = cols * rows;
-        let bytes = elems * std::mem::size_of::<f32>() /* in */
-            + cols * std::mem::size_of::<i32>()        /* firsts */
-            + elems * std::mem::size_of::<f32>(); /* out */
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("cols*rows overflow in many-series".into())
+            })?;
+        let in_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("prices byte size overflow (many-series)".into())
+            })?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("firsts byte size overflow".into())
+            })?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("out byte size overflow (many-series)".into())
+            })?;
+        let bytes = in_bytes
+            .checked_add(first_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput(
+                    "aggregate byte size overflow (many-series)".into(),
+                )
+            })?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(bytes, headroom) {
-            return Err(CudaReverseRsiError::InvalidInput(
-                "insufficient VRAM for reverse_rsi many-series".into(),
-            ));
-        }
+        Self::will_fit(bytes, headroom)?;
 
         // Use pinned host buffers + async copies for higher throughput and true async behavior
-        let h_prices_tm = LockedBuffer::from_slice(prices_tm)
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let h_first = LockedBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+        let h_prices_tm = LockedBuffer::from_slice(prices_tm)?;
+        let h_first = LockedBuffer::from_slice(&first_valids)?;
 
-        let mut d_prices_tm = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+        let mut d_prices_tm =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+        let mut d_first =
+            unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }?;
+        let mut d_out_tm =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
 
         unsafe {
-            d_prices_tm
-                .async_copy_from(&h_prices_tm, &self.stream)
-                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-            d_first
-                .async_copy_from(&h_first, &self.stream)
-                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+            d_prices_tm.async_copy_from(&h_prices_tm, &self.stream)?;
+            d_first.async_copy_from(&h_first, &self.stream)?;
         }
 
         self.launch_many_series_kernel(
@@ -604,9 +716,7 @@ impl CudaReverseRsi {
             level,
             &mut d_out_tm,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,

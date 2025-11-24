@@ -38,6 +38,9 @@ use pyo3::types::{PyDict, PyList};
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
+    // Optional context + device id to keep primary context alive for VRAM frees
+    pub(crate) _ctx: Option<std::sync::Arc<cust::context::Context>>, // kept for lifetime
+    pub(crate) device_id: Option<u32>,
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -59,13 +62,14 @@ impl DeviceArrayF32Py {
                 std::mem::size_of::<f32>(),
             ),
         )?;
-        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        let size = inner.rows.saturating_mul(inner.cols);
+        let ptr = if size == 0 { 0usize } else { inner.device_ptr() as usize };
+        d.set_item("data", (ptr, false))?;
         // Stream is omitted because producing kernels synchronize before returning
         // the VRAM handle; consumers need no additional synchronization per CAI v3.
         d.set_item("version", 3)?;
         Ok(d)
     }
-
     fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
         // Discover allocation device from pointer attributes to avoid relying on current context.
         let mut device_ordinal: i32 = 0;
@@ -97,21 +101,33 @@ impl DeviceArrayF32Py {
         copy: Option<&pyo3::types::PyAny>,
     ) -> PyResult<PyObject> {
         use std::os::raw::c_char;
-        use std::ptr::null_mut;
+        use std::ptr::{null_mut};
 
         #[repr(C)]
         struct DLDataType { code: u8, bits: u8, lanes: u16 }
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
         #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
         struct DLTensor {
-            data: *mut std::ffi::c_void,
+            data: *mut c_void,
             device: DLDevice,
             ndim: i32,
             dtype: DLDataType,
             shape: *mut i64,
             strides: *mut i64,
             byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLPackVersion { major: u32, minor: u32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
         }
         #[repr(C)]
         struct DLManagedTensor {
@@ -3078,14 +3094,17 @@ pub fn alma_cuda_batch_dev_py(
         sigma: sigma_range,
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = device_id as u32;
         cuda
             .alma_batch_dev(slice_in, &sweep)
+            .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3116,14 +3135,17 @@ pub fn alma_cuda_many_series_one_param_dev_py(
         sigma: Some(sigma),
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = device_id as u32;
         cuda
             .alma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 // FP32-only, user-supplied output (zero extra copies)

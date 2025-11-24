@@ -17,9 +17,9 @@
 //! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix).
 //! - Batch optimization: Shares ADL across rows to avoid recomputing MFV/ADL per parameter set.
 //!
-//! Decision log: SIMD stubs defer to scalar; CUDA wrapper uses typed errors + context guard;
-//! Python CAI v3 provided (explicit strides, version=3, stream omitted after sync);
-//! DLPack exported with DLManagedTensor and an Arc<Context> guard. Performance unchanged; references preserved.
+//! Decision log: SIMD paths are stubs that defer to scalar; CUDA wrapper uses typed errors, checked byte sizing, and an Arc<Context> guard;
+//! Python bindings expose CUDA Array Interface v3 (explicit byte strides, version=3, synchronized stream) and DLPack v1.x with legacy capsules,
+//! keeping numerical outputs and public APIs identical to the scalar reference implementation.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -255,15 +255,10 @@ fn adosc_prepare<'a>(
     AdoscError,
 > {
     let (high, low, close, volume) = match &input.data {
-        AdoscData::Candles { candles } => {
+    AdoscData::Candles { candles } => {
             let n = candles.close.len();
             if n == 0 {
-                return Err(AdoscError::EmptySlices {
-                    high: 0,
-                    low: 0,
-                    close: 0,
-                    volume: 0,
-                });
+                return Err(AdoscError::EmptyInputData);
             }
             // Enforce equal lengths like alma.rs does for single-slice shape safety
             let (hh, ll, cc, vv) = (
@@ -290,6 +285,9 @@ fn adosc_prepare<'a>(
             volume,
         } => {
             if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
+                if high.is_empty() && low.is_empty() && close.is_empty() && volume.is_empty() {
+                    return Err(AdoscError::EmptyInputData);
+                }
                 return Err(AdoscError::EmptySlices {
                     high: high.len(),
                     low: low.len(),
@@ -364,7 +362,7 @@ pub fn adosc_with_kernel(input: &AdoscInput, kernel: Kernel) -> Result<AdoscOutp
 /// Writes ADOSC values into a caller-provided output slice without allocating.
 ///
 /// - Preserves ADOSC semantics: no warmup prefix (index 0 is a valid 0.0 value).
-/// - `out.len()` must exactly equal the input length; otherwise returns `AdoscError::InvalidLength`.
+/// - `out.len()` must exactly equal the input length; otherwise returns `AdoscError::OutputLengthMismatch`.
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn adosc_into(input: &AdoscInput, out: &mut [f64]) -> Result<(), AdoscError> {
@@ -702,9 +700,13 @@ fn adosc_batch_inner(
     let len = close.len();
     let rows = combos.len();
     let cols = len;
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| AdoscError::InvalidInput("rows*cols overflow".into()))?;
 
     // Use zero-copy memory allocation
     let mut buf_mu = make_uninit_matrix(rows, cols);
+    debug_assert_eq!(buf_mu.len(), expected);
 
     // ADOSC computes from index 0, so warmup period is 0 for all rows
     let warm: Vec<usize> = vec![0; rows];
@@ -2074,8 +2076,31 @@ impl DeviceArrayF32AdoscPy {
         (2, self.inner.device_id as i32)
     }
 
-    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
         use std::ffi::c_void;
+
+        let _ = dl_device;
+        let _ = copy;
+
+        // Producer synchronizes its CUDA stream before returning; we only reject
+        // explicitly disallowed stream==0 per Array API semantics.
+        if let Some(obj) = &stream {
+            if let Ok(i) = obj.extract::<i64>(py) {
+                if i == 0 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "__dlpack__: stream 0 is disallowed for CUDA",
+                    ));
+                }
+            }
+        }
 
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
@@ -2097,73 +2122,132 @@ impl DeviceArrayF32AdoscPy {
             manager_ctx: *mut c_void,
             deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
         }
+        #[repr(C)]
+        struct DLPackVersion { major: u32, minor: u32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
         struct DlpGuard {
-            // Own the shape/strides allocations and keep CUDA context alive
             _shape: Box<[i64; 2]>,
             _strides: Box<[i64; 2]>,
             _ctx: std::sync::Arc<cust::context::Context>,
         }
 
-        extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+        extern "C" fn legacy_managed_deleter(p: *mut DLManagedTensor) {
             unsafe {
                 if p.is_null() { return; }
-                // Reclaim guard first (drops Arc + Boxed arrays)
                 let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
                 if !guard_ptr.is_null() {
                     drop(Box::from_raw(guard_ptr));
                 }
-                // Finally free the DLManagedTensor itself
+                drop(Box::from_raw(p));
+            }
+        }
+        extern "C" fn versioned_managed_deleter(p: *mut DLManagedTensorVersioned) {
+            unsafe {
+                if p.is_null() { return; }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
                 drop(Box::from_raw(p));
             }
         }
 
-        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
-            unsafe {
-                let name = b"dltensor\0";
-                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
-                if !ptr.is_null() {
-                    if let Some(del) = (*ptr).deleter { del(ptr); }
-                    // Rename capsule per convention to prevent double use
-                    let used = b"used_dltensor\0";
-                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
-                }
+        // Capsule destructors honor rename-to-"used_*" per DLPack Python protocol.
+        unsafe extern "C" fn legacy_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const _,
+            ) as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter { del(ptr); }
+                let used = b"used_dltensor\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+        unsafe extern "C" fn versioned_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const _,
+            ) as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter { del(ptr); }
+                let used = b"used_dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
             }
         }
 
-        // Build shape/strides (element-based strides per DLPack)
-        let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
-        let strides = Box::new([self.inner.cols as i64, 1i64]);
-        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+        let rows = self.inner.rows as i64;
+        let cols = self.inner.cols as i64;
+        let len = (rows as i128) * (cols as i128);
+        let data_ptr: *mut c_void = if len == 0 {
+            std::ptr::null_mut()
+        } else {
+            (self.inner.device_ptr() as usize) as *mut c_void
+        };
 
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1i64]); // strides are in elements for DLPack
         let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _ctx: self.inner.ctx.clone() });
         let guard_ptr = Box::into_raw(guard);
-
-        // SAFETY: guard owns shape/strides; we borrow raw pointers into the tensor
         let guard_ref = unsafe { &*guard_ptr };
-        let mt = Box::new(DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
-                ndim: 2,
-                dtype: DLDataType { code: 2 /* kDLFloat */, bits: 32, lanes: 1 },
-                shape: guard_ref._shape.as_ptr() as *mut i64,
-                strides: guard_ref._strides.as_ptr() as *mut i64,
-                byte_offset: 0,
-            },
-            manager_ctx: guard_ptr as *mut c_void,
-            deleter: Some(managed_deleter),
-        });
-        let mt_raw = Box::into_raw(mt);
-        let name = b"dltensor\0";
-        let capsule = unsafe {
-            pyo3::ffi::PyCapsule_New(mt_raw as *mut c_void, name.as_ptr() as *const _, Some(capsule_destructor))
-        };
-        if capsule.is_null() {
-            // If capsule creation failed, free the managed tensor explicitly
-            unsafe { managed_deleter(mt_raw); }
-            return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+
+        let want_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        if want_versioned {
+            let mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 0 },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(versioned_managed_deleter),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+            });
+            let raw = Box::into_raw(mt) as *mut c_void;
+            let name = b"dltensor_versioned\0";
+            let cap = unsafe { pyo3::ffi::PyCapsule_New(raw, name.as_ptr() as *const _, Some(versioned_capsule_destructor)) };
+            if cap.is_null() {
+                unsafe { versioned_managed_deleter(raw as *mut DLManagedTensorVersioned); }
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack v1.x capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(legacy_managed_deleter),
+            });
+            let raw = Box::into_raw(mt) as *mut c_void;
+            let name = b"dltensor\0";
+            let cap = unsafe { pyo3::ffi::PyCapsule_New(raw, name.as_ptr() as *const _, Some(legacy_capsule_destructor)) };
+            if cap.is_null() {
+                unsafe { legacy_managed_deleter(raw as *mut DLManagedTensor); }
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create legacy DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
     }
 }
 

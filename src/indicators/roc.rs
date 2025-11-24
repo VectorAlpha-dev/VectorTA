@@ -17,7 +17,7 @@
 //! - **SIMD**: AVX2/AVX512 single-series kernels implemented; batch SIMD rows currently delegate to scalar.
 //! - **Streaming**: Implemented with O(1) update performance (circular buffer)
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
-//! - Decision: Scalar is the reference path. SIMD is available and benchmarked; row-specific batch SIMD not attempted (little shared work). Keep selection to scalar where SIMD underperforms.
+//! - Decision log: Scalar is the reference path; SIMD is available and benchmarked, CUDA wrapper present with VRAM-backed handles, and Python interop exposes CAI v3 + DLPack v1.x without changing numerical outputs.
 //! - Decision (streaming): Updated to match batch warmup precisely (NaN prefix = first_non_nan + period) and avoid modulus in hot path; uses mul_add for FMA where available.
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -180,13 +180,21 @@ impl RocBuilder {
 #[derive(Debug, Error)]
 pub enum RocError {
     #[error("roc: Input data slice is empty.")]
+    EmptyInputData,
+    #[error("roc: Input data slice is empty.")]
     EmptyData,
+    #[error("roc: All values are NaN.")]
+    AllValuesNaN,
     #[error("roc: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("roc: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("roc: All values are NaN.")]
-    AllValuesNaN,
+    #[error("roc: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("roc: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("roc: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -202,7 +210,7 @@ fn roc_prepare<'a>(
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
-        return Err(RocError::EmptyData);
+        return Err(RocError::EmptyInputData);
     }
     let first = data
         .iter()
@@ -262,7 +270,7 @@ pub fn roc_with_kernel(input: &RocInput, kernel: Kernel) -> Result<RocOutput, Ro
 /// Write ROC values into a caller-provided buffer without allocating.
 ///
 /// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - `out.len()` must equal the input length; otherwise returns `RocError::InvalidPeriod`.
+/// - `out.len()` must equal the input length; otherwise returns `RocError::OutputLengthMismatch`.
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn roc_into(input: &RocInput, out: &mut [f64]) -> Result<(), RocError> {
@@ -710,12 +718,7 @@ pub fn roc_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(RocError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(RocError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -742,25 +745,63 @@ impl RocBatchOutput {
             .position(|c| c.period.unwrap_or(9) == p.period.unwrap_or(9))
     }
     pub fn values_for(&self, p: &RocParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| {
-            let start = row * self.cols;
-            &self.values[start..start + self.cols]
+        self.row_for_params(p).and_then(|row| {
+            let start = row.checked_mul(self.cols)?;
+            let end = start.checked_add(self.cols)?;
+            self.values.get(start..end)
         })
     }
 }
 
 #[inline(always)]
-pub(crate) fn expand_grid(r: &RocBatchRange) -> Vec<RocParams> {
-    let (start, end, step) = r.period;
-    if step == 0 || start == end {
-        return vec![RocParams {
-            period: Some(start),
-        }];
+pub(crate) fn expand_grid(r: &RocBatchRange) -> Result<Vec<RocParams>, RocError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, RocError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(next) => {
+                        if next == v {
+                            break;
+                        }
+                        v = next;
+                    }
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            while v >= end {
+                out.push(v);
+                if v < end + step {
+                    break;
+                }
+                v -= step;
+                if v == 0 {
+                    break;
+                }
+            }
+        }
+        if out.is_empty() {
+            return Err(RocError::InvalidRange {
+                start,
+                end,
+                step,
+            });
+        }
+        Ok(out)
     }
-    (start..=end)
-        .step_by(step)
+
+    let periods = axis_usize(r.period)?;
+    Ok(periods
+        .into_iter()
         .map(|p| RocParams { period: Some(p) })
-        .collect()
+        .collect())
 }
 
 #[inline(always)]
@@ -787,13 +828,7 @@ fn roc_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<RocBatchOutput, RocError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(RocError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -807,6 +842,13 @@ fn roc_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(RocError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
     // Use uninitialized memory for better performance
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -881,13 +923,7 @@ fn roc_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<RocParams>, RocError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(RocError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -902,6 +938,19 @@ fn roc_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(RocError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(RocError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // 1) View output as uninitialized and write NaN warm prefixes via helper
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
@@ -996,11 +1045,15 @@ pub fn roc_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
@@ -1057,6 +1110,255 @@ impl RocStreamPy {
     }
 }
 
+// ----- Python device array with CAI v3 + DLPack v1.x (ROC) -----
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct RocDeviceArrayF32Py {
+    pub(crate) inner: Option<DeviceArrayF32Roc>,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl RocDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        let row_stride = inner
+            .cols
+            .checked_mul(itemsize)
+            .ok_or_else(|| PyValueError::new_err("byte stride overflow"))?;
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (row_stride, itemsize))?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // Stream omitted: kernels synchronize before returning
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        Ok((2, inner.device_id as i32))
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CStr, CString};
+
+        let _ = stream;
+        if let Some(true) = copy {
+            return Err(PyValueError::new_err(
+                "copy=True is not supported for roc CUDA buffers",
+            ));
+        }
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        if let Some((dev_type, dev_id)) = dl_device {
+            if dev_type != 2 || dev_id != inner.device_id as i32 {
+                return Err(PyValueError::new_err("dl_device mismatch for roc CUDA buffer"));
+            }
+        }
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _arr: DeviceArrayF32Roc,
+        }
+
+        unsafe extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ = Box::from_raw(ctx_ptr);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            if capsule.is_null() {
+                return;
+            }
+            let name_ptr = pyffi::PyCapsule_GetName(capsule);
+            if name_ptr.is_null() {
+                return;
+            }
+            let name = CStr::from_ptr(name_ptr);
+            let Ok(name_str) = name.to_str() else {
+                return;
+            };
+            if name_str == "dltensor" {
+                let ptr = pyffi::PyCapsule_GetPointer(capsule, name_ptr) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = unsafe { (*ptr).deleter } {
+                        unsafe { del(ptr) };
+                    }
+                    let used = CString::new("used_dltensor").unwrap();
+                    let _ = unsafe { pyffi::PyCapsule_SetName(capsule, used.as_ptr()) };
+                }
+            } else if name_str == "dltensor_versioned" {
+                let ptr = pyffi::PyCapsule_GetPointer(capsule, name_ptr)
+                    as *mut DLManagedTensorVersioned;
+                if !ptr.is_null() {
+                    let manager = unsafe { (*ptr).manager };
+                    if !manager.is_null() {
+                        if let Some(del) = unsafe { (*manager).deleter } {
+                            unsafe { del(manager) };
+                        }
+                    }
+                    unsafe {
+                        drop(Box::from_raw(ptr));
+                    }
+                    let used = CString::new("used_dltensor_versioned").unwrap();
+                    let _ = unsafe { pyffi::PyCapsule_SetName(capsule, used.as_ptr()) };
+                }
+            }
+        }
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let total: i128 = (rows as i128) * (cols as i128);
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _arr: inner,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let manager_ref = unsafe { &*(mgr_ptr as *const ManagerCtx) };
+        let data_ptr = if total == 0 {
+            std::ptr::null_mut()
+        } else {
+            manager_ref
+                ._arr
+                .buf
+                .as_device_ptr()
+                .as_raw() as *mut c_void
+        };
+
+        let dl = DLTensor {
+            data: data_ptr,
+            device: DLDevice {
+                device_type: 2,
+                device_id: manager_ref._arr.device_id as i32,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: manager_ref.shape,
+            strides: manager_ref.strides,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: dl,
+            manager_ctx: mgr_ptr,
+            deleter: Some(managed_deleter),
+        });
+
+        let want_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
 // --- WASM Bindings ---
 
 /// Write ROC values directly to output slice - no allocations
@@ -1064,9 +1366,9 @@ impl RocStreamPy {
 pub fn roc_into_slice(dst: &mut [f64], input: &RocInput, kern: Kernel) -> Result<(), RocError> {
     let (data, period, first, chosen) = roc_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(RocError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(RocError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
     let warmup_end = first + period;
@@ -1143,69 +1445,67 @@ pub fn roc_into(
             roc_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
-        return Ok(());
+        Ok(())
     }
+}
 
-    // ---------------- CUDA Python bindings ----------------
-    #[cfg(all(feature = "python", feature = "cuda"))]
-    use crate::cuda::cuda_available;
-    #[cfg(all(feature = "python", feature = "cuda"))]
-    use crate::cuda::oscillators::roc_wrapper::CudaRoc;
-    #[cfg(all(feature = "python", feature = "cuda"))]
-    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::roc_wrapper::{CudaRoc, DeviceArrayF32Roc};
 
-    #[cfg(all(feature = "python", feature = "cuda"))]
-    #[pyfunction(name = "roc_cuda_batch_dev")]
-    #[pyo3(signature = (data, period_range, device_id=0))]
-    pub fn roc_cuda_batch_dev_py(
-        py: Python<'_>,
-        data: numpy::PyReadonlyArray1<'_, f32>,
-        period_range: (usize, usize, usize),
-        device_id: usize,
-    ) -> PyResult<DeviceArrayF32Py> {
-        if !cuda_available() {
-            return Err(PyValueError::new_err("CUDA not available"));
-        }
-        let prices = data.as_slice()?;
-        let sweep = RocBatchRange {
-            period: period_range,
-        };
-        let inner = py.allow_threads(|| {
-            let cuda = CudaRoc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.roc_batch_dev(prices, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
-        Ok(DeviceArrayF32Py { inner })
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "roc_cuda_batch_dev")]
+#[pyo3(signature = (data, period_range, device_id=0))]
+pub fn roc_cuda_batch_dev_py(
+    py: Python<'_>,
+    data: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<RocDeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
     }
+    let prices = data.as_slice()?;
+    let sweep = RocBatchRange {
+        period: period_range,
+    };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaRoc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.roc_batch_dev(prices, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(RocDeviceArrayF32Py { inner: Some(inner) })
+}
 
-    #[cfg(all(feature = "python", feature = "cuda"))]
-    #[pyfunction(name = "roc_cuda_many_series_one_param_dev")]
-    #[pyo3(signature = (data_tm, cols, rows, period, device_id=0))]
-    pub fn roc_cuda_many_series_one_param_dev_py(
-        py: Python<'_>,
-        data_tm: numpy::PyReadonlyArray1<'_, f32>,
-        cols: usize,
-        rows: usize,
-        period: usize,
-        device_id: usize,
-    ) -> PyResult<DeviceArrayF32Py> {
-        if !cuda_available() {
-            return Err(PyValueError::new_err("CUDA not available"));
-        }
-        let prices_tm = data_tm.as_slice()?;
-        let expected = cols
-            .checked_mul(rows)
-            .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
-        if prices_tm.len() != expected {
-            return Err(PyValueError::new_err("time-major input length mismatch"));
-        }
-        let inner = py.allow_threads(|| {
-            let cuda = CudaRoc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.roc_many_series_one_param_time_major_dev(prices_tm, cols, rows, period)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
-        Ok(DeviceArrayF32Py { inner })
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "roc_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm, cols, rows, period, device_id=0))]
+pub fn roc_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<RocDeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
     }
+    let prices_tm = data_tm.as_slice()?;
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if prices_tm.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
+    }
+    let inner = py.allow_threads(|| {
+        let cuda = CudaRoc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.roc_many_series_one_param_time_major_dev(prices_tm, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(RocDeviceArrayF32Py { inner: Some(inner) })
 }
 
 #[cfg(feature = "wasm")]

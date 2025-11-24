@@ -34,28 +34,33 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CudaStochError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaStochError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaStochError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaStochError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaStochError {}
 
 pub struct CudaStoch {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
 }
 
 pub struct CudaStochBatch {
@@ -66,10 +71,9 @@ pub struct CudaStochBatch {
 
 impl CudaStoch {
     pub fn new(device_id: usize) -> Result<Self, CudaStochError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/stoch_kernel.ptx"));
         let module = Module::from_ptx(
@@ -80,17 +84,59 @@ impl CudaStoch {
             ],
         )
         .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+        .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
         })
+    }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaStochError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaStochError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     // ---------------------- Batch (one series × many params) ----------------------
@@ -114,7 +160,7 @@ impl CudaStoch {
             })
             .ok_or_else(|| CudaStochError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = expand_grid_stoch(sweep);
+        let combos = expand_grid_stoch(sweep)?;
         if combos.is_empty() {
             return Err(CudaStochError::InvalidInput(
                 "no parameter combinations".into(),
@@ -128,39 +174,48 @@ impl CudaStoch {
             )));
         }
 
-        // Rough VRAM check: close + hh + ll + kraw + 2 * (rows*len outputs)
+        // VRAM estimate: close + hh + ll + kraw + K/D outputs (rows_total × len)
         let rows_total = combos.len();
-        let est_bytes = (len * 4) * (1 + 1 + 1 + 1) + (rows_total * len * 4) * 2;
-        if let Ok((free, _)) = mem_get_info() {
-            let headroom = 64 * 1024 * 1024usize;
-            if est_bytes.saturating_add(headroom) > free {
-                return Err(CudaStochError::InvalidInput(format!(
-                    "insufficient device memory: need ~{:.2} MB (incl. outputs)",
-                    (est_bytes as f64) / (1024.0 * 1024.0)
-                )));
-            }
-        }
+        let inputs_elems = len
+            .checked_mul(4)
+            .ok_or_else(|| CudaStochError::InvalidInput("size overflow".into()))?;
+        let outputs_elems = rows_total
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(2))
+            .ok_or_else(|| CudaStochError::InvalidInput("size overflow".into()))?;
+        let total_elems = inputs_elems
+            .checked_add(outputs_elems)
+            .ok_or_else(|| CudaStochError::InvalidInput("size overflow".into()))?;
+        let required_bytes = total_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaStochError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required_bytes, 64 * 1024 * 1024)?;
 
         // Upload base CLOSE once
-        let d_close = DeviceBuffer::from_slice(close_f32)
-            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close_f32).map_err(CudaStochError::Cuda)?;
 
         // Final outputs on device (row-major: [combos, len])
-        let total_out = rows_total * len;
-        let mut d_k: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }
-            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        let mut d_d: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }
-            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+        let total_out = rows_total
+            .checked_mul(len)
+            .ok_or_else(|| CudaStochError::InvalidInput("size overflow".into()))?;
+        let mut d_k: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total_out) }.map_err(CudaStochError::Cuda)?;
+        let mut d_d: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total_out) }.map_err(CudaStochError::Cuda)?;
 
         // Kernel handles
         let func_kraw = self
             .module
             .get_function("stoch_k_raw_from_hhll_f32")
-            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaStochError::MissingKernelSymbol {
+                name: "stoch_k_raw_from_hhll_f32",
+            })?;
         let func_pack = self
             .module
             .get_function("pack_row_broadcast_rowmajor_f32")
-            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaStochError::MissingKernelSymbol {
+                name: "pack_row_broadcast_rowmajor_f32",
+            })?;
 
         // Group parameter rows by fastk period so we reuse Kraw.
         use std::collections::HashMap;
@@ -203,22 +258,13 @@ impl CudaStoch {
 
             // Ensure device buffers sized
             if d_hh.as_ref().map(|b| b.len()).unwrap_or(0) != len {
-                d_hh = Some(
-                    unsafe { DeviceBuffer::uninitialized(len) }
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?,
-                );
+                d_hh = Some(unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaStochError::Cuda)?);
             }
             if d_ll.as_ref().map(|b| b.len()).unwrap_or(0) != len {
-                d_ll = Some(
-                    unsafe { DeviceBuffer::uninitialized(len) }
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?,
-                );
+                d_ll = Some(unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaStochError::Cuda)?);
             }
             if d_kraw.as_ref().map(|b| b.len()).unwrap_or(0) != len {
-                d_kraw = Some(
-                    unsafe { DeviceBuffer::uninitialized(len) }
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?,
-                );
+                d_kraw = Some(unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaStochError::Cuda)?);
             }
             let d_hh_ref = d_hh.as_mut().unwrap();
             let d_ll_ref = d_ll.as_mut().unwrap();
@@ -228,10 +274,10 @@ impl CudaStoch {
             unsafe {
                 d_hh_ref
                     .async_copy_from(&hh, &self.stream)
-                    .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    .map_err(CudaStochError::Cuda)?;
                 d_ll_ref
                     .async_copy_from(&ll, &self.stream)
-                    .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    .map_err(CudaStochError::Cuda)?;
             }
 
             // Launch raw %K (grid‑stride parallel)
@@ -256,7 +302,7 @@ impl CudaStoch {
                     ];
                     self.stream
                         .launch(&func_kraw, grid, block, 0, args)
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        .map_err(CudaStochError::Cuda)?;
                 }
             }
 
@@ -273,60 +319,60 @@ impl CudaStoch {
 
             for (sk_key, rows_sk) in by_slowk {
                 let first_kraw = first_valid + fkp - 1;
-                let d_first_kraw = DeviceBuffer::from_slice(&[first_kraw as i32])
-                    .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                let d_first_kraw =
+                    DeviceBuffer::from_slice(&[first_kraw as i32]).map_err(CudaStochError::Cuda)?;
                 // Compute slowK once from device d_kraw_ref (1 column time-major)
                 let slowk_dev_buf = if sk_key.ty == "sma" {
                     use crate::cuda::moving_averages::sma_wrapper::CudaSma;
-                    let sma = CudaSma::new(0).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    let sma = CudaSma::new(0)
+                        .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
                     let dev = sma
                         .sma_multi_series_one_param_time_major_dev_from_device(
                             d_kraw_ref, &d_first_kraw, 1, len, sk_key.p,
                         )
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
                     dev.buf
                 } else if sk_key.ty == "ema" {
                     // Fallback to host path (EMA lacks D2D variant currently)
                     use crate::cuda::moving_averages::ema_wrapper::CudaEma;
                     use crate::indicators::moving_averages::ema::EmaParams as EParams;
-                    let ema = CudaEma::new(0).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    let ema = CudaEma::new(0)
+                        .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
                     let mut kraw_host: LockedBuffer<f32> = unsafe {
-                        LockedBuffer::uninitialized(len)
-                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?
+                        LockedBuffer::uninitialized(len).map_err(CudaStochError::Cuda)?
                     };
                     unsafe {
                         d_kraw_ref
                             .async_copy_to(kraw_host.as_mut_slice(), &self.stream)
-                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                            .map_err(CudaStochError::Cuda)?;
                     }
                     self.stream
                         .synchronize()
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        .map_err(CudaStochError::Cuda)?;
                     let params = EParams { period: Some(sk_key.p) };
                     let dev = ema
                         .ema_many_series_one_param_time_major_dev(
                             kraw_host.as_slice(), 1, len, &params,
                         )
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
                     dev.buf
                 } else {
                     // Generic MA via selector: copy once to host then run selector
-                    let selector = CudaMaSelector::new(0);
-                    let mut kraw_host: LockedBuffer<f32> = unsafe {
-                        LockedBuffer::uninitialized(len)
-                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?
-                    };
-                    unsafe {
-                        d_kraw_ref
-                            .async_copy_to(kraw_host.as_mut_slice(), &self.stream)
-                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-                    }
-                    self.stream
-                        .synchronize()
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        let selector = CudaMaSelector::new(0);
+                        let mut kraw_host: LockedBuffer<f32> = unsafe {
+                            LockedBuffer::uninitialized(len).map_err(CudaStochError::Cuda)?
+                        };
+                        unsafe {
+                            d_kraw_ref
+                                .async_copy_to(kraw_host.as_mut_slice(), &self.stream)
+                                .map_err(CudaStochError::Cuda)?;
+                        }
+                        self.stream
+                            .synchronize()
+                            .map_err(CudaStochError::Cuda)?;
                     let dev = selector
                         .ma_to_device(&sk_key.ty, CudaMaData::SliceF32(kraw_host.as_slice()), sk_key.p)
-                        .map_err(|e| CudaStochError::Cuda(format!("slowK: {}", e)))?;
+                        .map_err(|e| CudaStochError::InvalidInput(format!("slowK: {}", e)))?;
                     dev.buf
                 };
 
@@ -334,7 +380,7 @@ impl CudaStoch {
                 {
                     let idx_i32: Vec<i32> = rows_sk.iter().map(|&r| r as i32).collect();
                     let d_rows = DeviceBuffer::from_slice(&idx_i32)
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        .map_err(CudaStochError::Cuda)?;
                     let (grid, block) = launch_1d(len);
                     unsafe {
                         let mut p_src = slowk_dev_buf.as_device_ptr().as_raw();
@@ -353,7 +399,7 @@ impl CudaStoch {
                         ];
                         self.stream
                             .launch(&func_pack, grid, block, 0, args)
-                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                            .map_err(CudaStochError::Cuda)?;
                     }
                 }
 
@@ -371,64 +417,64 @@ impl CudaStoch {
                 for (sd_key, rows_sd) in by_slowd {
                     let first_slowk = first_valid + fkp - 1 + sk_key.p - 1;
                     let d_first_slowk = DeviceBuffer::from_slice(&[first_slowk as i32])
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        .map_err(CudaStochError::Cuda)?;
                     // slowD once from device slowK
                     let slowd_dev_buf = if sd_key.ty == "sma" {
                         use crate::cuda::moving_averages::sma_wrapper::CudaSma;
-                        let sma = CudaSma::new(0).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        let sma = CudaSma::new(0)
+                            .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
                         let dev = sma
                             .sma_multi_series_one_param_time_major_dev_from_device(
                                 &slowk_dev_buf, &d_first_slowk, 1, len, sd_key.p,
                             )
-                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                            .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
                         dev.buf
                     } else if sd_key.ty == "ema" {
                         use crate::cuda::moving_averages::ema_wrapper::CudaEma;
                         use crate::indicators::moving_averages::ema::EmaParams as EParams;
-                        let ema = CudaEma::new(0).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        let ema = CudaEma::new(0)
+                            .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
                         let mut slowk_host: LockedBuffer<f32> = unsafe {
-                            LockedBuffer::uninitialized(len)
-                                .map_err(|e| CudaStochError::Cuda(e.to_string()))?
+                            LockedBuffer::uninitialized(len).map_err(CudaStochError::Cuda)?
                         };
                         unsafe {
                             slowk_dev_buf
                                 .async_copy_to(slowk_host.as_mut_slice(), &self.stream)
-                                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                                .map_err(CudaStochError::Cuda)?;
                         }
                         self.stream
                             .synchronize()
-                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                            .map_err(CudaStochError::Cuda)?;
                         let params = EParams { period: Some(sd_key.p) };
                         let dev = ema
                             .ema_many_series_one_param_time_major_dev(
                                 slowk_host.as_slice(), 1, len, &params,
                             )
-                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                            .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
                         dev.buf
                     } else {
                         let selector = CudaMaSelector::new(0);
                         let mut slowk_host: LockedBuffer<f32> = unsafe {
-                            LockedBuffer::uninitialized(len)
-                                .map_err(|e| CudaStochError::Cuda(e.to_string()))?
+                            LockedBuffer::uninitialized(len).map_err(CudaStochError::Cuda)?
                         };
                         unsafe {
                             slowk_dev_buf
                                 .async_copy_to(slowk_host.as_mut_slice(), &self.stream)
-                                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                                .map_err(CudaStochError::Cuda)?;
                         }
                         self.stream
                             .synchronize()
-                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                            .map_err(CudaStochError::Cuda)?;
                         let dev = selector
                             .ma_to_device(&sd_key.ty, CudaMaData::SliceF32(slowk_host.as_slice()), sd_key.p)
-                            .map_err(|e| CudaStochError::Cuda(format!("slowD: {}", e)))?;
+                            .map_err(|e| CudaStochError::InvalidInput(format!("slowD: {}", e)))?;
                         dev.buf
                     };
 
                     // Broadcast slowD into D matrix rows
                     let idx_i32: Vec<i32> = rows_sd.iter().map(|&r| r as i32).collect();
                     let d_rows = DeviceBuffer::from_slice(&idx_i32)
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        .map_err(CudaStochError::Cuda)?;
                     let (grid, block) = launch_1d(len);
                     unsafe {
                         let mut p_src = slowd_dev_buf.as_device_ptr().as_raw();
@@ -447,16 +493,14 @@ impl CudaStoch {
                         ];
                         self.stream
                             .launch(&func_pack, grid, block, 0, args)
-                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                            .map_err(CudaStochError::Cuda)?;
                     }
                 }
             }
         }
 
         // Ensure completion
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaStochError::Cuda)?;
 
         Ok(CudaStochBatch {
             k: DeviceArrayF32 { buf: d_k, rows: rows_total, cols: len },
@@ -480,7 +524,9 @@ impl CudaStoch {
                 "series dims must be positive".into(),
             ));
         }
-        let total = cols * rows;
+        let total = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaStochError::InvalidInput("size overflow in rows*cols".into()))?;
         if high_tm.len() != total || low_tm.len() != total || close_tm.len() != total {
             return Err(CudaStochError::InvalidInput(
                 "time-major inputs must all be rows*cols".into(),
@@ -519,29 +565,39 @@ impl CudaStoch {
             return Err(CudaStochError::InvalidInput("invalid fastk period".into()));
         }
 
+        // Approximate VRAM check: 3×inputs + K/D outputs (time-major)
+        let elems_inputs = total
+            .checked_mul(3)
+            .ok_or_else(|| CudaStochError::InvalidInput("size overflow".into()))?;
+        let elems_outputs = total
+            .checked_mul(2)
+            .ok_or_else(|| CudaStochError::InvalidInput("size overflow".into()))?;
+        let total_elems = elems_inputs
+            .checked_add(elems_outputs)
+            .ok_or_else(|| CudaStochError::InvalidInput("size overflow".into()))?;
+        let required_bytes = total_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaStochError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required_bytes, 64 * 1024 * 1024)?;
+
         // H2D
-        let d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        let d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        let mut d_k_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
-            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high_tm).map_err(CudaStochError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low_tm).map_err(CudaStochError::Cuda)?;
+        let d_close = DeviceBuffer::from_slice(close_tm).map_err(CudaStochError::Cuda)?;
+        let d_high = DeviceBuffer::from_slice(high_tm).map_err(CudaStochError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low_tm).map_err(CudaStochError::Cuda)?;
+        let d_close = DeviceBuffer::from_slice(close_tm).map_err(CudaStochError::Cuda)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(CudaStochError::Cuda)?;
+        let mut d_k_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total) }.map_err(CudaStochError::Cuda)?;
 
         // Kernel: raw %K time-major
         let func = self
             .module
             .get_function("stoch_many_series_one_param_f32")
-            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaStochError::MissingKernelSymbol {
+                name: "stoch_many_series_one_param_f32",
+            })?;
         let block_x: u32 = 256;
         let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
         let block: BlockSize = (block_x, 1, 1).into();
@@ -567,7 +623,7 @@ impl CudaStoch {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                .map_err(CudaStochError::Cuda)?;
         }
 
         // Smoothing (native SMA/EMA many-series path if available; otherwise per-series)
@@ -575,20 +631,22 @@ impl CudaStoch {
         let k_tm: DeviceBuffer<f32> = if slowk_ty.eq_ignore_ascii_case("sma") {
             use crate::cuda::moving_averages::sma_wrapper::CudaSma;
             use crate::indicators::moving_averages::sma::SmaParams as SParams;
-            let sma = CudaSma::new(0).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+            let sma = CudaSma::new(0)
+                .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             let params = SParams { period: Some(slowk_p) };
             let dev = sma
                 .sma_multi_series_one_param_time_major_dev_from_device(
                     &d_k_tm, &d_first, cols, rows, slowk_p,
                 )
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             dev.buf
         } else if slowk_ty.eq_ignore_ascii_case("ema") {
             use crate::cuda::moving_averages::ema_wrapper::CudaEma;
-            let ema = CudaEma::new(0).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+            let ema = CudaEma::new(0)
+                .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             // Compute EMA directly from device buffers (no host staging)
-            let mut d_k_sm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+            let mut d_k_sm: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(total) }.map_err(CudaStochError::Cuda)?;
             let alpha = 2.0f32 / (slowk_p as f32 + 1.0);
             ema
                 .ema_many_series_one_param_device(
@@ -600,7 +658,7 @@ impl CudaStoch {
                     rows,
                     &mut d_k_sm,
                 )
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             d_k_sm
         } else {
             // Fallback: per-series via selector
@@ -609,7 +667,7 @@ impl CudaStoch {
             let mut k_tm_host = vec![0f32; total];
             d_k_tm
                 .copy_to(&mut k_tm_host)
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                .map_err(CudaStochError::Cuda)?;
             let mut out_tm = vec![f32::NAN; total];
             for s in 0..cols {
                 let mut series = vec![f32::NAN; rows];
@@ -618,38 +676,40 @@ impl CudaStoch {
                 }
                 let dev = selector
                     .ma_to_device(slowk_ty, CudaMaData::SliceF32(&series), slowk_p)
-                    .map_err(|e| CudaStochError::Cuda(format!("slowK many-series: {}", e)))?;
+                    .map_err(|e| CudaStochError::InvalidInput(format!("slowK many-series: {}", e)))?;
                 let mut host_row = vec![0f32; rows];
                 dev.buf
                     .copy_to(&mut host_row)
-                    .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    .map_err(CudaStochError::Cuda)?;
                 for r in 0..rows {
                     out_tm[r * cols + s] = host_row[r];
                 }
             }
             let mut tmp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                .map_err(CudaStochError::Cuda)?;
             tmp.copy_from(&out_tm)
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                .map_err(CudaStochError::Cuda)?;
             tmp
         };
 
         // D smoothing over K_slow
         let d_tm: DeviceBuffer<f32> = if slowd_ty.eq_ignore_ascii_case("sma") {
             use crate::cuda::moving_averages::sma_wrapper::CudaSma;
-            let sma = CudaSma::new(0).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+            let sma = CudaSma::new(0)
+                .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             let dev = sma
                 .sma_multi_series_one_param_time_major_dev_from_device(
                     &k_tm, &d_first, cols, rows, slowd_p,
                 )
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             dev.buf
         } else if slowd_ty.eq_ignore_ascii_case("ema") {
             use crate::cuda::moving_averages::ema_wrapper::CudaEma;
-            let ema = CudaEma::new(0).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+            let ema = CudaEma::new(0)
+                .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             // Compute EMA directly from device buffers (no host staging)
             let mut d_d_sm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                .map_err(CudaStochError::Cuda)?;
             let alpha = 2.0f32 / (slowd_p as f32 + 1.0);
             ema
                 .ema_many_series_one_param_device(
@@ -661,14 +721,14 @@ impl CudaStoch {
                     rows,
                     &mut d_d_sm,
                 )
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             d_d_sm
         } else {
             // Fallback: per-series via selector again
             let selector = CudaMaSelector::new(0);
             let mut k_tm_host = vec![0f32; total];
             k_tm.copy_to(&mut k_tm_host)
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                .map_err(CudaStochError::Cuda)?;
             let mut out_tm = vec![f32::NAN; total];
             for s in 0..cols {
                 let mut series = vec![f32::NAN; rows];
@@ -677,21 +737,24 @@ impl CudaStoch {
                 }
                 let dev = selector
                     .ma_to_device(slowd_ty, CudaMaData::SliceF32(&series), slowd_p)
-                    .map_err(|e| CudaStochError::Cuda(format!("slowD many-series: {}", e)))?;
+                    .map_err(|e| CudaStochError::InvalidInput(format!("slowD many-series: {}", e)))?;
                 let mut host_row = vec![0f32; rows];
                 dev.buf
                     .copy_to(&mut host_row)
-                    .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    .map_err(CudaStochError::Cuda)?;
                 for r in 0..rows {
                     out_tm[r * cols + s] = host_row[r];
                 }
             }
             let mut tmp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                .map_err(CudaStochError::Cuda)?;
             tmp.copy_from(&out_tm)
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                .map_err(CudaStochError::Cuda)?;
             tmp
         };
+
+        // Ensure producing work is complete so Python interop can omit 'stream'.
+        self.stream.synchronize().map_err(CudaStochError::Cuda)?;
 
         Ok((
             DeviceArrayF32 {
@@ -709,24 +772,54 @@ impl CudaStoch {
 }
 
 // -------- helpers --------
-fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaStochError> {
     if step == 0 || start == end {
-        return vec![start];
+        return Ok(vec![start]);
     }
+
     let mut v = Vec::new();
-    let mut x = start;
-    while x <= end {
-        v.push(x);
-        x = x.saturating_add(step);
+    if start < end {
+        let mut x = start;
+        loop {
+            v.push(x);
+            match x.checked_add(step) {
+                Some(next) if next <= end => x = next,
+                Some(_) | None => break,
+            }
+        }
+    } else {
+        let mut x = start;
+        loop {
+            v.push(x);
+            match x.checked_sub(step) {
+                Some(next) if next >= end => x = next,
+                Some(_) | None => break,
+            }
+        }
     }
-    v
+
+    if v.is_empty() {
+        Err(CudaStochError::InvalidInput(format!(
+            "invalid range: start={} end={} step={}",
+            start, end, step
+        )))
+    } else {
+        Ok(v)
+    }
 }
 
-fn expand_grid_stoch(r: &StochBatchRange) -> Vec<StochParams> {
-    let fastk = axis_usize(r.fastk_period);
-    let slowk = axis_usize(r.slowk_period);
-    let slowd = axis_usize(r.slowd_period);
-    let mut out = Vec::new();
+fn expand_grid_stoch(r: &StochBatchRange) -> Result<Vec<StochParams>, CudaStochError> {
+    let fastk = axis_usize(r.fastk_period)?;
+    let slowk = axis_usize(r.slowk_period)?;
+    let slowd = axis_usize(r.slowd_period)?;
+
+    let combos_len = fastk
+        .len()
+        .checked_mul(slowk.len())
+        .and_then(|v| v.checked_mul(slowd.len()))
+        .ok_or_else(|| CudaStochError::InvalidInput("size overflow in expand_grid_stoch".into()))?;
+
+    let mut out = Vec::with_capacity(combos_len);
     for fk in &fastk {
         for sk in &slowk {
             for sd in &slowd {
@@ -740,7 +833,7 @@ fn expand_grid_stoch(r: &StochBatchRange) -> Vec<StochParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 // ---------- Benches ----------

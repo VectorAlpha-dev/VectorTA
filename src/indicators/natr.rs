@@ -16,6 +16,7 @@
 //! **Streaming**: O(1) – minimal state Wilder update (prev_close, sum_tr warmup, atr)
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
 //! Note: Streaming path refactored to lean Wilder kernel; matches batch outputs.
+//! **Decision log**: SIMD enabled (AVX2/AVX512 TR batching with scalar recurrence); CUDA wrapper present; Python CUDA interop exposes CAI v3 + DLPack v1.x; scalar path remains the reference implementation.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -177,13 +178,21 @@ impl NatrBuilder {
 #[derive(Debug, Error)]
 pub enum NatrError {
     #[error("natr: Empty data provided for NATR.")]
+    EmptyInputData,
+    #[error("natr: All values are NaN.")]
+    AllValuesNaN,
+    #[error("natr: Empty data provided for NATR.")]
     EmptyData,
     #[error("natr: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("natr: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("natr: All values are NaN.")]
-    AllValuesNaN,
+    #[error("natr: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("natr: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("natr: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("natr: Mismatched lengths: expected = {expected}, actual = {actual}")]
     MismatchedLength { expected: usize, actual: usize },
 }
@@ -205,7 +214,7 @@ pub fn natr_with_kernel(input: &NatrInput, kernel: Kernel) -> Result<NatrOutput,
     };
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(NatrError::EmptyData);
+        return Err(NatrError::EmptyInputData);
     }
 
     let len_h = high.len();
@@ -885,10 +894,7 @@ pub fn natr_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(NatrError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(NatrError::InvalidKernelForBatch(k));
         }
     };
     let simd = match kernel {
@@ -922,19 +928,59 @@ impl NatrBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &NatrBatchRange) -> Vec<NatrParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &NatrBatchRange) -> Result<Vec<NatrParams>, NatrError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, NatrError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+
+        let mut values = Vec::new();
+        let step_u = step;
+
+        if start <= end {
+            let mut v = start;
+            loop {
+                if v > end {
+                    break;
+                }
+                values.push(v);
+                match v.checked_add(step_u) {
+                    Some(next) => v = next,
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            loop {
+                if v < end {
+                    break;
+                }
+                values.push(v);
+                match v.checked_sub(step_u) {
+                    Some(next) => v = next,
+                    None => break,
+                }
+            }
+        }
+
+        if values.is_empty() {
+            return Err(NatrError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+
+        Ok(values)
     }
-    let periods = axis_usize(r.period);
+
+    let periods = axis_usize(r.period)?;
+
     let mut out = Vec::with_capacity(periods.len());
-    for &p in &periods {
+    for p in periods {
         out.push(NatrParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -968,13 +1014,7 @@ fn natr_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<NatrBatchOutput, NatrError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(NatrError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let len_h = high.len();
     let len_l = low.len();
@@ -1149,13 +1189,7 @@ fn natr_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<NatrParams>, NatrError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(NatrError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let len_h = high.len();
     let len_l = low.len();
@@ -2294,10 +2328,13 @@ pub fn natr_batch_py<'py>(
     let sweep = NatrBatchRange {
         period: period_range,
     };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("natr_batch: rows*cols overflow"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
@@ -2379,15 +2416,15 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
     let len = high.len().min(low.len()).min(close.len());
 
     if dst.len() != len {
-        return Err(NatrError::MismatchedLength {
+        return Err(NatrError::OutputLengthMismatch {
             expected: len,
-            actual: dst.len(),
+            got: dst.len(),
         });
     }
 
     // Validate parameters
     if len == 0 {
-        return Err(NatrError::EmptyData);
+        return Err(NatrError::EmptyInputData);
     }
     if period == 0 {
         return Err(NatrError::InvalidPeriod {
@@ -2619,11 +2656,15 @@ pub fn natr_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("natr_batch_into: rows*cols overflow"))?;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         natr_batch_inner_into(high, low, close, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2638,6 +2679,7 @@ pub fn register_natr_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
     m.add_function(wrap_pyfunction!(natr_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
     {
+        m.add_class::<NatrDeviceArrayF32Py>()?;
         m.add_function(wrap_pyfunction!(natr_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(natr_cuda_many_series_one_param_dev_py, m)?)?;
     }
@@ -2646,7 +2688,329 @@ pub fn register_natr_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
 
 // ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::natr_wrapper::DeviceArrayF32Natr;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::exceptions::PyBufferError;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::types::PyAny;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct NatrDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl NatrDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Producer stream is synchronized before returning; omit `stream`.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<&PyAny>,
+        max_version: Option<&PyAny>,
+        dl_device: Option<&PyAny>,
+        copy: Option<&PyAny>,
+    ) -> PyResult<PyObject> {
+        use std::ffi::{c_void, CStr};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLPackVersion { major: u32, minor: u32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: Arc<Context>,
+        }
+
+        extern "C" fn managed_deleter_legacy(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn managed_deleter_versioned(p: *mut DLManagedTensorVersioned) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                if capsule.is_null() {
+                    return;
+                }
+                let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule);
+                if name_ptr.is_null() {
+                    return;
+                }
+                let cname = CStr::from_ptr(name_ptr);
+                if cname.to_bytes() != b"dltensor" {
+                    return;
+                }
+                let expected = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    expected.as_ptr() as *const _,
+                ) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter {
+                        del(ptr);
+                    }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        extern "C" fn capsule_destructor_versioned(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                if capsule.is_null() {
+                    return;
+                }
+                let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule);
+                if name_ptr.is_null() {
+                    return;
+                }
+                let cname = CStr::from_ptr(name_ptr);
+                if cname.to_bytes() != b"dltensor_versioned" {
+                    return;
+                }
+                let expected = b"dltensor_versioned\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    expected.as_ptr() as *const _,
+                ) as *mut DLManagedTensorVersioned;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter {
+                        del(ptr);
+                    }
+                    let used = b"used_dltensor_versioned\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        // Array API: max_version negotiation (default to versioned when unspecified).
+        let max_ver_tuple: Option<(u32, u32)> = match max_version {
+            Some(v) => Some(v.extract()?),
+            None => None,
+        };
+        let use_versioned = match max_ver_tuple {
+            Some((maj, _)) => maj >= 1,
+            None => true,
+        };
+
+        // dl_device, if provided, must match this buffer.
+        if let Some(dev_obj) = dl_device {
+            let (dev_ty, dev_id): (i32, i32) = dev_obj.extract()?;
+            if dev_ty != 2 || dev_id != self.device_id as i32 {
+                return Err(PyBufferError::new_err(
+                    "__dlpack__: requested device does not match producer buffer",
+                ));
+            }
+        }
+
+        // copy=True is not supported (no cross-device copy path here).
+        if let Some(copy_obj) = copy {
+            let do_copy: bool = copy_obj.extract()?;
+            if do_copy {
+                return Err(PyBufferError::new_err(
+                    "__dlpack__(copy=True) not supported for natr CUDA buffers",
+                ));
+            }
+        }
+
+        // Stream semantics: producer work is synchronized before __dlpack__ is called.
+        if let Some(_s) = stream {
+            // Accepted but intentionally ignored; no extra sync.
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let nelems = (rows as usize)
+            .checked_mul(cols as usize)
+            .ok_or_else(|| PyValueError::new_err("natr: rows*cols overflow in __dlpack__"))?;
+
+        let data_ptr = if nelems == 0 {
+            std::ptr::null_mut()
+        } else {
+            self.buf
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?
+                .as_device_ptr()
+                .as_raw() as *mut c_void
+        };
+
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1i64]);
+        let guard = Box::new(DlpGuard {
+            _shape: shape,
+            _strides: strides,
+            _ctx: self.ctx.clone(),
+        });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        if use_versioned {
+            let mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 0 },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(managed_deleter_versioned),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+            });
+            let mt_raw = Box::into_raw(mt);
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_raw as *mut c_void,
+                    name.as_ptr() as *const _,
+                    Some(capsule_destructor_versioned),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { managed_deleter_versioned(mt_raw) };
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "failed to create DLPack versioned capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(managed_deleter_legacy),
+            });
+            let mt_raw = Box::into_raw(mt);
+            let name = b"dltensor\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_raw as *mut c_void,
+                    name.as_ptr() as *const _,
+                    Some(capsule_destructor_legacy),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { managed_deleter_legacy(mt_raw) };
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "failed to create DLPack capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "natr_cuda_batch_dev")]
@@ -2658,7 +3022,7 @@ pub fn natr_cuda_batch_dev_py(
     close: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<NatrDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaNatr;
 
@@ -2674,13 +3038,20 @@ pub fn natr_cuda_batch_dev_py(
     let sweep = NatrBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let dev = py.allow_threads(|| {
         let mut cuda =
             CudaNatr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.natr_batch_dev(h, l, c, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let DeviceArrayF32Natr { buf, rows, cols, ctx, device_id } = dev;
+    Ok(NatrDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        ctx,
+        device_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2693,7 +3064,7 @@ pub fn natr_cuda_many_series_one_param_dev_py(
     close_tm: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<NatrDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaNatr;
     use numpy::PyUntypedArrayMethods;
@@ -2707,11 +3078,18 @@ pub fn natr_cuda_many_series_one_param_dev_py(
     let rows = high_tm.shape()[0];
     let cols = high_tm.shape()[1];
 
-    let inner = py.allow_threads(|| {
+    let dev = py.allow_threads(|| {
         let mut cuda =
             CudaNatr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.natr_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let DeviceArrayF32Natr { buf, rows, cols, ctx, device_id } = dev;
+    Ok(NatrDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        ctx,
+        device_id,
+    })
 }

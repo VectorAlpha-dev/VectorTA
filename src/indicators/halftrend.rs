@@ -323,6 +323,15 @@ pub enum HalfTrendError {
 
     #[error("halftrend: Invalid channel_deviation: {channel_deviation}")]
     InvalidChannelDeviation { channel_deviation: f64 },
+
+    #[error("halftrend: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("halftrend: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+
+    #[error("halftrend: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 // ==================== CALCULATION FUNCTIONS ====================
@@ -1107,10 +1116,7 @@ pub fn halftrend_into_slices(
         || out_buy_signal.len() != len
         || out_sell_signal.len() != len
     {
-        return Err(HalfTrendError::InvalidPeriod {
-            period: out_halftrend.len(),
-            data_len: len,
-        });
+        return Err(HalfTrendError::OutputLengthMismatch { expected: len, got: out_halftrend.len() });
     }
 
     let amplitude = input.get_amplitude();
@@ -1220,10 +1226,7 @@ pub fn halftrend_into_slices_kernel(
         || out_buy_signal.len() != len
         || out_sell_signal.len() != len
     {
-        return Err(HalfTrendError::InvalidPeriod {
-            period: out_halftrend.len(),
-            data_len: len,
-        });
+        return Err(HalfTrendError::OutputLengthMismatch { expected: len, got: out_halftrend.len() });
     }
 
     let amplitude = input.get_amplitude();
@@ -2388,29 +2391,18 @@ fn halftrend_batch_with_kernel_slices(
     sweep: &HalfTrendBatchRange,
     k: Kernel,
 ) -> Result<HalfTrendBatchOutput, HalfTrendError> {
-    let combos = expand_grid_halftrend(sweep);
+    let combos = expand_grid_halftrend(sweep)?;
     let rows = combos.len();
     let cols = close.len();
 
     if cols == 0 {
         return Err(HalfTrendError::EmptyInputData);
     }
-    if combos.is_empty() {
-        return Err(HalfTrendError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
 
     let batch = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(HalfTrendError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(HalfTrendError::InvalidKernelForBatch(k)),
     };
     let simd = match batch {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -2418,6 +2410,11 @@ fn halftrend_batch_with_kernel_slices(
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => Kernel::Scalar, // fallback
     };
+
+    // Checked arithmetic for rows*cols
+    let _cap = rows
+        .checked_mul(cols)
+        .ok_or_else(|| HalfTrendError::InvalidRange { start: "rows".into(), end: "cols".into(), step: "mul".into() })?;
 
     // Allocate 6 matrices with zero extra init in release
     let mut mu_ht = make_uninit_matrix(rows, cols);
@@ -2485,45 +2482,59 @@ fn halftrend_batch_with_kernel_slices(
     })
 }
 
-fn expand_grid_halftrend(r: &HalfTrendBatchRange) -> Vec<HalfTrendParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
+fn expand_grid_halftrend(r: &HalfTrendBatchRange) -> Result<Vec<HalfTrendParams>, HalfTrendError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, HalfTrendError> {
+        if step == 0 || start == end { return Ok(vec![start]); }
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
         }
-        (start..=end).step_by(step).collect()
+        // reversed bounds
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i { v.push(x as usize); x -= st; }
+        if v.is_empty() {
+            return Err(HalfTrendError::InvalidRange { start: start.to_string(), end: end.to_string(), step: step.to_string() });
+        }
+        Ok(v)
     }
-
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, HalfTrendError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return Ok(vec![start]); }
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 { v.push(x); x += st; }
+            if v.is_empty() { return Err(HalfTrendError::InvalidRange { start: start.to_string(), end: end.to_string(), step: step.to_string() }); }
+            return Ok(v);
         }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
-        }
-        v
+        let st = step.abs();
+        while x + 1e-12 >= end { v.push(x); x -= st; }
+        if v.is_empty() { return Err(HalfTrendError::InvalidRange { start: start.to_string(), end: end.to_string(), step: step.to_string() }); }
+        Ok(v)
     }
 
-    let amplitudes = axis_usize(r.amplitude);
-    let channel_deviations = axis_f64(r.channel_deviation);
-    let atr_periods = axis_usize(r.atr_period);
+    let amplitudes = axis_usize(r.amplitude)?;
+    let channel_deviations = axis_f64(r.channel_deviation)?;
+    let atr_periods = axis_usize(r.atr_period)?;
 
-    let mut out =
-        Vec::with_capacity(amplitudes.len() * channel_deviations.len() * atr_periods.len());
+    let cap = amplitudes.len()
+        .checked_mul(channel_deviations.len())
+        .and_then(|x| x.checked_mul(atr_periods.len()))
+        .ok_or_else(|| HalfTrendError::InvalidRange { start: "cap".into(), end: "overflow".into(), step: "mul".into() })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &a in &amplitudes {
         for &c in &channel_deviations {
             for &p in &atr_periods {
-                out.push(HalfTrendParams {
-                    amplitude: Some(a),
-                    channel_deviation: Some(c),
-                    atr_period: Some(p),
-                });
+                out.push(HalfTrendParams { amplitude: Some(a), channel_deviation: Some(c), atr_period: Some(p) });
             }
         }
     }
-    out
+    Ok(out)
 }
 
 // ==================== BATCH PROCESSING HELPERS ====================
@@ -2790,13 +2801,7 @@ pub fn halftrend_batch_rows_into(
     dst_buy: &mut [f64],
     dst_sell: &mut [f64],
 ) -> Result<Vec<HalfTrendParams>, HalfTrendError> {
-    let combos = expand_grid_halftrend(sweep);
-    if combos.is_empty() {
-        return Err(HalfTrendError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_halftrend(sweep)?;
 
     let len = high.len();
     let first = first_valid_ohlc(high, low, close);
@@ -3046,7 +3051,8 @@ pub fn halftrend_batch_py<'py>(
         range.atr_period = (v, v, 0);
     }
 
-    let combos = expand_grid_halftrend(&range);
+    let combos = expand_grid_halftrend(&range)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     if combos.is_empty() {
         return Err(PyValueError::new_err("empty sweep"));
     }
@@ -3054,12 +3060,15 @@ pub fn halftrend_batch_py<'py>(
     let cols = h.len();
 
     // Allocate NumPy outputs (uninitialized)
-    let arr_ht = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let arr_tr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let arr_ah = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let arr_al = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let arr_bs = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let arr_ss = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("halftrend_batch: rows*cols overflow"))?;
+    let arr_ht = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let arr_tr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let arr_ah = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let arr_al = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let arr_bs = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let arr_ss = unsafe { PyArray1::<f64>::new(py, [total], false) };
 
     let dst_ht = unsafe { arr_ht.as_slice_mut()? };
     let dst_tr = unsafe { arr_tr.as_slice_mut()? };
@@ -3116,12 +3125,19 @@ pub fn halftrend_batch_py<'py>(
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     // Stack all 6 series vertically to match ALMA format
-    let total_rows = rows * 6;
-    let stacked = unsafe { PyArray1::<f64>::new(py, [total_rows * cols], false) };
+    let total_rows = rows
+        .checked_mul(6)
+        .ok_or_else(|| PyValueError::new_err("halftrend_batch: rows*6 overflow"))?;
+    let total_stacked = total_rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("halftrend_batch: stacked size overflow"))?;
+    let stacked = unsafe { PyArray1::<f64>::new(py, [total_stacked], false) };
     let dst_stacked = unsafe { stacked.as_slice_mut()? };
 
     // Copy each series into the stacked buffer
-    let block = rows * cols;
+    let block = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("halftrend_batch: block size overflow"))?;
     dst_stacked[0..block].copy_from_slice(dst_ht);
     dst_stacked[block..2 * block].copy_from_slice(dst_tr);
     dst_stacked[2 * block..3 * block].copy_from_slice(dst_ah);
@@ -3192,52 +3208,28 @@ pub fn halftrend_cuda_batch_dev_py<'py>(
         channel_deviation: channel_deviation_range,
         atr_period: atr_period_range,
     };
-    let batch = py.allow_threads(|| {
-        let cuda =
-            CudaHalftrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.halftrend_batch_dev(h, l, c, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (batch, ctx_arc, dev_id) = py.allow_threads(|| {
+        let cuda = CudaHalftrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let out = cuda.halftrend_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
     })?;
     let dict = PyDict::new(py);
     dict.set_item(
         "halftrend",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: batch.halftrend,
-            },
-        )?,
+        Py::new(py, DeviceArrayF32Py { inner: batch.halftrend, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?,
     )?;
-    dict.set_item(
-        "trend",
-        Py::new(py, DeviceArrayF32Py { inner: batch.trend })?,
-    )?;
+    dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: batch.trend, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?)?;
     dict.set_item(
         "atr_high",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: batch.atr_high,
-            },
-        )?,
+        Py::new(py, DeviceArrayF32Py { inner: batch.atr_high, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?,
     )?;
     dict.set_item(
         "atr_low",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: batch.atr_low,
-            },
-        )?,
+        Py::new(py, DeviceArrayF32Py { inner: batch.atr_low, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?,
     )?;
-    dict.set_item(
-        "buy_signal",
-        Py::new(py, DeviceArrayF32Py { inner: batch.buy })?,
-    )?;
-    dict.set_item(
-        "sell_signal",
-        Py::new(py, DeviceArrayF32Py { inner: batch.sell })?,
-    )?;
+    dict.set_item("buy_signal", Py::new(py, DeviceArrayF32Py { inner: batch.buy, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?)?;
+    dict.set_item("sell_signal", Py::new(py, DeviceArrayF32Py { inner: batch.sell, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?)?;
     use numpy::IntoPyArray;
     dict.set_item(
         "amplitudes",
@@ -3290,53 +3282,26 @@ pub fn halftrend_cuda_many_series_one_param_dev_py<'py>(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let out = py.allow_threads(|| {
-        let cuda =
-            CudaHalftrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.halftrend_many_series_one_param_time_major_dev(
-            h,
-            l,
-            c,
-            cols,
-            rows,
-            amplitude,
-            channel_deviation,
-            atr_period,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (out, ctx_arc, dev_id) = py.allow_threads(|| {
+        let cuda = CudaHalftrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let out = cuda.halftrend_many_series_one_param_time_major_dev(
+            h, l, c, cols, rows, amplitude, channel_deviation, atr_period,
+        ).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
     })?;
     let dict = PyDict::new(py);
     dict.set_item(
         "halftrend",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: out.halftrend,
-            },
-        )?,
+        Py::new(py, DeviceArrayF32Py { inner: out.halftrend, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?,
     )?;
-    dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: out.trend })?)?;
+    dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: out.trend, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?)?;
     dict.set_item(
         "atr_high",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: out.atr_high,
-            },
-        )?,
+        Py::new(py, DeviceArrayF32Py { inner: out.atr_high, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?,
     )?;
-    dict.set_item(
-        "atr_low",
-        Py::new(py, DeviceArrayF32Py { inner: out.atr_low })?,
-    )?;
-    dict.set_item(
-        "buy_signal",
-        Py::new(py, DeviceArrayF32Py { inner: out.buy })?,
-    )?;
-    dict.set_item(
-        "sell_signal",
-        Py::new(py, DeviceArrayF32Py { inner: out.sell })?,
-    )?;
+    dict.set_item("atr_low", Py::new(py, DeviceArrayF32Py { inner: out.atr_low, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?)?;
+    dict.set_item("buy_signal", Py::new(py, DeviceArrayF32Py { inner: out.buy, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?)?;
+    dict.set_item("sell_signal", Py::new(py, DeviceArrayF32Py { inner: out.sell, _ctx: Some(ctx_arc), device_id: Some(dev_id) })?)?;
     Ok(dict)
 }
 
@@ -3475,8 +3440,11 @@ pub fn halftrend_js(
     let input = HalfTrendInput::from_slices(high, low, close, params);
 
     let cols = high.len();
-    let rows = 6;
-    let mut values = vec![0.0; rows * cols];
+    let rows: usize = 6;
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("halftrend: rows*cols overflow"))?;
+    let mut values = vec![0.0; total];
 
     // Split flattened buffer into 6 row views
     let (ht, rest) = values.split_at_mut(cols);
@@ -3693,7 +3661,8 @@ pub fn halftrend_batch_unified_js(
     };
 
     // Compute using zero-copy inner into six separate buffers, then pack
-    let combos = expand_grid_halftrend(&sweep);
+    let combos = expand_grid_halftrend(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows_ind = combos.len();
     let cols = high.len();
 
@@ -3770,7 +3739,8 @@ pub fn halftrend_batch_into(
             channel_deviation: (ch_start, ch_end, ch_step),
             atr_period: (atr_start, atr_end, atr_step),
         };
-        let combos = expand_grid_halftrend(&sweep);
+        let combos = expand_grid_halftrend(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows_ind = combos.len(); // indicator rows
         let cols = len;
 

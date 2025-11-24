@@ -1,17 +1,15 @@
 //! CUDA wrapper for Donchian Channels (upper, middle, lower).
 //!
-//! Parity with ALMA-style wrappers:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/donchian_kernel.ptx"))
-//! - Non-blocking stream; DetermineTargetFromContext + O2 with fallbacks
-//! - VRAM checks with ~64MB headroom; simple grid policies
+//! Notes:
+//! - PTX loaded from OUT_DIR with DetermineTargetFromContext + OptLevel O2 fallbacks.
+//! - Returns VRAM-backed handles carrying an Arc<Context> and device_id for safe interop.
+//! - Typed errors, MissingKernelSymbol mapping, and will_fit() VRAM checks.
 //! - Public device entry points:
 //!     - `donchian_batch_dev(&[f32], &[f32], &DonchianBatchRange)` -> (DeviceArrayF32Triplet, Vec<DonchianParams>)
 //!     - `donchian_many_series_one_param_time_major_dev(&[f32], cols, rows, &DonchianParams)` -> DeviceArrayF32Triplet
 
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::DeviceArrayF32;
-use crate::cuda::wto_wrapper::DeviceArrayF32Triplet;
 use crate::indicators::donchian::{DonchianBatchRange, DonchianParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -23,22 +21,53 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+/// VRAM-backed array handle for Donchian with context guard and device id
+pub struct DeviceArrayF32 {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
+}
+impl DeviceArrayF32 {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    #[inline]
+    pub fn len(&self) -> usize { self.rows * self.cols }
+}
+
+pub struct DeviceArrayF32Triplet {
+    pub wt1: DeviceArrayF32,
+    pub wt2: DeviceArrayF32,
+    pub hist: DeviceArrayF32,
+}
+impl DeviceArrayF32Triplet {
+    #[inline] pub fn rows(&self) -> usize { self.wt1.rows }
+    #[inline] pub fn cols(&self) -> usize { self.wt1.cols }
+}
+
+#[derive(Debug, Error)]
 pub enum CudaDonchianError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaDonchianError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaDonchianError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaDonchianError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaDonchianError {}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum BatchKernelPolicy {
@@ -74,7 +103,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaDonchian {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaDonchianPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -84,10 +114,9 @@ pub struct CudaDonchian {
 
 impl CudaDonchian {
     pub fn new(device_id: usize) -> Result<Self, CudaDonchianError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/donchian_kernel.ptx"));
         let jit_opts = &[
@@ -96,22 +125,32 @@ impl CudaDonchian {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaDonchianPolicy::default(),
             last_batch: None,
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
         })
+    }
+
+    #[inline]
+    fn validate_launch(grid: GridSize, block: BlockSize) -> Result<(), CudaDonchianError> {
+        let (gx, gy, gz) = (grid.x, grid.y, grid.z);
+        let (bx, by, bz) = (block.x, block.y, block.z);
+        let threads = (bx as u64) * (by as u64) * (bz as u64);
+        if threads > 1024 {
+            return Err(CudaDonchianError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
     }
 
     pub fn set_policy(&mut self, policy: CudaDonchianPolicy) {
@@ -134,15 +173,17 @@ impl CudaDonchian {
     #[inline]
     fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaDonchianError> {
+        if !Self::mem_check_enabled() { return Ok(()); }
+        match Self::device_mem_info() {
+            Some((free, _)) => {
+                if required_bytes.saturating_add(headroom_bytes) <= free {
+                    Ok(())
+                } else {
+                    Err(CudaDonchianError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                }
+            }
+            None => Ok(()),
         }
     }
     #[inline]
@@ -192,18 +233,25 @@ impl CudaDonchian {
         }
     }
 
-    fn expand_grid(range: &DonchianBatchRange) -> Vec<DonchianParams> {
-        fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-            if step == 0 || start == end {
-                return vec![start];
+    fn expand_grid(range: &DonchianBatchRange) -> Result<Vec<DonchianParams>, CudaDonchianError> {
+        fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaDonchianError> {
+            if step == 0 || start == end { return Ok(vec![start]); }
+            if start < end {
+                Ok((start..=end).step_by(step).collect())
+            } else {
+                let mut v = Vec::new();
+                let mut cur = start;
+                while cur >= end {
+                    v.push(cur);
+                    if let Some(next) = cur.checked_sub(step) { cur = next; } else { break; }
+                    if cur == usize::MAX { break; }
+                }
+                if v.is_empty() { return Err(CudaDonchianError::InvalidInput(format!("invalid range: start={} end={} step={}", start, end, step))); }
+                Ok(v)
             }
-            (start..=end).step_by(step).collect()
         }
-        let periods = axis_usize(range.period);
-        periods
-            .into_iter()
-            .map(|p| DonchianParams { period: Some(p) })
-            .collect()
+        let periods = axis_usize(range.period)?;
+        Ok(periods.into_iter().map(|p| DonchianParams { period: Some(p) }).collect())
     }
 
     fn prepare_batch_inputs(
@@ -223,16 +271,9 @@ impl CudaDonchian {
             .zip(low.iter())
             .position(|(h, l)| !h.is_nan() && !l.is_nan())
             .ok_or_else(|| CudaDonchianError::InvalidInput("all values are NaN".into()))?;
-        let combos = Self::expand_grid(sweep);
+        let combos = Self::expand_grid(sweep)?;
         if combos.is_empty() {
-            return Err(CudaDonchianError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
-        if combos.is_empty() {
-            return Err(CudaDonchianError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
+            return Err(CudaDonchianError::InvalidInput("no parameter combinations".into()));
         }
         for c in &combos {
             let p = c.period.unwrap_or(0);
@@ -240,27 +281,10 @@ impl CudaDonchian {
                 return Err(CudaDonchianError::InvalidInput("period must be > 0".into()));
             }
             if p > len {
-                return Err(CudaDonchianError::InvalidInput(
-                    "period exceeds length".into(),
-                ));
+                return Err(CudaDonchianError::InvalidInput("period exceeds length".into()));
             }
             if len - first_valid < p {
-                return Err(CudaDonchianError::InvalidInput(
-                    "not enough valid data".into(),
-                ));
-            }
-            if p == 0 {
-                return Err(CudaDonchianError::InvalidInput("period must be > 0".into()));
-            }
-            if p > len {
-                return Err(CudaDonchianError::InvalidInput(
-                    "period exceeds length".into(),
-                ));
-            }
-            if len - first_valid < p {
-                return Err(CudaDonchianError::InvalidInput(
-                    "not enough valid data".into(),
-                ));
+                return Err(CudaDonchianError::InvalidInput("not enough valid data".into()));
             }
         }
         Ok((combos, first_valid, len))
@@ -277,70 +301,53 @@ impl CudaDonchian {
         let levels = rmq_levels_for_max_period(max_period);
 
         // VRAM estimate: inputs + periods + outputs + RMQ scratch
-        let bytes_in = 2 * len * std::mem::size_of::<f32>();
-        let bytes_periods = combos.len() * std::mem::size_of::<i32>();
-        let bytes_out = 3 * combos.len() * len * std::mem::size_of::<f32>();
-        let bytes_rmq = bytes_rmq_tables(len, levels);
-        let required = bytes_in + bytes_periods + bytes_out + bytes_rmq;
+        let sz_f32 = std::mem::size_of::<f32>();
+        let bytes_in = len.checked_mul(2).and_then(|v| v.checked_mul(sz_f32)).ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (inputs)".into()))?;
+        let bytes_periods = combos.len().checked_mul(std::mem::size_of::<i32>()).ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (periods)".into()))?;
+        let out_elems = combos.len().checked_mul(len).and_then(|v| v.checked_mul(3)).ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (outputs)".into()))?;
+        let bytes_out = out_elems.checked_mul(sz_f32).ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (outputs bytes)".into()))?;
+        let bytes_rmq = bytes_rmq_tables_checked(len, levels)?;
+        let required = bytes_in
+            .checked_add(bytes_periods).and_then(|v| v.checked_add(bytes_out)).and_then(|v| v.checked_add(bytes_rmq))
+            .ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (total)".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaDonchianError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                required as f64 / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(required, headroom)?;
 
         // Device buffers (common)
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }?;
         let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
 
-        let mut d_upper: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let mut d_middle: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let mut d_lower: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }?;
+        let mut d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }?;
+        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }?;
 
         // RMQ is always used for batch path
         let stride = len;
 
         // scratch buffers sized only to required levels
-        let mut d_st_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(levels * stride, &self.stream) }
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let mut d_st_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(levels * stride, &self.stream) }
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let mut d_st_nan: DeviceBuffer<u8> = unsafe { DeviceBuffer::uninitialized_async(levels * stride, &self.stream) }
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+        let mut d_st_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(levels * stride, &self.stream) }?;
+        let mut d_st_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(levels * stride, &self.stream) }?;
+        let mut d_st_nan: DeviceBuffer<u8> = unsafe { DeviceBuffer::uninitialized_async(levels * stride, &self.stream) }?;
 
-        let init_lvl0_f32 = self.module.get_function("rmq_init_level0_f32")
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let init_nan_u8 = self.module.get_function("rmq_init_nan_mask_u8")
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let build_max = self.module.get_function("rmq_build_level_max_f32")
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let build_min = self.module.get_function("rmq_build_level_min_f32")
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let build_or  = self.module.get_function("rmq_build_level_or_u8")
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let func_query = self.module.get_function("donchian_batch_from_rmq_f32")
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+        let init_lvl0_f32 = self.module.get_function("rmq_init_level0_f32").map_err(|_| CudaDonchianError::MissingKernelSymbol { name: "rmq_init_level0_f32" })?;
+        let init_nan_u8 = self.module.get_function("rmq_init_nan_mask_u8").map_err(|_| CudaDonchianError::MissingKernelSymbol { name: "rmq_init_nan_mask_u8" })?;
+        let build_max = self.module.get_function("rmq_build_level_max_f32").map_err(|_| CudaDonchianError::MissingKernelSymbol { name: "rmq_build_level_max_f32" })?;
+        let build_min = self.module.get_function("rmq_build_level_min_f32").map_err(|_| CudaDonchianError::MissingKernelSymbol { name: "rmq_build_level_min_f32" })?;
+        let build_or  = self.module.get_function("rmq_build_level_or_u8").map_err(|_| CudaDonchianError::MissingKernelSymbol { name: "rmq_build_level_or_u8" })?;
+        let func_query = self.module.get_function("donchian_batch_from_rmq_f32").map_err(|_| CudaDonchianError::MissingKernelSymbol { name: "donchian_batch_from_rmq_f32" })?;
 
         let build_bx: u32 = 256;
         let query_bx: u32 = match self.policy.batch { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain { block_x } => block_x.max(64) };
         let build_grid_x: u32 = ((len as u32) + build_bx - 1) / build_bx;
         let build_grid: GridSize = (build_grid_x.max(1), 1, 1).into();
         let build_block: BlockSize = (build_bx, 1, 1).into();
+        Self::validate_launch(build_grid, build_block)?;
         let query_grid_x: u32 = ((combos.len() as u32) + query_bx - 1) / query_bx;
         let query_grid: GridSize = (query_grid_x.max(1), 1, 1).into();
         let query_block: BlockSize = (query_bx, 1, 1).into();
+        Self::validate_launch(query_grid, query_block)?;
         unsafe { (*(self as *const _ as *mut CudaDonchian)).last_batch = Some(BatchKernelSelected::Rmq { build_bx, query_bx }); }
 
         unsafe {
@@ -358,16 +365,14 @@ impl CudaDonchian {
                 &mut out_hi0 as *mut _ as *mut c_void,
                 &mut N_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&init_lvl0_f32, build_grid, build_block, 0, &mut args_hi0)
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+            self.stream.launch(&init_lvl0_f32, build_grid, build_block, 0, &mut args_hi0)?;
 
             let mut args_lo0: &mut [*mut c_void] = &mut [
                 &mut low_in as *mut _ as *mut c_void,
                 &mut out_lo0 as *mut _ as *mut c_void,
                 &mut N_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&init_lvl0_f32, build_grid, build_block, 0, &mut args_lo0)
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+            self.stream.launch(&init_lvl0_f32, build_grid, build_block, 0, &mut args_lo0)?;
 
             let mut args_nm0: &mut [*mut c_void] = &mut [
                 &mut high_in as *mut _ as *mut c_void,
@@ -376,8 +381,7 @@ impl CudaDonchian {
                 &mut first_i as *mut _ as *mut c_void,
                 &mut mask0 as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&init_nan_u8, build_grid, build_block, 0, &mut args_nm0)
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+            self.stream.launch(&init_nan_u8, build_grid, build_block, 0, &mut args_nm0)?;
         }
 
         // Build higher levels only up to `levels`
@@ -398,8 +402,7 @@ impl CudaDonchian {
                     &mut N_i as *mut _ as *mut c_void,
                     &mut off_i as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&build_max, build_grid, build_block, 0, &mut args)
-                    .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+                self.stream.launch(&build_max, build_grid, build_block, 0, &mut args)?;
 
                 // MIN
                 prev = as_raw_offset(&d_st_low, prev_elems);
@@ -410,8 +413,7 @@ impl CudaDonchian {
                     &mut N_i as *mut _ as *mut c_void,
                     &mut off_i as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&build_min, build_grid, build_block, 0, &mut args2)
-                    .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+                self.stream.launch(&build_min, build_grid, build_block, 0, &mut args2)?;
 
                 // OR (u8)
                 let mut prev_b = as_raw_offset(&d_st_nan, prev_elems);
@@ -422,8 +424,7 @@ impl CudaDonchian {
                     &mut N_i as *mut _ as *mut c_void,
                     &mut off_i as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&build_or, build_grid, build_block, 0, &mut args3)
-                    .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+                self.stream.launch(&build_or, build_grid, build_block, 0, &mut args3)?;
             }
         }
 
@@ -451,23 +452,18 @@ impl CudaDonchian {
                 &mut mid_ptr as *mut _ as *mut c_void,
                 &mut lowo_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func_query, query_grid, query_block, 0, args)
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+            self.stream.launch(&func_query, query_grid, query_block, 0, args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
+        self.stream.synchronize()?;
         self.maybe_log_batch_debug();
 
         Ok((
             DeviceArrayF32Triplet {
-                wt1: DeviceArrayF32 { buf: d_upper, rows: combos.len(), cols: len },
-                wt2: DeviceArrayF32 { buf: d_middle, rows: combos.len(), cols: len },
-                hist: DeviceArrayF32 { buf: d_lower, rows: combos.len(), cols: len },
+                wt1: DeviceArrayF32 { buf: d_upper, rows: combos.len(), cols: len, ctx: self.context.clone(), device_id: self.device_id },
+                wt2: DeviceArrayF32 { buf: d_middle, rows: combos.len(), cols: len, ctx: self.context.clone(), device_id: self.device_id },
+                hist: DeviceArrayF32 { buf: d_lower, rows: combos.len(), cols: len, ctx: self.context.clone(), device_id: self.device_id },
             },
             combos,
         ))
@@ -526,47 +522,39 @@ impl CudaDonchian {
             first_valids[s] = fv;
         }
 
-        let bytes_in = 2 * cols * rows * std::mem::size_of::<f32>();
-        let bytes_first = cols * std::mem::size_of::<i32>();
-        let bytes_out = 3 * cols * rows * std::mem::size_of::<f32>();
-        let required = bytes_in + bytes_first + bytes_out;
+        let elem_f32 = std::mem::size_of::<f32>();
+        let elem_i32 = std::mem::size_of::<i32>();
+        let bytes_in = cols
+            .checked_mul(rows)
+            .and_then(|v| v.checked_mul(2))
+            .and_then(|v| v.checked_mul(elem_f32))
+            .ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (inputs)".into()))?;
+        let bytes_first = cols
+            .checked_mul(elem_i32)
+            .ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (first_valid)".into()))?;
+        let bytes_out = cols
+            .checked_mul(rows)
+            .and_then(|v| v.checked_mul(3))
+            .and_then(|v| v.checked_mul(elem_f32))
+            .ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (outputs)".into()))?;
+        let required = bytes_in
+            .checked_add(bytes_first)
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (total)".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaDonchianError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                required as f64 / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(required, headroom)?;
 
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm_f32, &self.stream) }
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let mut d_upper: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let mut d_middle: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let mut d_lower: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let mut d_upper: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let mut d_middle: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let mut d_lower: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm_f32, &self.stream) }?;
+        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
+        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }?;
+        let mut d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }?;
+        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }?;
 
         let func = self
             .module
             .get_function("donchian_many_series_one_param_f32")
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaDonchianError::MissingKernelSymbol { name: "donchian_many_series_one_param_f32" })?;
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
@@ -574,6 +562,7 @@ impl CudaDonchian {
         let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        Self::validate_launch(grid, block)?;
         unsafe {
             (*(self as *const _ as *mut CudaDonchian)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -603,22 +592,16 @@ impl CudaDonchian {
                 &mut mid_ptr as *mut _ as *mut c_void,
                 &mut lowo_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
+        self.stream.synchronize()?;
         self.maybe_log_many_debug();
         Ok(DeviceArrayF32Triplet {
-            wt1: DeviceArrayF32 { buf: d_upper, rows, cols },
-            wt2: DeviceArrayF32 { buf: d_middle, rows, cols },
-            hist: DeviceArrayF32 { buf: d_lower, rows, cols },
+            wt1: DeviceArrayF32 { buf: d_upper, rows, cols, ctx: self.context.clone(), device_id: self.device_id },
+            wt2: DeviceArrayF32 { buf: d_middle, rows, cols, ctx: self.context.clone(), device_id: self.device_id },
+            hist: DeviceArrayF32 { buf: d_lower, rows, cols, ctx: self.context.clone(), device_id: self.device_id },
         })
     }
 }
@@ -638,8 +621,18 @@ fn rmq_levels_for_max_period(max_period: usize) -> usize {
 }
 
 #[inline]
+fn bytes_rmq_tables_checked(len: usize, levels: usize) -> Result<usize, CudaDonchianError> {
+    let elem = 2 * std::mem::size_of::<f32>() + std::mem::size_of::<u8>();
+    levels
+        .checked_mul(len)
+        .and_then(|v| v.checked_mul(elem))
+        .ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (rmq)".into()))
+}
+
+#[inline]
 fn bytes_rmq_tables(len: usize, levels: usize) -> usize {
-    levels * len * (2 * std::mem::size_of::<f32>() + std::mem::size_of::<u8>())
+    let elem = 2 * std::mem::size_of::<f32>() + std::mem::size_of::<u8>();
+    levels.saturating_mul(len).saturating_mul(elem)
 }
 
 #[inline]

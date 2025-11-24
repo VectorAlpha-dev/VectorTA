@@ -18,7 +18,12 @@
 //! Rationale: PPO EMA/SMA are loop-carried; post-ratio is cheap, SIMD offers no win.
 //! **Streaming**: O(1) for SMA/EMA; fallback O(n) for other MA types
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
+//! **Decision log**: SIMD kept as stubs (scalar fastest); CUDA wrapper uses typed errors + context-backed VRAM handles; Python interop exposes CAI v3 and DLPack v1.x.
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::ppo_wrapper::{CudaPpo, DeviceArrayF32Ppo};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -28,7 +33,7 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::types::PyDict;
+use pyo3::types::{PyAny, PyDict};
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -217,16 +222,26 @@ impl PpoBuilder {
 
 #[derive(Debug, Error)]
 pub enum PpoError {
-    #[error("ppo: All values are NaN.")]
+    #[error("ppo: empty input data")]
+    EmptyInputData,
+    #[error("ppo: all values are NaN")]
     AllValuesNaN,
-    #[error("ppo: Invalid period: fast = {fast}, slow = {slow}, data length = {data_len}")]
+    #[error("ppo: invalid period: fast = {fast}, slow = {slow}, data length = {data_len}")]
     InvalidPeriod {
         fast: usize,
         slow: usize,
         data_len: usize,
     },
-    #[error("ppo: Not enough valid data: needed = {needed}, valid = {valid}")]
+    #[error("ppo: not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("ppo: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("ppo: invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("ppo: invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("ppo: invalid input: {0}")]
+    InvalidInput(String),
     #[error("ppo: MA error: {0}")]
     MaError(String),
 }
@@ -239,6 +254,9 @@ pub fn ppo(input: &PpoInput) -> Result<PpoOutput, PpoError> {
 pub fn ppo_with_kernel(input: &PpoInput, kernel: Kernel) -> Result<PpoOutput, PpoError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
+    if len == 0 {
+        return Err(PpoError::EmptyInputData);
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -293,7 +311,7 @@ pub fn ppo_with_kernel(input: &PpoInput, kernel: Kernel) -> Result<PpoOutput, Pp
 pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result<(), PpoError> {
     let data = input.as_ref();
     if data.is_empty() {
-        return Err(PpoError::AllValuesNaN);
+        return Err(PpoError::EmptyInputData);
     }
 
     let fast = input.get_fast_period();
@@ -308,10 +326,9 @@ pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result
         });
     }
     if dst.len() != data.len() {
-        return Err(PpoError::InvalidPeriod {
-            fast,
-            slow,
-            data_len: data.len(),
+        return Err(PpoError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -696,27 +713,61 @@ impl PpoBatchOutput {
         })
     }
     pub fn values_for(&self, p: &PpoParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| {
-            let start = row * self.cols;
-            &self.values[start..start + self.cols]
+        self.row_for_params(p).and_then(|row| {
+            let start = row.checked_mul(self.cols)?;
+            let end = start.checked_add(self.cols)?;
+            self.values.get(start..end)
         })
     }
 }
 
 #[inline(always)]
-fn expand_grid(r: &PpoBatchRange) -> Vec<PpoParams> {
+fn expand_grid(r: &PpoBatchRange) -> Result<Vec<PpoParams>, PpoError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        if start <= end {
+            (start..=end).step_by(step).collect()
+        } else {
+            let mut v = Vec::new();
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                if cur <= end {
+                    break;
+                }
+                let next = match cur.checked_sub(step) {
+                    Some(n) => n,
+                    None => break,
+                };
+                if next < end {
+                    break;
+                }
+                cur = next;
+            }
+            v
+        }
     }
 
     let fasts = axis_usize(r.fast_period);
     let slows = axis_usize(r.slow_period);
+    if fasts.is_empty() {
+        let (start, end, step) = r.fast_period;
+        return Err(PpoError::InvalidRange { start, end, step });
+    }
+    if slows.is_empty() {
+        let (start, end, step) = r.slow_period;
+        return Err(PpoError::InvalidRange { start, end, step });
+    }
+
     let ma_type = r.ma_type.clone();
 
-    let mut out = Vec::with_capacity(fasts.len() * slows.len());
+    let total = fasts
+        .len()
+        .checked_mul(slows.len())
+        .ok_or_else(|| PpoError::InvalidInput("fast*slow grid overflow".into()))?;
+    let mut out = Vec::with_capacity(total);
     for &f in &fasts {
         for &s in &slows {
             out.push(PpoParams {
@@ -726,7 +777,7 @@ fn expand_grid(r: &PpoBatchRange) -> Vec<PpoParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -738,13 +789,7 @@ pub fn ppo_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(PpoError::InvalidPeriod {
-                fast: 0,
-                slow: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(PpoError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -781,13 +826,10 @@ fn ppo_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<PpoParams>, PpoError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(PpoError::InvalidPeriod {
-            fast: 0,
-            slow: 0,
-            data_len: 0,
-        });
+        let (start, end, step) = sweep.fast_period;
+        return Err(PpoError::InvalidRange { start, end, step });
     }
 
     let first = data
@@ -802,7 +844,17 @@ fn ppo_batch_inner_into(
         });
     }
 
+    let rows = combos.len();
     let cols = data.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PpoError::InvalidInput("rows*cols overflow in ppo_batch_inner_into".into()))?;
+    if out.len() != expected {
+        return Err(PpoError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
     // Treat the destination as uninitialized like ALMA
     let out_uninit: &mut [MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
@@ -922,13 +974,10 @@ fn ppo_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<PpoBatchOutput, PpoError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(PpoError::InvalidPeriod {
-            fast: 0,
-            slow: 0,
-            data_len: 0,
-        });
+        let (start, end, step) = sweep.fast_period;
+        return Err(PpoError::InvalidRange { start, end, step });
     }
     let first = data
         .iter()
@@ -943,6 +992,9 @@ fn ppo_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PpoError::InvalidInput("rows*cols overflow in ppo_batch_inner".into()))?;
 
     // Create uninitialized matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -2284,6 +2336,325 @@ impl PpoStreamPy {
     }
 }
 
+// CUDA device handle for PPO (FP32, 2D) with CAI v3 + DLPack v1.x.
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct PpoDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32Ppo,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl PpoDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Producer stream is synchronized before returning the handle; omit "stream" per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA
+        (2, self.inner.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<&PyAny>,
+        max_version: Option<&PyAny>,
+        dl_device: Option<&PyAny>,
+        copy: Option<&PyAny>,
+    ) -> PyResult<PyObject> {
+        use std::ffi::{c_void, CStr};
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLPackVersion {
+            major: u32,
+            minor: u32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: std::sync::Arc<cust::context::Context>,
+        }
+
+        extern "C" fn managed_deleter_legacy(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn managed_deleter_versioned(p: *mut DLManagedTensorVersioned) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                if capsule.is_null() {
+                    return;
+                }
+                let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule);
+                if name_ptr.is_null() {
+                    return;
+                }
+                let cname = CStr::from_ptr(name_ptr);
+                if cname.to_bytes() != b"dltensor" {
+                    return;
+                }
+                let expected = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    expected.as_ptr() as *const _,
+                ) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter {
+                        del(ptr);
+                    }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        extern "C" fn capsule_destructor_versioned(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                if capsule.is_null() {
+                    return;
+                }
+                let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule);
+                if name_ptr.is_null() {
+                    return;
+                }
+                let cname = CStr::from_ptr(name_ptr);
+                if cname.to_bytes() != b"dltensor_versioned" {
+                    return;
+                }
+                let expected = b"dltensor_versioned\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    expected.as_ptr() as *const _,
+                ) as *mut DLManagedTensorVersioned;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter {
+                        del(ptr);
+                    }
+                    let used = b"used_dltensor_versioned\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        // Interpret __dlpack__ arguments per Array API:
+        let max_ver_tuple: Option<(u32, u32)> = match max_version {
+            Some(v) => Some(v.extract()?),
+            None => None,
+        };
+        let use_versioned = match max_ver_tuple {
+            Some((maj, _)) => maj >= 1,
+            None => true,
+        };
+
+        // dl_device, if provided, must match our device.
+        if let Some(dev_obj) = dl_device {
+            let (dev_ty, dev_id): (i32, i32) = dev_obj.extract()?;
+            if dev_ty != 2 || dev_id != self.inner.device_id as i32 {
+                return Err(pyo3::exceptions::PyBufferError::new_err(
+                    "__dlpack__: requested device does not match producer buffer",
+                ));
+            }
+        }
+
+        // copy=True is not supported for PPO CUDA buffers.
+        if let Some(copy_obj) = copy {
+            let do_copy: bool = copy_obj.extract()?;
+            if do_copy {
+                return Err(pyo3::exceptions::PyBufferError::new_err(
+                    "__dlpack__(copy=True) not supported for ppo CUDA buffers",
+                ));
+            }
+        }
+
+        // Stream semantics: producer synchronizes before __dlpack__; accept but do not use stream.
+        if let Some(s) = stream {
+            if let Ok(i) = s.extract::<i64>() {
+                if i == 0 {
+                    return Err(PyValueError::new_err(
+                        "__dlpack__: stream 0 is disallowed for CUDA",
+                    ));
+                }
+            }
+        }
+
+        let rows = self.inner.rows as i64;
+        let cols = self.inner.cols as i64;
+        let nelems = (rows as usize)
+            .checked_mul(cols as usize)
+            .ok_or_else(|| PyValueError::new_err("ppo: rows*cols overflow in __dlpack__"))?;
+        let data_ptr = if nelems == 0 {
+            std::ptr::null_mut()
+        } else {
+            self.inner.device_ptr() as usize as *mut c_void
+        };
+
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1i64]);
+        let guard = Box::new(DlpGuard {
+            _shape: shape,
+            _strides: strides,
+            _ctx: self.inner.ctx.clone(),
+        });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        if use_versioned {
+            let mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 0 },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(managed_deleter_versioned),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.inner.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+            });
+            let mt_raw = Box::into_raw(mt);
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_raw as *mut c_void,
+                    name.as_ptr() as *const _,
+                    Some(capsule_destructor_versioned),
+                )
+            };
+            if capsule.is_null() {
+                unsafe {
+                    managed_deleter_versioned(mt_raw);
+                }
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "failed to create DLPack versioned capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.inner.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(managed_deleter_legacy),
+            });
+            let mt_raw = Box::into_raw(mt);
+            let name = b"dltensor\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_raw as *mut c_void,
+                    name.as_ptr() as *const _,
+                    Some(capsule_destructor_legacy),
+                )
+            };
+            if capsule.is_null() {
+                unsafe {
+                    managed_deleter_legacy(mt_raw);
+                }
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "failed to create DLPack capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        }
+    }
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "ppo_batch")]
 #[pyo3(signature = (data, fast_period_range, slow_period_range, ma_type=None, kernel=None))]
@@ -2303,11 +2674,14 @@ pub fn ppo_batch_py<'py>(
         ma_type: ma_type.unwrap_or("sma").to_string(),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow in ppo_batch_py"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Initialize NaN prefixes directly on the NumPy buffer using helpers
@@ -2385,11 +2759,9 @@ pub fn ppo_cuda_batch_dev_py<'py>(
     ma_type: &str,
     device_id: usize,
 ) -> PyResult<(
-    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
+    PpoDeviceArrayF32Py,
     Bound<'py, PyDict>,
 )> {
-    use crate::cuda::cuda_available;
-    use crate::cuda::oscillators::ppo_wrapper::CudaPpo;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2428,10 +2800,7 @@ pub fn ppo_cuda_batch_dev_py<'py>(
             .map(|p| p.ma_type.as_ref().unwrap().clone())
             .collect::<Vec<_>>(),
     )?;
-    Ok((
-        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner },
-        dict,
-    ))
+    Ok((PpoDeviceArrayF32Py { inner }, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2444,9 +2813,7 @@ pub fn ppo_cuda_many_series_one_param_dev_py<'py>(
     slow_period: usize,
     ma_type: &str,
     device_id: usize,
-) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
-    use crate::cuda::cuda_available;
-    use crate::cuda::oscillators::ppo_wrapper::CudaPpo;
+) -> PyResult<PpoDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2469,7 +2836,7 @@ pub fn ppo_cuda_many_series_one_param_dev_py<'py>(
                 .and_then(|c| c.ppo_many_series_one_param_time_major_dev(flat, cols, rows, &params))
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner })
+    Ok(PpoDeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]
@@ -2479,6 +2846,7 @@ pub fn register_ppo_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     m.add_class::<PpoStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
+        m.add_class::<PpoDeviceArrayF32Py>()?;
         m.add_function(wrap_pyfunction!(ppo_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(ppo_cuda_many_series_one_param_dev_py, m)?)?;
     }
@@ -2627,10 +2995,14 @@ pub fn ppo_batch_into(
             slow_period: (slow_start, slow_end, slow_step),
             ma_type: ma_type.to_string(),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow in ppo_batch_into"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         ppo_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)

@@ -13,7 +13,7 @@
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
-use crate::indicators::moving_averages::hwma::{expand_grid, HwmaBatchRange, HwmaParams};
+use crate::indicators::moving_averages::hwma::{HwmaBatchRange, HwmaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
@@ -265,6 +265,47 @@ impl CudaHwma {
         }
     }
 
+    fn axis_f64_cuda_checked(t: (f64, f64, f64)) -> Result<Vec<f64>, CudaHwmaError> {
+        let (start, end, step) = t;
+        let eps = 1e-12;
+        if step.abs() < eps || (start - end).abs() < eps {
+            return Ok(vec![start]);
+        }
+        let mut v = Vec::new();
+        if step > 0.0 {
+            if start > end + eps {
+                return Err(CudaHwmaError::InvalidInput(format!(
+                    "invalid range: start={} end={} step={}", start, end, step
+                )));
+            }
+            let mut x = start;
+            while x <= end + eps { v.push(x); x += step; }
+        } else {
+            if start < end - eps {
+                return Err(CudaHwmaError::InvalidInput(format!(
+                    "invalid range: start={} end={} step={}", start, end, step
+                )));
+            }
+            let mut x = start;
+            while x >= end - eps { v.push(x); x += step; }
+        }
+        Ok(v)
+    }
+
+    fn expand_grid_cuda_checked(r: &HwmaBatchRange) -> Result<Vec<HwmaParams>, CudaHwmaError> {
+        let nas = Self::axis_f64_cuda_checked(r.na)?;
+        let nbs = Self::axis_f64_cuda_checked(r.nb)?;
+        let ncs = Self::axis_f64_cuda_checked(r.nc)?;
+        let cap = nas
+            .len()
+            .checked_mul(nbs.len())
+            .and_then(|x| x.checked_mul(ncs.len()))
+            .ok_or_else(|| CudaHwmaError::InvalidInput("expand_grid capacity overflow".into()))?;
+        let mut out = Vec::with_capacity(cap);
+        for &a in &nas { for &b in &nbs { for &c in &ncs { out.push(HwmaParams { na: Some(a), nb: Some(b), nc: Some(c) }); } } }
+        Ok(out)
+    }
+
     fn prepare_batch_inputs(
         data_f32: &[f32],
         sweep: &HwmaBatchRange,
@@ -278,12 +319,8 @@ impl CudaHwma {
             .ok_or_else(|| CudaHwmaError::InvalidInput("all values are NaN".into()))?;
         let len = data_f32.len();
 
-        let combos = expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaHwmaError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        // Checked expansion mirrors CPU rules; return typed error instead of fallback
+        let combos = Self::expand_grid_cuda_checked(sweep)?;
 
         for (idx, prm) in combos.iter().enumerate() {
             let na = prm.na.unwrap_or(0.2);

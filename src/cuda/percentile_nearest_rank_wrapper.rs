@@ -25,22 +25,27 @@ use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaPnrError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaPnrError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaPnrError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaPnrError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaPnrError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -81,7 +86,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaPercentileNearestRank {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: std::sync::Arc<Context>,
+    device_id: u32,
     policy: CudaPnrPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -91,10 +97,9 @@ pub struct CudaPercentileNearestRank {
 
 impl CudaPercentileNearestRank {
     pub fn new(device_id: usize) -> Result<Self, CudaPnrError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = std::sync::Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(
             env!("OUT_DIR"),
@@ -107,15 +112,14 @@ impl CudaPercentileNearestRank {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaPnrPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -125,10 +129,12 @@ impl CudaPercentileNearestRank {
     }
 
     pub fn synchronize(&self) -> Result<(), CudaPnrError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
     }
+
+    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     pub fn set_policy(&mut self, policy: CudaPnrPolicy) { self.policy = policy; }
     pub fn policy(&self) -> &CudaPnrPolicy { &self.policy }
@@ -181,44 +187,87 @@ impl CudaPercentileNearestRank {
 
     // -------- Helpers --------
 
-    fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
+    fn axis_usize(
+        axis: (usize, usize, usize),
+    ) -> Result<Vec<usize>, CudaPnrError> {
         let (start, end, step) = axis;
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        if start > end {
-            return Vec::new();
-        }
-        (start..=end).step_by(step).collect()
-    }
-    fn axis_f64(axis: (f64, f64, f64)) -> Vec<f64> {
-        let (start, end, step) = axis;
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
-        }
-        if start > end {
-            return Vec::new();
-        }
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
-        }
-        if start > end {
-            return Vec::new();
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
         }
         let mut out = Vec::new();
-        let mut v = start;
-        let lim = end + step.abs() * 1e-12;
-        while v <= lim {
-            out.push(v);
-            v += step;
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            out.push(x as usize);
+            x -= st;
         }
-        out
+        if out.is_empty() {
+            return Err(CudaPnrError::InvalidInput(format!(
+                "invalid length range: start={}, end={}, step={}",
+                start, end, step
+            )));
+        }
+        Ok(out)
     }
 
-    fn expand_grid(r: &PercentileNearestRankBatchRange) -> Vec<PercentileNearestRankParams> {
-        let lengths = Self::axis_usize(r.length);
-        let percentages = Self::axis_f64(r.percentage);
-        let mut combos = Vec::with_capacity(lengths.len() * percentages.len());
+    fn axis_f64(
+        axis: (f64, f64, f64),
+    ) -> Result<Vec<f64>, CudaPnrError> {
+        let (start, end, step) = axis;
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let mut out = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                out.push(x);
+                x += st;
+            }
+            if out.is_empty() {
+                return Err(CudaPnrError::InvalidInput(format!(
+                    "invalid percentage range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            return Ok(out);
+        }
+        let mut out = Vec::new();
+        let mut x = start;
+        let st = step.abs();
+        while x + 1e-12 >= end {
+            out.push(x);
+            x -= st;
+        }
+        if out.is_empty() {
+            return Err(CudaPnrError::InvalidInput(format!(
+                "invalid percentage range: start={}, end={}, step={}",
+                start, end, step
+            )));
+        }
+        Ok(out)
+    }
+
+    fn expand_grid(
+        r: &PercentileNearestRankBatchRange,
+    ) -> Result<Vec<PercentileNearestRankParams>, CudaPnrError> {
+        let lengths = Self::axis_usize(r.length)?;
+        let percentages = Self::axis_f64(r.percentage)?;
+        let cap = lengths
+            .len()
+            .checked_mul(percentages.len())
+            .ok_or_else(|| CudaPnrError::InvalidInput("lengths*percentages overflow".into()))?;
+        if cap == 0 {
+            return Err(CudaPnrError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        let mut combos = Vec::with_capacity(cap);
         for &l in &lengths {
             for &p in &percentages {
                 combos.push(PercentileNearestRankParams {
@@ -227,7 +276,7 @@ impl CudaPercentileNearestRank {
                 });
             }
         }
-        combos
+        Ok(combos)
     }
 
     #[inline]
@@ -255,6 +304,60 @@ impl CudaPercentileNearestRank {
         group_size >= ((length as f64) / denom).ceil() as usize
     }
 
+    #[inline]
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaPnrError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaPnrError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
+    }
+
     // -------- Batch: one-series × many params --------
     pub fn pnr_batch_dev(
         &self,
@@ -271,7 +374,7 @@ impl CudaPercentileNearestRank {
             .ok_or_else(|| CudaPnrError::InvalidInput("all values are NaN".into()))?;
 
         // Length-major, percentage-minor pairs
-        let combos = Self::expand_grid(sweep);
+        let combos = Self::expand_grid(sweep)?;
         if combos.is_empty() {
             return Err(CudaPnrError::InvalidInput(
                 "no parameter combinations".into(),
@@ -293,24 +396,38 @@ impl CudaPercentileNearestRank {
             .collect();
 
         // Group info
-        let lengths_axis: Vec<usize> = Self::axis_usize(sweep.length);
-        let percs_axis: Vec<f64> = Self::axis_f64(sweep.percentage);
+        let lengths_axis: Vec<usize> = Self::axis_usize(sweep.length)?;
+        let percs_axis: Vec<f64> = Self::axis_f64(sweep.percentage)?;
         let group_rows = percs_axis.len();
 
         // Memory estimate with per-group scratch (baseline groups only)
-        let prices_bytes = len * core::mem::size_of::<f32>();
-        let percs_bytes = percs.len() * core::mem::size_of::<f32>();
-        let periods_bytes = periods.len() * core::mem::size_of::<i32>();
-        let out_bytes = combos.len() * len * core::mem::size_of::<f32>();
+        let prices_bytes = len
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPnrError::InvalidInput("series_len bytes overflow".into()))?;
+        let percs_bytes = percs
+            .len()
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPnrError::InvalidInput("percs bytes overflow".into()))?;
+        let periods_bytes = periods
+            .len()
+            .checked_mul(core::mem::size_of::<i32>())
+            .ok_or_else(|| CudaPnrError::InvalidInput("periods bytes overflow".into()))?;
+        let out_elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaPnrError::InvalidInput("output elements overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPnrError::InvalidInput("output bytes overflow".into()))?;
 
         // Query shared kernel handle and set cache pref
         let mut func_shared = self
             .module
             .get_function("percentile_nearest_rank_one_series_many_params_same_len_f32")
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-        func_shared
-            .set_cache_config(CacheConfig::PreferShared)
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPnrError::MissingKernelSymbol {
+                name: "percentile_nearest_rank_one_series_many_params_same_len_f32",
+            })?;
+        func_shared.set_cache_config(CacheConfig::PreferShared)?;
 
         // Per-block shared memory limit (conservative)
         let max_smem_per_block = Device::get_device(0)
@@ -329,50 +446,64 @@ impl CudaPercentileNearestRank {
         let mut scratch_bytes = 0usize;
         for (g, &L) in lengths_axis.iter().enumerate() {
             if !use_shared[g] {
-                scratch_bytes =
-                    scratch_bytes.saturating_add(group_rows * L * core::mem::size_of::<f32>());
+                let group = group_rows
+                    .checked_mul(L)
+                    .and_then(|x| x.checked_mul(core::mem::size_of::<f32>()))
+                    .ok_or_else(|| {
+                        CudaPnrError::InvalidInput("scratch bytes overflow".into())
+                    })?;
+                scratch_bytes = scratch_bytes
+                    .checked_add(group)
+                    .ok_or_else(|| {
+                        CudaPnrError::InvalidInput("scratch bytes overflow".into())
+                    })?;
             }
         }
 
-        let required = prices_bytes + percs_bytes + periods_bytes + out_bytes + scratch_bytes;
+        let required = prices_bytes
+            .checked_add(percs_bytes)
+            .and_then(|x| x.checked_add(periods_bytes))
+            .and_then(|x| x.checked_add(out_bytes))
+            .and_then(|x| x.checked_add(scratch_bytes))
+            .ok_or_else(|| CudaPnrError::InvalidInput("total bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // ~64MB
         if !Self::will_fit(required, headroom) {
-            return Err(CudaPnrError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaPnrError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaPnrError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
         // Device allocations
-        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-        let mut d_percs: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(percs.len()) }
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        let mut d_percs: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(percs.len()) }?;
         let mut d_periods: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::uninitialized(periods.len()) }
-                .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(periods.len()) }?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(combos.len() * len) }
-                .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         // Direct H2D copies (avoid extra LockedBuffer host copy)
         unsafe {
-            d_prices
-                .async_copy_from(data_f32, &self.stream)
-                .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-            d_percs
-                .async_copy_from(&percs, &self.stream)
-                .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-            d_periods
-                .async_copy_from(&periods, &self.stream)
-                .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+            d_prices.async_copy_from(data_f32, &self.stream)?;
+            d_percs.async_copy_from(&percs, &self.stream)?;
+            d_periods.async_copy_from(&periods, &self.stream)?;
         }
 
         // Fallback baseline function (per-row maintenance)
         let func_baseline = self
             .module
             .get_function("percentile_nearest_rank_batch_f32")
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPnrError::MissingKernelSymbol {
+                name: "percentile_nearest_rank_batch_f32",
+            })?;
         let block_x_baseline = match self.policy.batch {
             BatchKernelPolicy::Auto => 128,
             BatchKernelPolicy::OneD { block_x } => block_x,
@@ -392,8 +523,7 @@ impl CudaPercentileNearestRank {
                 let grid_x = ((group_size as u32) + block_x_baseline - 1) / block_x_baseline;
                 // small scratch to satisfy baseline signature
                 let mut d_scratch: DeviceBuffer<f32> =
-                    unsafe { DeviceBuffer::uninitialized(group_size * L) }
-                        .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+                    unsafe { DeviceBuffer::uninitialized(group_size * L) }?;
                 unsafe {
                     let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                     let mut periods_ptr = d_periods.as_device_ptr().add(group_start).as_raw();
@@ -417,9 +547,8 @@ impl CudaPercentileNearestRank {
                     ];
                     let grid: GridSize = (grid_x.max(1), 1, 1).into();
                     let block: BlockSize = (block_x_baseline, 1, 1).into();
-                    self.stream
-                        .launch(&func_baseline, grid, block, 0, args)
-                        .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+                    self.validate_launch(grid_x.max(1), 1, 1, block_x_baseline, 1, 1)?;
+                    self.stream.launch(&func_baseline, grid, block, 0, args)?;
                 }
                 continue;
             }
@@ -449,17 +578,16 @@ impl CudaPercentileNearestRank {
                     ];
                     let grid: GridSize = (grid_x.max(1), 1, 1).into();
                     let block: BlockSize = (threads, 1, 1).into();
+                    self.validate_launch(grid_x.max(1), 1, 1, threads, 1, 1)?;
                     self.stream
-                        .launch(&func_shared, grid, block, smem_bytes as u32, args)
-                        .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+                        .launch(&func_shared, grid, block, smem_bytes as u32, args)?;
                     last_block_x_used = threads;
                 }
             } else {
                 // Baseline fallback for this group with minimal scratch
                 let grid_x = ((group_size as u32) + block_x_baseline - 1) / block_x_baseline;
                 let mut d_scratch: DeviceBuffer<f32> =
-                    unsafe { DeviceBuffer::uninitialized(group_size * L) }
-                        .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+                    unsafe { DeviceBuffer::uninitialized(group_size * L) }?;
                 unsafe {
                     let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                     let mut periods_ptr = d_periods.as_device_ptr().add(group_start).as_raw();
@@ -483,9 +611,8 @@ impl CudaPercentileNearestRank {
                     ];
                     let grid: GridSize = (grid_x.max(1), 1, 1).into();
                     let block: BlockSize = (block_x_baseline, 1, 1).into();
-                    self.stream
-                        .launch(&func_baseline, grid, block, 0, args)
-                        .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+                    self.validate_launch(grid_x.max(1), 1, 1, block_x_baseline, 1, 1)?;
+                    self.stream.launch(&func_baseline, grid, block, 0, args)?;
                 }
             }
         }
@@ -501,9 +628,7 @@ impl CudaPercentileNearestRank {
         let mut printed = false;
         Self::maybe_log(Some(sel), "batch", &ONCE, &mut printed);
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
@@ -526,7 +651,10 @@ impl CudaPercentileNearestRank {
         if cols == 0 || rows == 0 {
             return Err(CudaPnrError::InvalidInput("empty shape".into()));
         }
-        if data_tm_f32.len() != cols * rows {
+        let total_elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaPnrError::InvalidInput("cols*rows overflow".into()))?;
+        if data_tm_f32.len() != total_elems {
             return Err(CudaPnrError::InvalidInput(
                 "time-major input shape mismatch".into(),
             ));
@@ -567,55 +695,62 @@ impl CudaPercentileNearestRank {
             firsts[s] = fv;
         }
 
-        let prices_bytes = cols * rows * core::mem::size_of::<f32>();
-        let out_bytes = cols * rows * core::mem::size_of::<f32>();
-        let firsts_bytes = cols * core::mem::size_of::<i32>();
-        let scratch_bytes = cols * length * core::mem::size_of::<f32>();
-        let required = prices_bytes + out_bytes + firsts_bytes + scratch_bytes;
+        let prices_bytes = total_elems
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPnrError::InvalidInput("prices bytes overflow".into()))?;
+        let out_bytes = total_elems
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPnrError::InvalidInput("output bytes overflow".into()))?;
+        let firsts_bytes = cols
+            .checked_mul(core::mem::size_of::<i32>())
+            .ok_or_else(|| CudaPnrError::InvalidInput("firsts bytes overflow".into()))?;
+        let scratch_elems = cols
+            .checked_mul(length)
+            .ok_or_else(|| CudaPnrError::InvalidInput("scratch elements overflow".into()))?;
+        let scratch_bytes = scratch_elems
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPnrError::InvalidInput("scratch bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(out_bytes)
+            .and_then(|x| x.checked_add(firsts_bytes))
+            .and_then(|x| x.checked_add(scratch_bytes))
+            .ok_or_else(|| CudaPnrError::InvalidInput("total bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaPnrError::InvalidInput(
-                "insufficient free VRAM for workload".into(),
-            ));
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaPnrError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaPnrError::InvalidInput(
+                    "insufficient free VRAM for workload".into(),
+                ));
+            }
         }
 
-        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-        let mut d_firsts: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(cols) }
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+        let mut d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total_elems) }?;
+        let mut d_firsts: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized(cols) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_scratch: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(cols * length) }
-                .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-        let mut d_firsts: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(cols) }
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-        let mut d_scratch: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(cols * length) }
-                .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(scratch_elems) }?;
 
         unsafe {
-            d_prices
-                .async_copy_from(data_tm_f32, &self.stream)
-                .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-            d_firsts
-                .async_copy_from(&firsts, &self.stream)
-                .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+            d_prices.async_copy_from(data_tm_f32, &self.stream)?;
+            d_firsts.async_copy_from(&firsts, &self.stream)?;
         }
 
         let func = self
             .module
             .get_function("percentile_nearest_rank_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPnrError::MissingKernelSymbol {
+                name: "percentile_nearest_rank_many_series_one_param_time_major_f32",
+            })?;
 
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 128,
-            ManySeriesKernelPolicy::OneD { block_x } => block_x,
-        };
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -645,9 +780,8 @@ impl CudaPercentileNearestRank {
                 &mut scratch_ptr as *mut _ as *mut c_void,
                 &mut max_len_i as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+            self.validate_launch(grid_x.max(1), 1, 1, block_x, 1, 1)?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         let sel = ManySeriesKernelSelected::OneD { block_x };
@@ -661,9 +795,7 @@ impl CudaPercentileNearestRank {
         let mut printed = false;
         Self::maybe_log(Some(sel), "many-series", &ONCE, &mut printed);
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,

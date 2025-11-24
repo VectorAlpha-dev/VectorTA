@@ -12,7 +12,8 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::correl_hl::{CorrelHlBatchRange, CorrelHlParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer, DeviceCopy};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -20,22 +21,28 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaCorrelHlError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaCorrelHlError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaCorrelHlError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaCorrelHlError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaCorrelHlError {}
 
 // Host-side POD that matches CUDA `float2` layout for DS prefixes
 #[repr(C)]
@@ -90,7 +97,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaCorrelHl {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaCorrelHlPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -100,10 +108,9 @@ pub struct CudaCorrelHl {
 
 impl CudaCorrelHl {
     pub fn new(device_id: usize) -> Result<Self, CudaCorrelHlError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/correl_hl_kernel.ptx"));
         let module = Module::from_ptx(
@@ -114,16 +121,15 @@ impl CudaCorrelHl {
             ],
         )
         .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+        .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaCorrelHlPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -131,6 +137,11 @@ impl CudaCorrelHl {
             debug_many_logged: false,
         })
     }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     pub fn policy(&self) -> &CudaCorrelHlPolicy { &self.policy }
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
@@ -145,18 +156,19 @@ impl CudaCorrelHl {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaCorrelHlError> {
+        if !Self::mem_check_enabled() { return Ok(()); }
+        match mem_get_info() {
+            Ok((free, _total)) => {
+                if required_bytes.saturating_add(headroom_bytes) <= free {
+                    Ok(())
+                } else {
+                    Err(CudaCorrelHlError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                }
+            }
+            Err(_) => Ok(()),
         }
     }
 
@@ -202,22 +214,26 @@ impl CudaCorrelHl {
         }
     }
 
-    fn expand_grid(range: &CorrelHlBatchRange) -> Vec<CorrelHlParams> {
-        fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-            if step == 0 || start == end {
-                return vec![start];
+    fn expand_grid(range: &CorrelHlBatchRange) -> Result<Vec<CorrelHlParams>, CudaCorrelHlError> {
+        fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaCorrelHlError> {
+            if step == 0 || start == end { return Ok(vec![start]); }
+            if start < end {
+                let mut v = Vec::new(); let mut x = start;
+                while x <= end { v.push(x); match x.checked_add(step) { Some(nx) if nx > x => x = nx, _ => break } }
+                if v.is_empty() { return Err(CudaCorrelHlError::InvalidInput("empty period expansion".into())); }
+                Ok(v)
+            } else {
+                let mut v = Vec::new(); let mut x = start;
+                while x >= end { v.push(x); if x < end + step { break; } x = x.saturating_sub(step); if x == 0 { break; } }
+                if v.is_empty() { return Err(CudaCorrelHlError::InvalidInput("empty period expansion".into())); }
+                Ok(v)
             }
-            if step == 0 || start == end {
-                return vec![start];
-            }
-            (start..=end).step_by(step).collect()
         }
-        let periods = axis_usize(range.period);
+        let periods = axis_usize(range.period)?;
         let mut v = Vec::with_capacity(periods.len());
-        for &p in &periods {
-            v.push(CorrelHlParams { period: Some(p) });
-        }
-        v
+        for &p in &periods { v.push(CorrelHlParams { period: Some(p) }); }
+        if v.is_empty() { return Err(CudaCorrelHlError::InvalidInput("no parameter combinations".into())); }
+        Ok(v)
     }
 
     fn prepare_batch_inputs(
@@ -231,12 +247,6 @@ impl CudaCorrelHl {
         if high.is_empty() {
             return Err(CudaCorrelHlError::InvalidInput("empty input".into()));
         }
-        if high.len() != low.len() {
-            return Err(CudaCorrelHlError::InvalidInput("length mismatch".into()));
-        }
-        if high.is_empty() {
-            return Err(CudaCorrelHlError::InvalidInput("empty input".into()));
-        }
         let len = high.len();
         let first_valid = high
             .iter()
@@ -244,12 +254,7 @@ impl CudaCorrelHl {
             .position(|(h, l)| !h.is_nan() && !l.is_nan())
             .ok_or_else(|| CudaCorrelHlError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = Self::expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaCorrelHlError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = Self::expand_grid(sweep)?;
         for c in &combos {
             let p = c.period.unwrap_or(0);
             if p == 0 {
@@ -285,18 +290,12 @@ impl CudaCorrelHl {
         CudaCorrelHlError,
     > {
         let n = high.len();
-        let mut ps_h   = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-        let mut ps_h2  = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-        let mut ps_l   = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-        let mut ps_l2  = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-        let mut ps_hl  = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-        let mut ps_nan = unsafe { LockedBuffer::<i32>::uninitialized(n + 1) }
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+        let mut ps_h   = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }?;
+        let mut ps_h2  = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }?;
+        let mut ps_l   = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }?;
+        let mut ps_l2  = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }?;
+        let mut ps_hl  = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }?;
+        let mut ps_nan = unsafe { LockedBuffer::<i32>::uninitialized(n + 1) }?;
 
         // prefix[0]
         ps_h.as_mut_slice()[0]  = Float2::default();
@@ -412,7 +411,7 @@ impl CudaCorrelHl {
         let func = self
             .module
             .get_function("correl_hl_batch_f32ds")
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCorrelHlError::MissingKernelSymbol { name: "correl_hl_batch_f32ds" })?;
 
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
@@ -421,13 +420,25 @@ impl CudaCorrelHl {
         let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
         let grid_base: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        // Validate launch against device limits
+        let dev = Device::get_device(self.device_id)?;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        if block_x > max_bx || grid_x > max_gx {
+            return Err(CudaCorrelHlError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
         unsafe { (*(self as *const _ as *mut CudaCorrelHl)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
 
         // Chunk grid.y to <= 65_535
         let mut launched = 0usize;
         while launched < combos {
             let chunk = (combos - launched).min(65_535);
-            let grid: GridSize = (grid_base.x, chunk as u32, 1).into();
+            let gy = chunk as u32;
+            if gy > max_gy {
+                return Err(CudaCorrelHlError::LaunchConfigTooLarge { gx: grid_base.x, gy, gz: 1, bx: block_x, by: 1, bz: 1 });
+            }
+            let grid: GridSize = (grid_base.x, gy, 1).into();
             unsafe {
                 let mut ps_h = d_ps_h.as_device_ptr().as_raw();
                 let mut ps_h2 = d_ps_h2.as_device_ptr().as_raw();
@@ -455,9 +466,7 @@ impl CudaCorrelHl {
                     &mut n_chunk as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
             launched += chunk;
         }
@@ -482,7 +491,7 @@ impl CudaCorrelHl {
         let func = self
             .module
             .get_function("correl_hl_batch_f32ds")
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCorrelHlError::MissingKernelSymbol { name: "correl_hl_batch_f32ds" })?;
 
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
@@ -491,13 +500,25 @@ impl CudaCorrelHl {
         let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
         let grid_base: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        // Validate launch
+        let dev = Device::get_device(self.device_id)?;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        if block_x > max_bx || grid_x > max_gx {
+            return Err(CudaCorrelHlError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
         unsafe { (*(self as *const _ as *mut CudaCorrelHl)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
 
         // Chunk grid.y to <= 65_535
         let mut launched = 0usize;
         while launched < combos {
             let chunk = (combos - launched).min(65_535);
-            let grid: GridSize = (grid_base.x, chunk as u32, 1).into();
+            let gy = chunk as u32;
+            if gy > max_gy {
+                return Err(CudaCorrelHlError::LaunchConfigTooLarge { gx: grid_base.x, gy, gz: 1, bx: block_x, by: 1, bz: 1 });
+            }
+            let grid: GridSize = (grid_base.x, gy, 1).into();
             unsafe {
                 let mut ps_h = d_ps_h.as_device_ptr().as_raw();
                 let mut ps_h2 = d_ps_h2.as_device_ptr().as_raw();
@@ -525,9 +546,7 @@ impl CudaCorrelHl {
                     &mut n_chunk as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
             launched += chunk;
         }
@@ -555,45 +574,55 @@ impl CudaCorrelHl {
         // - prefixes: 5 * (len+1) * f64 + (len+1) * i32
         // - periods: combos * i32
         // - outputs: combos * len * f32
-        let bytes_prefix = 5 * (len + 1) * 8 + (len + 1) * 4;
-        let bytes_periods = combos.len() * 4;
-        let bytes_out = combos.len() * len * 4;
-        let required = bytes_prefix + bytes_periods + bytes_out;
+        let len1 = len
+            .checked_add(1)
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("len+1 overflow".into()))?;
+        let bytes_prefix = 5usize
+            .checked_mul(len1)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f64>()))
+            .and_then(|x| {
+                len1
+                    .checked_mul(std::mem::size_of::<i32>())
+                    .and_then(|y| x.checked_add(y))
+            })
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("size overflow".into()))?;
+        let bytes_periods = combos
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("size overflow".into()))?;
+        let bytes_out = combos
+            .len()
+            .checked_mul(len)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("rows*cols overflow".into()))?;
+        let required = bytes_prefix
+            .checked_add(bytes_periods)
+            .and_then(|x| x.checked_add(bytes_out))
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaCorrelHlError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(required, headroom)?;
 
         // Periods + output allocations
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream) }
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream) }?;
 
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream)
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?
-        };
+        let elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         // Build DS prefixes directly in pinned host buffers
         let use_ds = Self::select_batch_impl(len, combos.len());
         if use_ds {
             let (ps_h, ps_h2, ps_l, ps_l2, ps_hl, ps_nan) = Self::build_prefixes_ds_pinned(high_f32, low_f32)?;
             // Upload from pinned buffers to device asynchronously
-            let d_ps_h: DeviceBuffer<Float2>  = unsafe { DeviceBuffer::from_slice_async(ps_h.as_slice(),  &self.stream) }
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-            let d_ps_h2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_h2.as_slice(), &self.stream) }
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-            let d_ps_l: DeviceBuffer<Float2>  = unsafe { DeviceBuffer::from_slice_async(ps_l.as_slice(),  &self.stream) }
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-            let d_ps_l2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_l2.as_slice(), &self.stream) }
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-            let d_ps_hl: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_hl.as_slice(), &self.stream) }
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-            let d_ps_nan: DeviceBuffer<i32>   = unsafe { DeviceBuffer::from_slice_async(ps_nan.as_slice(), &self.stream) }
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+            let d_ps_h: DeviceBuffer<Float2>  = unsafe { DeviceBuffer::from_slice_async(ps_h.as_slice(),  &self.stream) }?;
+            let d_ps_h2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_h2.as_slice(), &self.stream) }?;
+            let d_ps_l: DeviceBuffer<Float2>  = unsafe { DeviceBuffer::from_slice_async(ps_l.as_slice(),  &self.stream) }?;
+            let d_ps_l2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_l2.as_slice(), &self.stream) }?;
+            let d_ps_hl: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_hl.as_slice(), &self.stream) }?;
+            let d_ps_nan: DeviceBuffer<i32>   = unsafe { DeviceBuffer::from_slice_async(ps_nan.as_slice(), &self.stream) }?;
 
             self.launch_batch_ds(
                 &d_ps_h,
@@ -618,18 +647,12 @@ impl CudaCorrelHl {
             let ps_l2_ds: Vec<Float2> = ps_l2.iter().map(|&x| pack_ds(x)).collect();
             let ps_hl_ds: Vec<Float2> = ps_hl.iter().map(|&x| pack_ds(x)).collect();
 
-            let d_ps_h: DeviceBuffer<Float2>  = unsafe { DeviceBuffer::from_slice_async(ps_h_ds.as_slice(),  &self.stream) }
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-            let d_ps_h2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_h2_ds.as_slice(), &self.stream) }
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-            let d_ps_l: DeviceBuffer<Float2>  = unsafe { DeviceBuffer::from_slice_async(ps_l_ds.as_slice(),  &self.stream) }
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-            let d_ps_l2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_l2_ds.as_slice(), &self.stream) }
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-            let d_ps_hl: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_hl_ds.as_slice(), &self.stream) }
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-            let d_ps_nan: DeviceBuffer<i32>   = unsafe { DeviceBuffer::from_slice_async(&ps_nan, &self.stream) }
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+            let d_ps_h: DeviceBuffer<Float2>  = unsafe { DeviceBuffer::from_slice_async(ps_h_ds.as_slice(),  &self.stream) }?;
+            let d_ps_h2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_h2_ds.as_slice(), &self.stream) }?;
+            let d_ps_l: DeviceBuffer<Float2>  = unsafe { DeviceBuffer::from_slice_async(ps_l_ds.as_slice(),  &self.stream) }?;
+            let d_ps_l2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_l2_ds.as_slice(), &self.stream) }?;
+            let d_ps_hl: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_hl_ds.as_slice(), &self.stream) }?;
+            let d_ps_nan: DeviceBuffer<i32>   = unsafe { DeviceBuffer::from_slice_async(&ps_nan, &self.stream) }?;
 
             self.launch_batch_dp(
                 &d_ps_h,
@@ -646,9 +669,7 @@ impl CudaCorrelHl {
             )?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {
@@ -671,7 +692,10 @@ impl CudaCorrelHl {
         if high_tm_f32.len() != low_tm_f32.len() {
             return Err(CudaCorrelHlError::InvalidInput("length mismatch".into()));
         }
-        if high_tm_f32.len() != rows * cols {
+        let expected_len = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("rows*cols overflow".into()))?;
+        if high_tm_f32.len() != expected_len {
             return Err(CudaCorrelHlError::InvalidInput("shape mismatch".into()));
         }
         if period == 0 || period > rows {
@@ -700,22 +724,36 @@ impl CudaCorrelHl {
             first_valids[s] = fv;
         }
 
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm_f32, &self.stream) }
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
-        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+        // Rough VRAM estimate for many-series path (inputs + outputs + first_valids)
+        let bytes_in = expected_len
+            .checked_mul(2)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("size overflow".into()))?;
+        let bytes_out = expected_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("size overflow".into()))?;
+        let bytes_first = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("size overflow".into()))?;
+        let required = bytes_in
+            .checked_add(bytes_out)
+            .and_then(|x| x.checked_add(bytes_first))
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
 
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?
-        };
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm_f32, &self.stream) }?;
+        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
+
+        let elems = expected_len;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         let func = self
             .module
             .get_function("correl_hl_many_series_one_param_f32")
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCorrelHlError::MissingKernelSymbol { name: "correl_hl_many_series_one_param_f32" })?;
 
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,
@@ -724,6 +762,13 @@ impl CudaCorrelHl {
         let grid_x: u32 = cols as u32;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        // Validate against device limits
+        let dev = Device::get_device(self.device_id)?;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        if block_x > max_bx || grid_x > max_gx {
+            return Err(CudaCorrelHlError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
         unsafe {
             (*(self as *const _ as *mut CudaCorrelHl)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -749,14 +794,10 @@ impl CudaCorrelHl {
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         self.maybe_log_many_debug();
         Ok(DeviceArrayF32 {
             buf: d_out,

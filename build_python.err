@@ -1,0 +1,43 @@
+   Compiling pyo3-build-config v0.25.1
+   Compiling my_project v0.1.0 (/mnt/c/Rust Projects/my_project-bindings-4)
+warning: my_project@0.1.0: feature `cuda` not enabled; skipping PTX build
+   Compiling pyo3-ffi v0.25.1
+   Compiling pyo3-macros-backend v0.25.1
+   Compiling pyo3 v0.25.1
+   Compiling numpy v0.25.0
+   Compiling pyo3-macros v0.25.1
+error[E0599]: no method named `len` found for enum `Result` in the current scope
+    --> src/indicators/lpc.rs:1773:23
+     |
+1773 |     let rows = combos.len() * 3;
+     |                       ^^^ method not found in `Result<Vec<LpcParams>, LpcError>`
+     |
+note: the method `len` exists on the type `Vec<LpcParams>`
+    --> /rustc/6b00bc3880198600130e1cf62b8f8a93494488cc/library/alloc/src/vec/mod.rs:2705:5
+help: use the `?` operator to extract the `Vec<LpcParams>` value, propagating a `Result::Err` value to the caller
+     |
+1773 |     let rows = combos?.len() * 3;
+     |                      +
+
+error[E0609]: no field `fixed_period` on type `&Vec<LpcParams>`
+    --> src/indicators/lpc.rs:1803:24
+     |
+1803 |             .map(|p| p.fixed_period.unwrap() as u64)
+     |                        ^^^^^^^^^^^^ unknown field
+
+error[E0609]: no field `cycle_mult` on type `&Vec<LpcParams>`
+    --> src/indicators/lpc.rs:1811:24
+     |
+1811 |             .map(|p| p.cycle_mult.unwrap())
+     |                        ^^^^^^^^^^ unknown field
+
+error[E0609]: no field `tr_mult` on type `&Vec<LpcParams>`
+    --> src/indicators/lpc.rs:1819:24
+     |
+1819 |             .map(|p| p.tr_mult.unwrap())
+     |                        ^^^^^^^ unknown field
+
+Some errors have detailed explanations: E0599, E0609.
+For more information about an error, try `rustc --explain E0599`.
+warning: my_project@0.1.0: feature `cuda` not enabled; skipping PTX build
+error: could not compile `my_project` (lib) due to 4 previous errors

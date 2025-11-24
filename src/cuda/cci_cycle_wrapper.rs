@@ -18,41 +18,42 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CudaCciCycleError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
     NotImplemented,
 }
-
-impl fmt::Display for CudaCciCycleError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaCciCycleError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaCciCycleError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-            CudaCciCycleError::NotImplemented => write!(f, "Not implemented"),
-        }
-    }
-}
-impl std::error::Error for CudaCciCycleError {}
 
 pub struct CudaCciCycle {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     sm_count: i32,
     max_grid_x: i32,
 }
 
 impl CudaCciCycle {
     pub fn new(device_id: usize) -> Result<Self, CudaCciCycleError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cci_cycle_kernel.ptx"));
         // Prefer the most optimized JIT level (O4) and derive target from the current context.
@@ -63,32 +64,39 @@ impl CudaCciCycle {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                Module::from_ptx(ptx, &[]).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
-            }
-            Err(_) => {
-                Module::from_ptx(ptx, &[]).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         // Cache device attributes for smarter launches
-        let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        let max_grid_x = device
-            .get_attribute(DeviceAttribute::MaxGridDimX)
-            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)?;
+        let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)?;
 
-        Ok(Self { module, stream, _context: context, sm_count, max_grid_x })
+        Ok(Self { module, stream, context, device_id: device_id as u32, sm_count, max_grid_x })
     }
 
-    fn will_fit(required_bytes: usize, headroom: usize) -> bool {
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+
+    fn will_fit(required_bytes: usize, headroom: usize) -> Result<(), CudaCciCycleError> {
         if let Ok((free, _total)) = mem_get_info() {
             let dyn_headroom = (free as f64 * 0.05) as usize; // keep ~5% free
             let keep = dyn_headroom.max(headroom);
-            required_bytes.saturating_add(keep) <= free
-        } else { true }
+            if required_bytes.saturating_add(keep) <= free {
+                Ok(())
+            } else {
+                Err(CudaCciCycleError::OutOfMemory { required: required_bytes, free, headroom: keep })
+            }
+        } else {
+            Ok(())
+        }
     }
 
     pub fn cci_cycle_batch_dev(
@@ -100,51 +108,49 @@ impl CudaCciCycle {
 
         let rows = combos.len();
         if rows == 0 {
-            return Err(CudaCciCycleError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
-        if rows == 0 {
-            return Err(CudaCciCycleError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
+            return Err(CudaCciCycleError::InvalidInput("no parameter combinations".into()));
         }
 
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let params_bytes = rows * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
-        let out_bytes = rows * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaCciCycleError::InvalidInput(
-                "insufficient VRAM for batch".into(),
-            ));
-            return Err(CudaCciCycleError::InvalidInput(
-                "insufficient VRAM for batch".into(),
-            ));
-        }
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("size overflow".into()))?;
+        let params_bytes = rows
+            .checked_mul(std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("size overflow".into()))?;
+        let out_elems = rows
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("rows*series_len overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
         // Pinned (page-locked) host buffers for real async DMA
-        let h_prices = LockedBuffer::from_slice(data_f32).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        let h_prices = LockedBuffer::from_slice(data_f32).map_err(CudaCciCycleError::Cuda)?;
         let lengths: Vec<i32> = combos.iter().map(|p| p.length.unwrap_or(0) as i32).collect();
         let factors: Vec<f32> = combos.iter().map(|p| p.factor.unwrap_or(0.5) as f32).collect();
-        let h_lengths = LockedBuffer::from_slice(&lengths).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        let h_factors = LockedBuffer::from_slice(&factors).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        let h_lengths = LockedBuffer::from_slice(&lengths).map_err(CudaCciCycleError::Cuda)?;
+        let h_factors = LockedBuffer::from_slice(&factors).map_err(CudaCciCycleError::Cuda)?;
 
         let d_prices = unsafe {
             DeviceBuffer::from_slice_async(&h_prices, &self.stream)
-                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+                .map_err(CudaCciCycleError::Cuda)?
         };
         let d_lengths = unsafe {
             DeviceBuffer::from_slice_async(&h_lengths, &self.stream)
-                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+                .map_err(CudaCciCycleError::Cuda)?
         };
         let d_factors = unsafe {
             DeviceBuffer::from_slice_async(&h_factors, &self.stream)
-                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+                .map_err(CudaCciCycleError::Cuda)?
         };
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(rows * series_len, &self.stream)
-                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+                .map_err(CudaCciCycleError::Cuda)?
         };
 
         // Note: Kernel writes leading NaNs and all subsequent outputs; no extra memset needed here.
@@ -159,9 +165,7 @@ impl CudaCciCycle {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaCciCycleError::Cuda)?;
         Ok(DeviceArrayF32 { buf: d_out, rows, cols: series_len })
     }
 
@@ -179,7 +183,7 @@ impl CudaCciCycle {
         let func = self
             .module
             .get_function("cci_cycle_batch_f32")
-            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCciCycleError::MissingKernelSymbol { name: "cci_cycle_batch_f32" })?;
 
         // 1D grid over rows: keep several blocks per SM; respect MaxGridDimX
         let block: BlockSize = (256, 1, 1).into();
@@ -187,6 +191,9 @@ impl CudaCciCycle {
         let min_blocks = (self.sm_count as u32).saturating_mul(16);
         let max_grid_x = self.max_grid_x as u32;
         let grid_x = needed_blocks.max(min_blocks).min(max_grid_x);
+        if grid_x == 0 || block.x == 0 || block.x > 1024 {
+            return Err(CudaCciCycleError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block.x, by: 1, bz: 1 });
+        }
         let grid: GridSize = (grid_x, 1, 1).into();
 
         unsafe {
@@ -208,7 +215,7 @@ impl CudaCciCycle {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+                .map_err(CudaCciCycleError::Cuda)?;
         }
         Ok(())
     }
@@ -220,19 +227,16 @@ impl CudaCciCycle {
         rows: usize,
         params: &CciCycleParams,
     ) -> Result<DeviceArrayF32, CudaCciCycleError> {
-        if data_tm_f32.len() != cols * rows {
-            return Err(CudaCciCycleError::InvalidInput(
-                "time-major matrix size mismatch".into(),
-            ));
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("cols*rows overflow".into()))?;
+        if data_tm_f32.len() != expected {
             return Err(CudaCciCycleError::InvalidInput(
                 "time-major matrix size mismatch".into(),
             ));
         }
         let length = params.length.unwrap_or(10);
         let factor = params.factor.unwrap_or(0.5) as f32;
-        if length == 0 {
-            return Err(CudaCciCycleError::InvalidInput("length must be > 0".into()));
-        }
         if length == 0 {
             return Err(CudaCciCycleError::InvalidInput("length must be > 0".into()));
         }
@@ -246,41 +250,34 @@ impl CudaCciCycle {
                 if !v.is_nan() {
                     break;
                 }
-                if !v.is_nan() {
-                    break;
-                }
                 fv += 1;
             }
             first_valids[r] = fv as i32;
         }
 
         // VRAM estimate
-        let bytes = data_tm_f32.len() * std::mem::size_of::<f32>()
-            + rows * std::mem::size_of::<i32>()
-            + data_tm_f32.len() * std::mem::size_of::<f32>();
-        if !Self::will_fit(bytes, 64 * 1024 * 1024) {
-            return Err(CudaCciCycleError::InvalidInput(
-                "insufficient VRAM for many-series".into(),
-            ));
-            return Err(CudaCciCycleError::InvalidInput(
-                "insufficient VRAM for many-series".into(),
-            ));
-        }
+        let bytes = data_tm_f32
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .and_then(|v| v.checked_add(rows.checked_mul(std::mem::size_of::<i32>())?))
+            .and_then(|v| v.checked_add(data_tm_f32.len().checked_mul(std::mem::size_of::<f32>())?))
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(bytes, 64 * 1024 * 1024)?;
 
         // Upload via pinned host buffers
-        let h_prices = LockedBuffer::from_slice(data_tm_f32).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        let h_firsts = LockedBuffer::from_slice(&first_valids).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        let h_prices = LockedBuffer::from_slice(data_tm_f32).map_err(CudaCciCycleError::Cuda)?;
+        let h_firsts = LockedBuffer::from_slice(&first_valids).map_err(CudaCciCycleError::Cuda)?;
         let d_prices = unsafe {
             DeviceBuffer::from_slice_async(&h_prices, &self.stream)
-                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+                .map_err(CudaCciCycleError::Cuda)?
         };
         let d_first = unsafe {
             DeviceBuffer::from_slice_async(&h_firsts, &self.stream)
-                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+                .map_err(CudaCciCycleError::Cuda)?
         };
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(cols * rows, &self.stream)
-                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(expected, &self.stream)
+                .map_err(CudaCciCycleError::Cuda)?
         };
         // Note: Kernel covers all writes; memset omitted.
 
@@ -288,10 +285,14 @@ impl CudaCciCycle {
         let func = self
             .module
             .get_function("cci_cycle_many_series_one_param_f32")
-            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCciCycleError::MissingKernelSymbol { name: "cci_cycle_many_series_one_param_f32" })?;
         // One thread per series (sequential over time). Chunk rows across blocks of 256.
         let block: BlockSize = (256, 1, 1).into();
-        let grid: GridSize = (((rows + 255) / 256) as u32, 1, 1).into();
+        let grid_x = ((rows + 255) / 256) as u32;
+        if grid_x == 0 || block.x == 0 || block.x > 1024 {
+            return Err(CudaCciCycleError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block.x, by: 1, bz: 1 });
+        }
+        let grid: GridSize = (grid_x, 1, 1).into();
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
@@ -311,12 +312,10 @@ impl CudaCciCycle {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+                .map_err(CudaCciCycleError::Cuda)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaCciCycleError::Cuda)?;
         Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 
@@ -332,14 +331,7 @@ impl CudaCciCycle {
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaCciCycleError::InvalidInput("all values NaN".into()))?;
-        if len == 0 {
-            return Err(CudaCciCycleError::InvalidInput("empty input".into()));
-        }
-        let first_valid = data
-            .iter()
-            .position(|v| !v.is_nan())
-            .ok_or_else(|| CudaCciCycleError::InvalidInput("all values NaN".into()))?;
-        let combos = expand_grid(sweep);
+        let combos = expand_grid(sweep)?;
         // Validate max length
         let max_len = combos
             .iter()
@@ -351,22 +343,10 @@ impl CudaCciCycle {
                 "invalid length in sweep".into(),
             ));
         }
-        if len - first_valid < max_len * 2 {
-            return Err(CudaCciCycleError::InvalidInput(
-                "not enough valid data for largest window".into(),
-            ));
-        }
-        let max_len = combos
-            .iter()
-            .map(|p| p.length.unwrap_or(0))
-            .max()
-            .unwrap_or(0);
-        if max_len == 0 || max_len > len {
-            return Err(CudaCciCycleError::InvalidInput(
-                "invalid length in sweep".into(),
-            ));
-        }
-        if len - first_valid < max_len * 2 {
+        let needed = max_len
+            .checked_mul(2)
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("max_len*2 overflow".into()))?;
+        if len - first_valid < needed {
             return Err(CudaCciCycleError::InvalidInput(
                 "not enough valid data for largest window".into(),
             ));
@@ -375,72 +355,90 @@ impl CudaCciCycle {
     }
 }
 
-fn expand_grid(r: &CciCycleBatchRange) -> Vec<CciCycleParams> {
-    let (ls, le, ld) = r.length;
-    let (fs, fe, fd) = r.factor;
-    let mut len_vals = Vec::new();
-    if ld == 0 || ls == le {
-        len_vals.push(ls);
-    } else {
-        let mut v = ls;
-        while v <= le {
-            len_vals.push(v);
-            v = v.saturating_add(ld);
+fn expand_grid(r: &CciCycleBatchRange) -> Result<Vec<CciCycleParams>, CudaCciCycleError> {
+    fn axis_usize((s, e, st): (usize, usize, usize)) -> Result<Vec<usize>, CudaCciCycleError> {
+        if st == 0 || s == e {
+            return Ok(vec![s]);
         }
-    }
-    if ld == 0 || ls == le {
-        len_vals.push(ls);
-    } else {
-        let mut v = ls;
-        while v <= le {
-            len_vals.push(v);
-            v = v.saturating_add(ld);
-        }
-    }
-    let mut fac_vals = Vec::new();
-    if fd == 0.0 || (fs == fe) {
-        fac_vals.push(fs);
-    } else {
-        let mut v = fs;
-        while v <= fe + 1e-12 {
-            fac_vals.push(v);
-            v += fd;
-            if fd.abs() < 1e-12 {
-                break;
+        let mut vals = Vec::new();
+        if s < e {
+            let mut v = s;
+            while v <= e {
+                vals.push(v);
+                v = match v.checked_add(st) {
+                    Some(n) => n,
+                    None => break,
+                };
+            }
+        } else {
+            let mut v = s;
+            while v >= e {
+                vals.push(v);
+                if v < st {
+                    break;
+                }
+                v -= st;
+                if v == 0 && e > 0 {
+                    break;
+                }
             }
         }
+        if vals.is_empty() {
+            return Err(CudaCciCycleError::InvalidInput(
+                "empty length range in cci_cycle CUDA sweep".into(),
+            ));
+        }
+        Ok(vals)
     }
-    if fd == 0.0 || (fs == fe) {
-        fac_vals.push(fs);
-    } else {
-        let mut v = fs;
-        while v <= fe + 1e-12 {
-            fac_vals.push(v);
-            v += fd;
-            if fd.abs() < 1e-12 {
-                break;
+    fn axis_f64((s, e, st): (f64, f64, f64)) -> Result<Vec<f64>, CudaCciCycleError> {
+        if !st.is_finite() {
+            return Err(CudaCciCycleError::InvalidInput(
+                "non-finite factor step in cci_cycle CUDA sweep".into(),
+            ));
+        }
+        if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+            return Ok(vec![s]);
+        }
+        let mut vals = Vec::new();
+        let step = st.abs();
+        let eps = 1e-12;
+        if s <= e {
+            let mut x = s;
+            while x <= e + eps {
+                vals.push(x);
+                x += step;
+            }
+        } else {
+            let mut x = s;
+            while x >= e - eps {
+                vals.push(x);
+                x -= step;
             }
         }
+        if vals.is_empty() {
+            return Err(CudaCciCycleError::InvalidInput(
+                "empty factor range in cci_cycle CUDA sweep".into(),
+            ));
+        }
+        Ok(vals)
     }
 
-    let mut out = Vec::with_capacity(len_vals.len() * fac_vals.len());
-    for &l in &len_vals {
-        for &f in &fac_vals {
+    let lens = axis_usize(r.length)?;
+    let facs = axis_f64(r.factor)?;
+    let cap = lens
+        .len()
+        .checked_mul(facs.len())
+        .ok_or_else(|| CudaCciCycleError::InvalidInput("rows*cols overflow in cci_cycle CUDA sweep".into()))?;
+    let mut out = Vec::with_capacity(cap);
+    for &l in &lens {
+        for &f in &facs {
             out.push(CciCycleParams {
                 length: Some(l),
                 factor: Some(f),
             });
         }
     }
-    for &l in &len_vals {
-        for &f in &fac_vals {
-            out.push(CciCycleParams {
-                length: Some(l),
-                factor: Some(f),
-            });
-        }
-    }
-    out
+    Ok(out)
 }
 
 pub mod benches {

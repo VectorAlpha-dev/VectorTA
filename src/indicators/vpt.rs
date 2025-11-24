@@ -17,6 +17,7 @@
 //!
 //! ## Developer Notes
 //! - SIMD status: enabled (AVX2/AVX512) via block prefix-scan with scalar carry. On 100k candles at `-C target-cpu=native`, AVX2/AVX512 improve >30% vs optimized scalar.
+//! - CUDA/Python status: CUDA wrapper present with typed errors and VRAM checks; Python CUDA handle exposes CAI v3 + DLPack v1.x (versioned capsules) with primary-context lifetime tracking.
 //! - Batch status: row-specific batch kernels not attempted; VPT has no parameter grid and no shared precompute across rows. Batch selection short-circuits to scalar row path.
 //! - Streaming Performance: O(1) with sticky-NaN semantics to match slice/batch; uses `mul_add` on the hot path. Very efficient and state-minimal.
 //! - Memory Optimization: Uses `alloc_with_nan_prefix` and batch helpers properly. Streaming is optimal with minimal state.
@@ -143,13 +144,21 @@ impl VptBuilder {
 #[derive(Debug, Error)]
 pub enum VptError {
     #[error("vpt: Empty data provided.")]
-    EmptyData,
+    EmptyInputData,
     #[error("vpt: All values are NaN.")]
     AllValuesNaN,
-    #[error("vpt: Not enough valid data (fewer than 2 valid points).")]
-    NotEnoughValidData,
-    #[error("vpt: Invalid output length. expected={expected}, got={got}")]
-    InvalidLength { expected: usize, got: usize },
+    #[error("vpt: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("vpt: Not enough valid data (needed = {needed}, valid = {valid}).")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("vpt: Output length mismatch. expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("vpt: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("vpt: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("vpt: size overflow computing rows*cols")]
+    SizeOverflow,
 }
 
 #[inline]
@@ -179,14 +188,14 @@ pub fn vpt_with_kernel(input: &VptInput, kernel: Kernel) -> Result<VptOutput, Vp
             let price = source_type(candles, source);
             let vol = candles
                 .select_candle_field("volume")
-                .map_err(|_| VptError::EmptyData)?;
+                .map_err(|_| VptError::EmptyInputData)?;
             (price, vol)
         }
         VptData::Slices { price, volume } => (*price, *volume),
     };
 
     if price.is_empty() || volume.is_empty() || price.len() != volume.len() {
-        return Err(VptError::EmptyData);
+        return Err(VptError::EmptyInputData);
     }
 
     let valid_count = price
@@ -199,7 +208,10 @@ pub fn vpt_with_kernel(input: &VptInput, kernel: Kernel) -> Result<VptOutput, Vp
         return Err(VptError::AllValuesNaN);
     }
     if valid_count < 2 {
-        return Err(VptError::NotEnoughValidData);
+        return Err(VptError::NotEnoughValidData {
+            needed: 2,
+            valid: valid_count,
+        });
     }
 
     let chosen = match kernel {
@@ -222,7 +234,25 @@ pub fn vpt_with_kernel(input: &VptInput, kernel: Kernel) -> Result<VptOutput, Vp
 #[inline]
 pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptError> {
     let n = price.len();
-    let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData)?;
+    if n == 0 || volume.len() != n {
+        return Err(VptError::EmptyInputData);
+    }
+    let valid_count = price
+        .iter()
+        .zip(volume.iter())
+        .filter(|(&p, &v)| !(p.is_nan() || v.is_nan()))
+        .count();
+    if valid_count == 0 {
+        return Err(VptError::AllValuesNaN);
+    }
+    if valid_count < 2 {
+        return Err(VptError::NotEnoughValidData {
+            needed: 2,
+            valid: valid_count,
+        });
+    }
+    let first = vpt_first_valid(price, volume)
+        .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
     let mut res = alloc_with_nan_prefix(n, first + 1);
 
     // Raw pointers to avoid bounds checks inside the hot loop.
@@ -331,7 +361,25 @@ pub unsafe fn vpt_avx2(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptEr
     use core::arch::x86_64::*;
 
     let n = price.len();
-    let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData)?;
+    if n == 0 || volume.len() != n {
+        return Err(VptError::EmptyInputData);
+    }
+    let valid_count = price
+        .iter()
+        .zip(volume.iter())
+        .filter(|(&p, &v)| !(p.is_nan() || v.is_nan()))
+        .count();
+    if valid_count == 0 {
+        return Err(VptError::AllValuesNaN);
+    }
+    if valid_count < 2 {
+        return Err(VptError::NotEnoughValidData {
+            needed: 2,
+            valid: valid_count,
+        });
+    }
+    let first = vpt_first_valid(price, volume)
+        .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
     let mut out = alloc_with_nan_prefix(n, first + 1);
 
     let p_ptr = price.as_ptr();
@@ -438,7 +486,25 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
     use core::arch::x86_64::*;
 
     let n = price.len();
-    let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData)?;
+    if n == 0 || volume.len() != n {
+        return Err(VptError::EmptyInputData);
+    }
+    let valid_count = price
+        .iter()
+        .zip(volume.iter())
+        .filter(|(&p, &v)| !(p.is_nan() || v.is_nan()))
+        .count();
+    if valid_count == 0 {
+        return Err(VptError::AllValuesNaN);
+    }
+    if valid_count < 2 {
+        return Err(VptError::NotEnoughValidData {
+            needed: 2,
+            valid: valid_count,
+        });
+    }
+    let first = vpt_first_valid(price, volume)
+        .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
     let mut out = alloc_with_nan_prefix(n, first + 1);
 
     let p_ptr = price.as_ptr();
@@ -705,7 +771,7 @@ pub fn vpt_expand_grid() -> Vec<VptParams> {
 /// Writes VPT into a caller-provided buffer without allocating.
 ///
 /// - Preserves NaN warmups exactly as the Vec API (`vpt`/`vpt_with_kernel`).
-/// - `out` length must equal the input length; returns `InvalidLength` on mismatch.
+/// - `out` length must equal the input length; returns `OutputLengthMismatch` on mismatch.
 /// - Uses `Kernel::Auto` dispatch (same as the Vec-returning API) and writes results in-place.
 #[cfg(not(feature = "wasm"))]
 pub fn vpt_into(input: &VptInput, out: &mut [f64]) -> Result<(), VptError> {
@@ -714,7 +780,7 @@ pub fn vpt_into(input: &VptInput, out: &mut [f64]) -> Result<(), VptError> {
             let price = source_type(candles, source);
             let vol = candles
                 .select_candle_field("volume")
-                .map_err(|_| VptError::EmptyData)?;
+                .map_err(|_| VptError::EmptyInputData)?;
             (price, vol)
         }
         VptData::Slices { price, volume } => (*price, *volume),
@@ -731,11 +797,11 @@ pub fn vpt_into_slice(
     kern: Kernel,
 ) -> Result<(), VptError> {
     if price.is_empty() || volume.is_empty() || price.len() != volume.len() {
-        return Err(VptError::EmptyData);
+        return Err(VptError::EmptyInputData);
     }
 
     if dst.len() != price.len() {
-        return Err(VptError::InvalidLength {
+        return Err(VptError::OutputLengthMismatch {
             expected: price.len(),
             got: dst.len(),
         });
@@ -751,10 +817,14 @@ pub fn vpt_into_slice(
         return Err(VptError::AllValuesNaN);
     }
     if valid_count < 2 {
-        return Err(VptError::NotEnoughValidData);
+        return Err(VptError::NotEnoughValidData {
+            needed: 2,
+            valid: valid_count,
+        });
     }
 
-    let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData)?;
+    let first = vpt_first_valid(price, volume)
+        .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
     unsafe {
         match kern {
             Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => {
@@ -784,18 +854,33 @@ pub fn vpt_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<VptParams>, VptError> {
     if price.is_empty() || volume.is_empty() || price.len() != volume.len() {
-        return Err(VptError::EmptyData);
+        return Err(VptError::EmptyInputData);
     }
     let combos = vec![VptParams::default()];
     let cols = price.len();
     if out.len() != cols {
-        return Err(VptError::InvalidLength {
+        return Err(VptError::OutputLengthMismatch {
             expected: cols,
             got: out.len(),
         });
     }
 
-    let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData)?;
+    let valid_count = price
+        .iter()
+        .zip(volume.iter())
+        .filter(|(&p, &v)| !(p.is_nan() || v.is_nan()))
+        .count();
+    if valid_count == 0 {
+        return Err(VptError::AllValuesNaN);
+    }
+    if valid_count < 2 {
+        return Err(VptError::NotEnoughValidData {
+            needed: 2,
+            valid: valid_count,
+        });
+    }
+    let first = vpt_first_valid(price, volume)
+        .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
 
     // change calls to start at first + 1
     unsafe {
@@ -951,7 +1036,7 @@ impl VptBatchBuilder {
         let price = source_type(c, src);
         let volume = c
             .select_candle_field("volume")
-            .map_err(|_| VptError::EmptyData)?;
+            .map_err(|_| VptError::EmptyInputData)?;
         self.apply_slices(price, volume)
     }
 
@@ -970,7 +1055,7 @@ pub fn vpt_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => Kernel::ScalarBatch,
+        other => return Err(VptError::InvalidKernelForBatch(other)),
     };
     vpt_batch_par_slice(price, volume, kernel)
 }
@@ -1019,7 +1104,7 @@ fn vpt_batch_inner(
     _parallel: bool,
 ) -> Result<VptBatchOutput, VptError> {
     if price.is_empty() || volume.is_empty() || price.len() != volume.len() {
-        return Err(VptError::EmptyData);
+        return Err(VptError::EmptyInputData);
     }
 
     let combos = vpt_expand_grid();
@@ -1031,7 +1116,22 @@ fn vpt_batch_inner(
 
     // For VPT, warmup is always at least 1 (index 0 is always NaN)
     // but might be more if there are NaN values in the data
-    let first_valid = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData)?;
+    let valid_count = price
+        .iter()
+        .zip(volume.iter())
+        .filter(|(&p, &v)| !(p.is_nan() || v.is_nan()))
+        .count();
+    if valid_count == 0 {
+        return Err(VptError::AllValuesNaN);
+    }
+    if valid_count < 2 {
+        return Err(VptError::NotEnoughValidData {
+            needed: 2,
+            valid: valid_count,
+        });
+    }
+    let first_valid = vpt_first_valid(price, volume)
+        .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
     let warm = vec![first_valid + 1];
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
@@ -1292,7 +1392,10 @@ pub fn vpt_batch_py<'py>(
     let rows = 1;
     let cols = price_slice.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("vpt_batch: size overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Initialize NaN prefix for VPT (indices 0..=first_valid)
@@ -1336,7 +1439,9 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaVpt;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "vpt_cuda_batch_dev")]
@@ -1346,7 +1451,7 @@ pub fn vpt_cuda_batch_dev_py(
     price: PyReadonlyArray1<'_, f32>,
     volume: PyReadonlyArray1<'_, f32>,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<VptDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1355,12 +1460,20 @@ pub fn vpt_cuda_batch_dev_py(
     if price_slice.len() != volume_slice.len() {
         return Err(PyValueError::new_err("length mismatch"));
     }
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaVpt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vpt_batch_dev(price_slice, volume_slice)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .vpt_batch_dev(price_slice, volume_slice)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(VptDeviceArrayF32Py {
+        inner: Some(inner),
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1373,18 +1486,26 @@ pub fn vpt_cuda_many_series_one_param_dev_py(
     cols: usize,
     rows: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<VptDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let price_slice = price_tm.as_slice()?;
     let volume_slice = volume_tm.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaVpt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vpt_many_series_one_param_time_major_dev(price_slice, volume_slice, cols, rows)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .vpt_many_series_one_param_time_major_dev(price_slice, volume_slice, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(VptDeviceArrayF32Py {
+        inner: Some(inner),
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(feature = "wasm")]
@@ -1508,6 +1629,213 @@ pub fn vpt_batch_into(
 
         // Return number of parameter combinations (always 1 for VPT)
         Ok(1)
+    }
+}
+
+// Python CUDA handle for VPT: CAI v3 and DLPack v1.x. Keeps CUDA context alive.
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "my_project", name = "VptDeviceArrayF32", unsendable)]
+pub struct VptDeviceArrayF32Py {
+    // One-shot export via __dlpack__: move out of this Option
+    pub(crate) inner: Option<crate::cuda::moving_averages::DeviceArrayF32>,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl VptDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // Producer synchronizes before returning, so no stream key is required per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    // DLPack producer with v1.x negotiation and legacy fallback.
+    // Array API stream semantics are accepted but ignored here since the stream is synchronized.
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        mut slf: pyo3::PyRefMut<'py, Self>,
+        py: Python<'py>,
+        _stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<pyo3::PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        let inner = slf
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        struct Manager {
+            _ctx: Arc<Context>,
+            _buf: cust::memory::DeviceBuffer<f32>,
+            shape: Box<[i64; 2]>,
+            strides: Box<[i64; 2]>,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt: Box<DLManagedTensor> = Box::from_raw(p);
+            let mgr_ptr = mt.manager_ctx as *mut Manager;
+            if !mgr_ptr.is_null() {
+                let _ = Box::from_raw(mgr_ptr);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_legacy(cap: *mut pyffi::PyObject) {
+            let name = CString::new("dltensor").unwrap();
+            let ptr = pyffi::PyCapsule_GetPointer(cap, name.as_ptr());
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(d) = (*mt).deleter {
+                    d(mt)
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_versioned(cap: *mut pyffi::PyObject) {
+            let name = CString::new("dltensor_versioned").unwrap();
+            let ptr = pyffi::PyCapsule_GetPointer(cap, name.as_ptr());
+            if !ptr.is_null() {
+                let wrap = ptr as *mut DLManagedTensorVersioned;
+                let mt = (*wrap).manager;
+                if !mt.is_null() {
+                    if let Some(d) = unsafe { (*mt).deleter } {
+                        unsafe { d(mt) }
+                    }
+                }
+            }
+        }
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let total: i128 = (rows as i128) * (cols as i128);
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1]);
+        let data_ptr: *mut c_void = if total == 0 {
+            core::ptr::null_mut()
+        } else {
+            inner.device_ptr() as usize as *mut c_void
+        };
+
+        let mgr = Box::new(Manager {
+            _ctx: slf._ctx.clone(),
+            _buf: inner.buf,
+            shape,
+            strides,
+        });
+        let mgr_ptr = Box::into_raw(mgr);
+        let shape_ptr = unsafe { (*mgr_ptr).shape.as_ptr() as *mut i64 };
+        let strides_ptr = unsafe { (*mgr_ptr).strides.as_ptr() as *mut i64 };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice {
+                    device_type: 2,
+                    device_id: slf.device_id as i32,
+                },
+                ndim: 2,
+                dtype: DLDataType {
+                    code: 2,
+                    bits: 32,
+                    lanes: 1,
+                },
+                shape: shape_ptr,
+                strides: strides_ptr,
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr as *mut c_void,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped =
+                    Box::new(DLManagedTensorVersioned { manager: Box::into_raw(mt), version: 1 });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor_versioned));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create versioned DLPack capsule",
+                    ));
+                }
+                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor_legacy));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err("failed to create DLPack capsule"));
+                }
+                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+            }
+        }
     }
 }
 

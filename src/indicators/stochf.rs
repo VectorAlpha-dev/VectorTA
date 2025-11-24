@@ -22,6 +22,7 @@
 //! - Batch: per-row kernel mirrors scalar optimizations; no cross-row sharing (window-dependent extrema).
 //! - Streaming: O(1) amortized via ring-indexed monotonic deques for %K and a running-sum ring for %D (SMA).
 //! - Memory: follows ALMA patterns (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes). %D supports SMA (matype=0).
+//! - Decision log: SIMD remains short-circuited to the scalar path for performance; CUDA wrapper includes typed errors + VRAM checks and feeds shared `DeviceArrayF32Py` (CAI v3 + DLPack v1.x) without changing numerical outputs.
 //!
 //! Binding test status (Oct 29, 2025):
 //! - WASM: all stochf binding tests pass (accuracy last-5 match Rust refs at abs tol 1e-4).
@@ -230,7 +231,7 @@ impl StochfBuilder {
 #[derive(Debug, Error)]
 pub enum StochfError {
     #[error("stochf: Empty data provided.")]
-    EmptyData,
+    EmptyInputData,
     #[error("stochf: Invalid period (fastk={fastk}, fastd={fastd}), data length={data_len}.")]
     InvalidPeriod {
         fastk: usize,
@@ -244,11 +245,15 @@ pub enum StochfError {
     )]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("stochf: Invalid output size (expected={expected}, k_got={k_got}, d_got={d_got}).")]
-    InvalidOutputSize {
+    OutputLengthMismatch {
         expected: usize,
         k_got: usize,
         d_got: usize,
     },
+    #[error("stochf: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("stochf: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -275,27 +280,27 @@ pub fn stochf_into(
         StochfData::Candles { candles } => {
             let high = candles
                 .select_candle_field("high")
-                .map_err(|_| StochfError::EmptyData)?;
+                .map_err(|_| StochfError::EmptyInputData)?;
             let low = candles
                 .select_candle_field("low")
-                .map_err(|_| StochfError::EmptyData)?;
+                .map_err(|_| StochfError::EmptyInputData)?;
             let close = candles
                 .select_candle_field("close")
-                .map_err(|_| StochfError::EmptyData)?;
+                .map_err(|_| StochfError::EmptyInputData)?;
             (high, low, close)
         }
         StochfData::Slices { high, low, close } => (*high, *low, *close),
     };
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(StochfError::EmptyData);
+        return Err(StochfError::EmptyInputData);
     }
     let len = high.len();
     if low.len() != len || close.len() != len {
-        return Err(StochfError::EmptyData);
+        return Err(StochfError::EmptyInputData);
     }
     if out_k.len() != len || out_d.len() != len {
-        return Err(StochfError::InvalidOutputSize {
+        return Err(StochfError::OutputLengthMismatch {
             expected: len,
             k_got: out_k.len(),
             d_got: out_d.len(),
@@ -350,27 +355,31 @@ pub fn stochf_into_slice(
         StochfData::Candles { candles } => {
             let high = candles
                 .select_candle_field("high")
-                .map_err(|_| StochfError::EmptyData)?;
+                .map_err(|_| StochfError::EmptyInputData)?;
             let low = candles
                 .select_candle_field("low")
-                .map_err(|_| StochfError::EmptyData)?;
+                .map_err(|_| StochfError::EmptyInputData)?;
             let close = candles
                 .select_candle_field("close")
-                .map_err(|_| StochfError::EmptyData)?;
+                .map_err(|_| StochfError::EmptyInputData)?;
             (high, low, close)
         }
         StochfData::Slices { high, low, close } => (*high, *low, *close),
     };
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(StochfError::EmptyData);
+        return Err(StochfError::EmptyInputData);
     }
     let len = high.len();
     if low.len() != len || close.len() != len {
-        return Err(StochfError::EmptyData);
+        return Err(StochfError::EmptyInputData);
     }
     if dst_k.len() != len || dst_d.len() != len {
-        return Err(StochfError::EmptyData);
+        return Err(StochfError::OutputLengthMismatch {
+            expected: len,
+            k_got: dst_k.len(),
+            d_got: dst_d.len(),
+        });
     }
 
     let fastk_period = input.get_fastk_period();
@@ -463,24 +472,24 @@ pub fn stochf_with_kernel(
         StochfData::Candles { candles } => {
             let high = candles
                 .select_candle_field("high")
-                .map_err(|_| StochfError::EmptyData)?;
+                .map_err(|_| StochfError::EmptyInputData)?;
             let low = candles
                 .select_candle_field("low")
-                .map_err(|_| StochfError::EmptyData)?;
+                .map_err(|_| StochfError::EmptyInputData)?;
             let close = candles
                 .select_candle_field("close")
-                .map_err(|_| StochfError::EmptyData)?;
+                .map_err(|_| StochfError::EmptyInputData)?;
             (high, low, close)
         }
         StochfData::Slices { high, low, close } => (*high, *low, *close),
     };
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(StochfError::EmptyData);
+        return Err(StochfError::EmptyInputData);
     }
     let len = high.len();
     if low.len() != len || close.len() != len {
-        return Err(StochfError::EmptyData);
+        return Err(StochfError::EmptyInputData);
     }
 
     let fastk_period = input.get_fastk_period();
@@ -1374,13 +1383,7 @@ pub fn stochf_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(StochfError::InvalidPeriod {
-                fastk: 0,
-                fastd: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(StochfError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1423,15 +1426,45 @@ impl StochfBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &StochfBatchRange) -> Vec<StochfParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, StochfError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let mut v = Vec::new();
+            let st = step.max(1);
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                x = match x.checked_add(st) {
+                    Some(next) => next,
+                    None => break,
+                };
+            }
+            if v.is_empty() {
+                return Err(StochfError::InvalidRange { start, end, step });
+            }
+            return Ok(v);
+        }
+        // reversed bounds
+        let mut v = Vec::new();
+        let st = step.max(1) as isize;
+        let mut x = start as isize;
+        let end_i = end as isize;
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(StochfError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    let fastk = axis(r.fastk_period);
-    let fastd = axis(r.fastd_period);
-    let mut out = Vec::with_capacity(fastk.len() * fastd.len());
+    let fastk = axis_usize(r.fastk_period).unwrap_or_else(|_| Vec::new());
+    let fastd = axis_usize(r.fastd_period).unwrap_or_else(|_| Vec::new());
+    let mut out = Vec::with_capacity(fastk.len().saturating_mul(fastd.len()));
     for &k in &fastk {
         for &d in &fastd {
             out.push(StochfParams {
@@ -1479,10 +1512,10 @@ pub fn stochf_batch_inner_into(
 ) -> Result<Vec<StochfParams>, StochfError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(StochfError::InvalidPeriod {
-            fastk: 0,
-            fastd: 0,
-            data_len: 0,
+        return Err(StochfError::InvalidRange {
+            start: sweep.fastk_period.0,
+            end: sweep.fastk_period.1,
+            step: sweep.fastk_period.2,
         });
     }
     let first = (0..high.len())
@@ -1503,9 +1536,15 @@ pub fn stochf_batch_inner_into(
     let cols = high.len();
 
     // Ensure output slices are correct size
-    let expected_size = rows * cols;
+    let expected_size = rows
+        .checked_mul(cols)
+        .ok_or(StochfError::InvalidRange {
+            start: sweep.fastk_period.0,
+            end: sweep.fastk_period.1,
+            step: sweep.fastk_period.2,
+        })?;
     if k_out.len() != expected_size || d_out.len() != expected_size {
-        return Err(StochfError::InvalidOutputSize {
+        return Err(StochfError::OutputLengthMismatch {
             expected: expected_size,
             k_got: k_out.len(),
             d_got: d_out.len(),
@@ -1618,10 +1657,10 @@ fn stochf_batch_inner(
 ) -> Result<StochfBatchOutput, StochfError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(StochfError::InvalidPeriod {
-            fastk: 0,
-            fastd: 0,
-            data_len: 0,
+        return Err(StochfError::InvalidRange {
+            start: sweep.fastk_period.0,
+            end: sweep.fastk_period.1,
+            step: sweep.fastk_period.2,
         });
     }
     let first = (0..high.len())
@@ -1640,6 +1679,15 @@ fn stochf_batch_inner(
     }
     let rows = combos.len();
     let cols = high.len();
+
+    // Guard rows * cols overflow before allocation
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(StochfError::InvalidRange {
+            start: sweep.fastk_period.0,
+            end: sweep.fastk_period.1,
+            step: sweep.fastk_period.2,
+        })?;
 
     // Use uninitialized memory operations like ALMA
     let mut k_buf = make_uninit_matrix(rows, cols);
@@ -2230,11 +2278,19 @@ pub fn stochf_batch_py<'py>(
 
     let combos = expand_grid(&sweep);
     let rows = combos.len();
+    if rows == 0 {
+        return Err(PyValueError::new_err(
+            "stochf: invalid range (empty expansion)",
+        ));
+    }
     let cols = high_slice.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("stochf: rows*cols overflow"))?;
 
     // Pre-allocate output arrays for batch
-    let k_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let d_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let k_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let d_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let k_slice = unsafe { k_arr.as_slice_mut()? };
     let d_slice = unsafe { d_arr.as_slice_mut()? };
 
@@ -2321,14 +2377,18 @@ pub fn stochf_cuda_batch_dev_py(
         fastk_period: fastk_range,
         fastd_period: fastd_range,
     };
-    let (pair, _combos) = py.allow_threads(|| {
+    let (pair, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaStochf::new(device_id).map_err(|e| PyErrValue::new_err(e.to_string()))?;
-        cuda.stochf_batch_dev(h, l, c, &sweep)
-            .map_err(|e| PyErrValue::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let (pair, _combos) = cuda
+            .stochf_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyErrValue::new_err(e.to_string()))?;
+        Ok::<_, PyErrValue>((pair, ctx, dev_id))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: pair.a },
-        DeviceArrayF32Py { inner: pair.b },
+        DeviceArrayF32Py { inner: pair.a, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
+        DeviceArrayF32Py { inner: pair.b, _ctx: Some(ctx), device_id: Some(dev_id) },
     ))
 }
 
@@ -2358,12 +2418,19 @@ pub fn stochf_cuda_many_series_one_param_dev_py(
         fastd_period: Some(fastd),
         fastd_matype: Some(fastd_matype),
     };
-    let (k, d) = py.allow_threads(|| {
+    let (k, d, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaStochf::new(device_id).map_err(|e| PyErrValue::new_err(e.to_string()))?;
-        cuda.stochf_many_series_one_param_time_major_dev(htm, ltm, ctm, cols, rows, &params)
-            .map_err(|e| PyErrValue::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let (k, d) = cuda
+            .stochf_many_series_one_param_time_major_dev(htm, ltm, ctm, cols, rows, &params)
+            .map_err(|e| PyErrValue::new_err(e.to_string()))?;
+        Ok::<_, PyErrValue>((k, d, ctx, dev_id))
     })?;
-    Ok((DeviceArrayF32Py { inner: k }, DeviceArrayF32Py { inner: d }))
+    Ok((
+        DeviceArrayF32Py { inner: k, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
+        DeviceArrayF32Py { inner: d, _ctx: Some(ctx), device_id: Some(dev_id) },
+    ))
 }
 
 #[cfg(test)]
@@ -3274,7 +3341,7 @@ mod tests {
 
     #[test]
     fn test_batch_invalid_output_size() {
-        // Test that InvalidOutputSize error is properly returned
+        // Test that OutputLengthMismatch error is properly returned
         let high = vec![10.0, 20.0, 30.0, 40.0, 50.0];
         let low = vec![5.0, 15.0, 25.0, 35.0, 45.0];
         let close = vec![7.0, 17.0, 27.0, 37.0, 47.0];
@@ -3299,10 +3366,10 @@ mod tests {
             &mut d_out,
         );
 
-        // Should return InvalidOutputSize error
+        // Should return OutputLengthMismatch error
         assert!(matches!(
             result,
-            Err(StochfError::InvalidOutputSize {
+            Err(StochfError::OutputLengthMismatch {
                 expected: 10,
                 k_got: 5,
                 d_got: 5
@@ -3324,10 +3391,10 @@ mod tests {
             &mut d_out,
         );
 
-        // Should return InvalidOutputSize error
+        // Should return OutputLengthMismatch error
         assert!(matches!(
             result,
-            Err(StochfError::InvalidOutputSize {
+            Err(StochfError::OutputLengthMismatch {
                 expected: 10,
                 k_got: 10,
                 d_got: 8

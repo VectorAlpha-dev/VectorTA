@@ -24,6 +24,7 @@
 //! Decision: Streaming path updated to O(1) per tick for EMA/RMA/SMA/WMA.
 //! Seed EMAs by SMA; signal seeded by SMA of MACD. Matches batch warmups.
 //! Unknown MA types fall back to Unsupported in the stream path.
+//! Decision log: SIMD enabled for EMA warm path; CUDA wrappers provide EMA-only kernels and expose VRAM-backed handles via Python (CAI v3 + DLPack); scalar CPU implementation remains the reference for correctness and warmup semantics.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -229,6 +230,8 @@ impl MacdBuilder {
 
 #[derive(Debug, Error)]
 pub enum MacdError {
+    #[error("macd: input data slice is empty")]
+    EmptyInputData,
     #[error("macd: All values are NaN.")]
     AllValuesNaN,
     #[error("macd: Invalid period: fast = {fast}, slow = {slow}, signal = {signal}, data length = {data_len}")]
@@ -240,10 +243,14 @@ pub enum MacdError {
     },
     #[error("macd: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("macd: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("macd: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
     #[error("macd: Unknown MA type: {0}")]
     UnknownMA(String),
-    #[error("macd: Invalid kernel for batch operation: {0}")]
-    InvalidKernel(String),
+    #[error("macd: Invalid kernel for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[derive(Debug, Clone)]
@@ -602,6 +609,9 @@ fn macd_prepare<'a>(
 ) -> Result<(&'a [f64], usize, usize, usize, String, usize, usize, Kernel), MacdError> {
     let data = input.as_ref();
     let len = data.len();
+    if len == 0 {
+        return Err(MacdError::EmptyInputData);
+    }
     let fast = input.get_fast_period();
     let slow = input.get_slow_period();
     let signal = input.get_signal_period();
@@ -957,13 +967,13 @@ pub fn macd_into(
     let (data, fast, slow, signal, ma_type, macd_warmup, signal_warmup, chosen) =
         macd_prepare(input, Kernel::Auto)?;
 
-    if macd_out.len() != data.len() || signal_out.len() != data.len() || hist_out.len() != data.len() {
-        return Err(MacdError::InvalidPeriod {
-            fast,
-            slow,
-            signal,
-            data_len: data.len(),
-        });
+    let expected = data.len();
+    if macd_out.len() != expected || signal_out.len() != expected || hist_out.len() != expected {
+        let got = macd_out
+            .len()
+            .max(signal_out.len())
+            .max(hist_out.len());
+        return Err(MacdError::OutputLengthMismatch { expected, got });
     }
 
     // Prefill warmup prefixes with quiet NaN
@@ -1499,10 +1509,7 @@ pub fn macd_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(MacdError::InvalidKernel(format!(
-                "{:?} is not a valid batch kernel",
-                k
-            )));
+            return Err(MacdError::InvalidKernelForBatch(k));
         }
     };
     let simd = match kernel {
@@ -1525,16 +1532,53 @@ pub struct MacdBatchOutput {
 }
 
 #[inline(always)]
-pub fn expand_grid(r: &MacdBatchRange) -> Vec<MacdParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+pub fn expand_grid(r: &MacdBatchRange) -> Result<Vec<MacdParams>, MacdError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, MacdError> {
+        let (start, end, step) = (start, end, step);
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let mut out = Vec::new();
+            let mut v = start;
+            loop {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(next) if next <= end => {
+                        v = next;
+                    }
+                    Some(_) | None => break,
+                }
+            }
+            if out.is_empty() {
+                return Err(MacdError::InvalidRange { start, end, step });
+            }
+            Ok(out)
+        } else {
+            let mut out = Vec::new();
+            let mut v = start;
+            loop {
+                out.push(v);
+                if v <= end {
+                    break;
+                }
+                if v < step {
+                    break;
+                }
+                v -= step;
+                if v < end {
+                    break;
+                }
+            }
+            if out.is_empty() {
+                return Err(MacdError::InvalidRange { start, end, step });
+            }
+            Ok(out)
+        }
     }
-    let fasts = axis_usize(r.fast_period);
-    let slows = axis_usize(r.slow_period);
-    let signals = axis_usize(r.signal_period);
+    let fasts = axis_usize(r.fast_period)?;
+    let slows = axis_usize(r.slow_period)?;
+    let signals = axis_usize(r.signal_period)?;
     let ma_types = vec![r.ma_type.0.clone()]; // For now, static MA type
 
     let mut combos = vec![];
@@ -1552,7 +1596,14 @@ pub fn expand_grid(r: &MacdBatchRange) -> Vec<MacdParams> {
             }
         }
     }
-    combos
+    if combos.is_empty() {
+        return Err(MacdError::InvalidRange {
+            start: r.fast_period.0,
+            end: r.fast_period.1,
+            step: r.fast_period.2,
+        });
+    }
+    Ok(combos)
 }
 
 pub fn macd_batch_par_slice(
@@ -1560,11 +1611,11 @@ pub fn macd_batch_par_slice(
     sweep: &MacdBatchRange,
     _simd: Kernel,
 ) -> Result<MacdBatchOutput, MacdError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let rows = combos.len();
     let cols = data.len();
     if cols == 0 {
-        return Err(MacdError::AllValuesNaN);
+        return Err(MacdError::EmptyInputData);
     }
 
     // allocate 3 matrices uninitialized
@@ -1676,18 +1727,25 @@ pub fn macd_batch_inner_into(
     signal_out: &mut [f64],
     hist_out: &mut [f64],
 ) -> Result<Vec<MacdParams>, MacdError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let rows = combos.len();
     let cols = data.len();
-    if macd_out.len() != rows * cols
-        || signal_out.len() != rows * cols
-        || hist_out.len() != rows * cols
-    {
-        return Err(MacdError::InvalidPeriod {
-            fast: 0,
-            slow: 0,
-            signal: 0,
-            data_len: data.len(),
+    if let Some(expected) = rows.checked_mul(cols) {
+        if macd_out.len() != expected
+            || signal_out.len() != expected
+            || hist_out.len() != expected
+        {
+            let got = macd_out
+                .len()
+                .max(signal_out.len())
+                .max(hist_out.len());
+            return Err(MacdError::OutputLengthMismatch { expected, got });
+        }
+    } else {
+        return Err(MacdError::InvalidRange {
+            start: sweep.fast_period.0,
+            end: sweep.fast_period.1,
+            step: sweep.fast_period.2,
         });
     }
     let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
@@ -1908,7 +1966,7 @@ pub fn macd_batch_py<'py>(
         ma_type: (ma_type.to_string(), ma_type.to_string(), String::new()),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -1986,6 +2044,264 @@ pub fn register_macd_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
 
 // ==================== PYTHON: CUDA BINDINGS (EMA only) ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32MacdPy {
+    pub(crate) inner: crate::cuda::oscillators::macd_wrapper::DeviceArrayF32Macd,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32MacdPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = if self.inner.rows == 0 || self.inner.cols == 0 {
+            0usize
+        } else {
+            self.inner.device_ptr() as usize
+        };
+        d.set_item("data", (ptr, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.inner.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        let _ = dl_device;
+        let _ = copy;
+
+        // Reject stream == 0 per Array API semantics
+        if let Some(obj) = &stream {
+            if let Ok(i) = obj.extract::<i64>(py) {
+                if i == 0 {
+                    return Err(PyValueError::new_err(
+                        "__dlpack__: stream 0 is disallowed for CUDA",
+                    ));
+                }
+            }
+        }
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLPackVersion {
+            major: u32,
+            minor: u32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: std::sync::Arc<cust::context::Context>,
+        }
+
+        extern "C" fn legacy_managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+        extern "C" fn versioned_managed_deleter(p: *mut DLManagedTensorVersioned) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        unsafe extern "C" fn legacy_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+        unsafe extern "C" fn versioned_capsule_destructor(
+            capsule: *mut pyo3::ffi::PyObject,
+        ) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        let rows = self.inner.rows as i64;
+        let cols = self.inner.cols as i64;
+        let len = (rows as i128) * (cols as i128);
+        let data_ptr: *mut c_void = if len == 0 {
+            std::ptr::null_mut()
+        } else {
+            (self.inner.device_ptr() as usize) as *mut c_void
+        };
+
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1i64]);
+        let guard = Box::new(DlpGuard {
+            _shape: shape,
+            _strides: strides,
+            _ctx: self.inner.ctx.clone(),
+        });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        let want_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        if want_versioned {
+            let mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 0 },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(versioned_managed_deleter),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.inner.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+            });
+            let raw = Box::into_raw(mt) as *mut c_void;
+            let name = b"dltensor_versioned\0";
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    raw,
+                    name.as_ptr() as *const _,
+                    Some(versioned_capsule_destructor),
+                )
+            };
+            if cap.is_null() {
+                unsafe {
+                    versioned_managed_deleter(raw as *mut DLManagedTensorVersioned);
+                }
+                return Err(PyValueError::new_err("failed to create DLPack v1.x capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.inner.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(legacy_managed_deleter),
+            });
+            let raw = Box::into_raw(mt) as *mut c_void;
+            let name = b"dltensor\0";
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    raw,
+                    name.as_ptr() as *const _,
+                    Some(legacy_capsule_destructor),
+                )
+            };
+            if cap.is_null() {
+                unsafe {
+                    legacy_managed_deleter(raw as *mut DLManagedTensor);
+                }
+                return Err(PyValueError::new_err("failed to create legacy DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "macd_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, fast_range, slow_range, signal_range, ma_type="ema", device_id=0))]
 pub fn macd_cuda_batch_dev_py<'py>(
@@ -2029,24 +2345,15 @@ pub fn macd_cuda_batch_dev_py<'py>(
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item(
         "macd",
-        Py::new(
-            py,
-            super::moving_averages::alma::DeviceArrayF32Py { inner: macd },
-        )?,
+        Py::new(py, DeviceArrayF32MacdPy { inner: macd })?,
     )?;
     dict.set_item(
         "signal",
-        Py::new(
-            py,
-            super::moving_averages::alma::DeviceArrayF32Py { inner: signal },
-        )?,
+        Py::new(py, DeviceArrayF32MacdPy { inner: signal })?,
     )?;
     dict.set_item(
         "hist",
-        Py::new(
-            py,
-            super::moving_averages::alma::DeviceArrayF32Py { inner: hist },
-        )?,
+        Py::new(py, DeviceArrayF32MacdPy { inner: hist })?,
     )?;
 
     let fasts: Vec<u64> = combos
@@ -2117,24 +2424,15 @@ pub fn macd_cuda_many_series_one_param_dev_py<'py>(
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item(
         "macd",
-        Py::new(
-            py,
-            super::moving_averages::alma::DeviceArrayF32Py { inner: macd },
-        )?,
+        Py::new(py, DeviceArrayF32MacdPy { inner: macd })?,
     )?;
     dict.set_item(
         "signal",
-        Py::new(
-            py,
-            super::moving_averages::alma::DeviceArrayF32Py { inner: signal },
-        )?,
+        Py::new(py, DeviceArrayF32MacdPy { inner: signal })?,
     )?;
     dict.set_item(
         "hist",
-        Py::new(
-            py,
-            super::moving_averages::alma::DeviceArrayF32Py { inner: hist },
-        )?,
+        Py::new(py, DeviceArrayF32MacdPy { inner: hist })?,
     )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
@@ -2369,7 +2667,8 @@ pub fn macd_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> 
             String::new(),
         ),
     };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| JsValue::from_str(&format!("Invalid range: {}", e)))?;
     let rows = combos.len();
     let cols = data.len();
 

@@ -194,6 +194,10 @@ impl CudaAdx {
             .ok_or_else(|| CudaAdxError::InvalidInput("size overflow".into()))?;
         Self::will_fit(req, 64 * 1024 * 1024)?;
 
+        let out_len = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaAdxError::InvalidInput("rows*len overflow".into()))?;
+
         // Upload inputs
         let d_high = unsafe { DeviceBuffer::from_slice_async(&high[..len], &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low[..len], &self.stream) }?;
@@ -202,7 +206,7 @@ impl CudaAdx {
         let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_host, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }?;
+            unsafe { DeviceBuffer::uninitialized_async(out_len, &self.stream) }?;
 
         self.launch_batch(
             &d_high,
@@ -368,7 +372,7 @@ impl CudaAdx {
         let d_close = unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }?;
+            unsafe { DeviceBuffer::uninitialized_async(expected, &self.stream) }?;
 
         self.launch_many_series(
             &d_high, &d_low, &d_close, cols, rows, period, &d_first, &mut d_out,
@@ -392,11 +396,14 @@ impl CudaAdx {
         period: usize,
         out_tm: &mut [f32],
     ) -> Result<(), CudaAdxError> {
-        if out_tm.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAdxError::InvalidInput("rows*cols overflow".into()))?;
+        if out_tm.len() != expected {
             return Err(CudaAdxError::InvalidInput("out slice wrong length".into()));
         }
         let arr = self.adx_many_series_one_param_time_major_dev(high_tm, low_tm, close_tm, cols, rows, period)?;
-        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows) }?;
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(expected) }?;
         unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream) }?;
         self.stream.synchronize()?;
         out_tm.copy_from_slice(pinned.as_slice());

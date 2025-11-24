@@ -21,22 +21,36 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaSupertrendError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error(
+        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
+    )]
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaSupertrendError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaSupertrendError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaSupertrendError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaSupertrendError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -72,16 +86,16 @@ impl Default for CudaSupertrendPolicy {
 pub struct CudaSupertrend {
     module: Module,
     stream: Stream,
-    _ctx: Context,
+    context: std::sync::Arc<Context>,
+    device_id: u32,
     policy: CudaSupertrendPolicy,
 }
 
 impl CudaSupertrend {
     pub fn new(device_id: usize) -> Result<Self, CudaSupertrendError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        let dev = Device::get_device(device_id as u32)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        let ctx = Context::new(dev).map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let dev = Device::get_device(device_id as u32)?;
+        let ctx = std::sync::Arc::new(Context::new(dev)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/supertrend_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
@@ -89,14 +103,13 @@ impl CudaSupertrend {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _ctx: ctx,
+            context: ctx,
+            device_id: device_id as u32,
             policy: CudaSupertrendPolicy::default(),
         })
     }
@@ -105,10 +118,10 @@ impl CudaSupertrend {
         self.policy = p;
     }
     pub fn synchronize(&self) -> Result<(), CudaSupertrendError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
+    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -118,14 +131,23 @@ impl CudaSupertrend {
         }
     }
     #[inline]
-    fn will_fit(bytes: usize, headroom: usize) -> bool {
+    fn will_fit(bytes: usize, headroom: usize) -> Result<(), CudaSupertrendError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Ok((free, _)) = mem_get_info() {
-            bytes.saturating_add(headroom) <= free
+            let free_u = free as usize;
+            if bytes.saturating_add(headroom) <= free_u {
+                Ok(())
+            } else {
+                Err(CudaSupertrendError::OutOfMemory {
+                    required: bytes,
+                    free: free_u,
+                    headroom,
+                })
+            }
         } else {
-            true
+            Ok(())
         }
     }
 
@@ -168,19 +190,13 @@ impl CudaSupertrend {
             return Err(CudaSupertrendError::InvalidInput(
                 "input length mismatch".into(),
             ));
-            return Err(CudaSupertrendError::InvalidInput(
-                "input length mismatch".into(),
-            ));
-        }
-        if len == 0 {
-            return Err(CudaSupertrendError::InvalidInput("empty series".into()));
         }
         if len == 0 {
             return Err(CudaSupertrendError::InvalidInput("empty series".into()));
         }
 
         // Expand combos
-        let combos = expand_grid_local(sweep);
+        let combos = expand_grid_local(sweep)?;
         if combos.is_empty() {
             return Err(CudaSupertrendError::InvalidInput("empty sweep".into()));
         }
@@ -209,22 +225,12 @@ impl CudaSupertrend {
             let l = low[i];
             hl2[i] = 0.5f32 * (h + l);
         }
-        let d_hl2 =
-            DeviceBuffer::from_slice(&hl2).map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        for i in 0..len {
-            let h = high[i];
-            let l = low[i];
-            hl2[i] = 0.5f32 * (h + l);
-        }
-        let d_hl2 =
-            DeviceBuffer::from_slice(&hl2).map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+        let d_hl2 = DeviceBuffer::from_slice(&hl2)?;
+        let d_close = DeviceBuffer::from_slice(close)?;
 
         // ATR rows for continuous [min..max]
-        let cuda_atr = CudaAtr::new(0).map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+        let cuda_atr =
+            CudaAtr::new(self.device_id as usize).map_err(|e| CudaSupertrendError::InvalidInput(e.to_string()))?;
         let atr_rows = cuda_atr
             .atr_batch_dev(
                 high,
@@ -234,7 +240,7 @@ impl CudaSupertrend {
                     length: (min_p, max_p, 1),
                 },
             )
-            .map_err(|e| CudaSupertrendError::Cuda(format!("atr: {}", e.to_string())))?;
+            .map_err(|e| CudaSupertrendError::InvalidInput(format!("atr: {}", e.to_string())))?;
 
         // Params per row
         let row_period_idx: Vec<i32> = combos
@@ -246,48 +252,36 @@ impl CudaSupertrend {
             .iter()
             .map(|c| (first_valid + c.period.unwrap() - 1) as i32)
             .collect();
-        let d_row_idx = DeviceBuffer::from_slice(&row_period_idx)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        let d_row_fac = DeviceBuffer::from_slice(&row_factors)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        let d_row_warm = DeviceBuffer::from_slice(&row_warms)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        let d_row_idx = DeviceBuffer::from_slice(&row_period_idx)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        let d_row_fac = DeviceBuffer::from_slice(&row_factors)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        let d_row_warm = DeviceBuffer::from_slice(&row_warms)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+        let d_row_idx = DeviceBuffer::from_slice(&row_period_idx)?;
+        let d_row_fac = DeviceBuffer::from_slice(&row_factors)?;
+        let d_row_warm = DeviceBuffer::from_slice(&row_warms)?;
 
         // VRAM check: only account for future allocations (outputs). ATR/inputs already on device.
-        let bytes = 2usize * combos.len() * len * std::mem::size_of::<f32>();
-        if !Self::will_fit(bytes, 64 * 1024 * 1024) {
-            return Err(CudaSupertrendError::InvalidInput(
-                "estimated device memory exceeds free VRAM".into(),
-            ));
-            return Err(CudaSupertrendError::InvalidInput(
-                "estimated device memory exceeds free VRAM".into(),
-            ));
-        }
+        let combos_len = combos.len();
+        let total_elems = combos_len
+            .checked_mul(len)
+            .ok_or_else(|| CudaSupertrendError::InvalidInput("rows*cols overflow".into()))?;
+        let bytes = total_elems
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaSupertrendError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(bytes, 64 * 1024 * 1024)?;
 
         // Outputs
-        let mut d_trend: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(combos.len() * len) }
-                .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+        let mut d_trend: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_changed: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(combos.len() * len) }
-                .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
         // Kernel and launch: single 1-D grid (no 65k chunking)
         let func = self
             .module
             .get_function("supertrend_batch_f32")
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaSupertrendError::MissingKernelSymbol { name: "supertrend_batch_f32" })?;
 
         match self.policy.batch {
             BatchKernelPolicy::OneThreadPerRow => {
                 // Legacy: one thread per block, grid covers rows
-                let grid: GridSize = ((combos.len() as u32).max(1), 1, 1).into();
+                let grid: GridSize = ((combos_len as u32).max(1), 1, 1).into();
                 let block: BlockSize = (1, 1, 1).into();
                 unsafe {
                     use cust::prelude::launch;
@@ -300,20 +294,20 @@ impl CudaSupertrend {
                         d_row_fac.as_device_ptr(),
                         d_row_warm.as_device_ptr(),
                         len as i32,
-                        combos.len() as i32,
+                        combos_len as i32,
                         d_trend.as_device_ptr(),
                         d_changed.as_device_ptr()
                     ))
-                    .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+                    ?;
                 }
             }
             _ => {
                 let bx = if let BatchKernelPolicy::OneD { block_x } = self.policy.batch {
                     block_x
                 } else {
-                    Self::pick_block_x(combos.len())
+                    Self::pick_block_x(combos_len)
                 };
-                let gx = ((combos.len() as u32) + bx - 1) / bx;
+                let gx = ((combos_len as u32) + bx - 1) / bx;
                 let grid: GridSize = (gx.max(1), 1, 1).into();
                 let block: BlockSize = (bx, 1, 1).into();
                 unsafe {
@@ -327,31 +321,25 @@ impl CudaSupertrend {
                         d_row_fac.as_device_ptr(),
                         d_row_warm.as_device_ptr(),
                         len as i32,
-                        combos.len() as i32,
+                        combos_len as i32,
                         d_trend.as_device_ptr(),
                         d_changed.as_device_ptr()
-                    ))
-                    .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+                    ))?;
                 }
             }
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {
                 buf: d_trend,
-                rows: combos.len(),
+                rows: combos_len,
                 cols: len,
             },
             DeviceArrayF32 {
                 buf: d_changed,
-                rows: combos.len(),
+                rows: combos_len,
                 cols: len,
             },
             combos,
@@ -386,16 +374,15 @@ impl CudaSupertrend {
         for idx in 0..n {
             hl2_tm[idx] = 0.5f32 * (high_tm[idx] + low_tm[idx]);
         }
-        let d_hl2 = DeviceBuffer::from_slice(&hl2_tm)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+        let d_hl2 = DeviceBuffer::from_slice(&hl2_tm)?;
+        let d_close = DeviceBuffer::from_slice(close_tm)?;
 
         // ATR time-major for given period
-        let cuda_atr = CudaAtr::new(0).map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+        let cuda_atr =
+            CudaAtr::new(self.device_id as usize).map_err(|e| CudaSupertrendError::InvalidInput(e.to_string()))?;
         let atr_tm = cuda_atr
             .atr_many_series_one_param_time_major_dev(high_tm, low_tm, close_tm, cols, rows, period)
-            .map_err(|e| CudaSupertrendError::Cuda(format!("atr: {}", e.to_string())))?;
+            .map_err(|e| CudaSupertrendError::InvalidInput(format!("atr: {}", e.to_string())))?;
 
         // first-valid per series (time-major)
         let mut first_valids = vec![-1i32; cols];
@@ -412,20 +399,22 @@ impl CudaSupertrend {
                 return Err(CudaSupertrendError::InvalidInput("all-NaN series".into()));
             }
         }
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)?;
 
         // Outputs
-        let mut d_trend_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
-        let mut d_changed_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+        let bytes = n
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaSupertrendError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(bytes, 64 * 1024 * 1024)?;
+        let mut d_trend_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
+        let mut d_changed_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
 
         // Kernel
         let func = self
             .module
             .get_function("supertrend_many_series_one_param_f32")
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaSupertrendError::MissingKernelSymbol { name: "supertrend_many_series_one_param_f32" })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => Self::pick_block_x(cols),
@@ -458,13 +447,10 @@ impl CudaSupertrend {
                 &mut ch_ptr as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+                .launch(&func, grid, block, 0, args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSupertrendError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32Pair {
             plus: DeviceArrayF32 {
                 buf: d_trend_tm,
@@ -481,28 +467,82 @@ impl CudaSupertrend {
 }
 
 // Local expand_grid clone
-fn expand_grid_local(r: &SuperTrendBatchRange) -> Vec<SuperTrendParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid_local(r: &SuperTrendBatchRange) -> Result<Vec<SuperTrendParams>, CudaSupertrendError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, CudaSupertrendError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step.max(1)).collect();
+            if v.is_empty() {
+                return Err(CudaSupertrendError::InvalidInput(format!(
+                    "invalid range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
+        let mut cur = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while cur >= end_i {
+            v.push(cur as usize);
+            cur -= st;
+        }
+        if v.is_empty() {
+            return Err(CudaSupertrendError::InvalidInput(format!(
+                "invalid range: start={}, end={}, step={}",
+                start, end, step
+            )));
+        }
+        Ok(v)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64(
+        (start, end, step): (f64, f64, f64),
+    ) -> Result<Vec<f64>, CudaSupertrendError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
+        }
+        let st = step.abs();
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(CudaSupertrendError::InvalidInput(format!(
+                    "invalid range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            return Ok(v);
         }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
+        while x + 1e-12 >= end {
             v.push(x);
-            x += step;
+            x -= st;
         }
-        v
+        if v.is_empty() {
+            return Err(CudaSupertrendError::InvalidInput(format!(
+                "invalid range: start={}, end={}, step={}",
+                start, end, step
+            )));
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let factors = axis_f64(r.factor);
-    let mut out = Vec::with_capacity(periods.len() * factors.len());
+    let periods = axis_usize(r.period)?;
+    let factors = axis_f64(r.factor)?;
+    let cap = periods
+        .len()
+        .checked_mul(factors.len())
+        .ok_or_else(|| CudaSupertrendError::InvalidInput("range size overflow".into()))?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &f in &factors {
             out.push(SuperTrendParams {
@@ -511,7 +551,7 @@ fn expand_grid_local(r: &SuperTrendBatchRange) -> Vec<SuperTrendParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 // ---------------- Bench profiles ----------------

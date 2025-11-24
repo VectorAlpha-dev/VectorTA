@@ -11,14 +11,15 @@ use crate::indicators::linearreg_slope::{LinearRegSlopeBatchRange, LinearRegSlop
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{AsyncCopyDestination, CopyDestination, DeviceBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
 // ---------------- Kernel policy (simple 1D for both paths) ----------------
 
@@ -58,26 +59,31 @@ pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaLinearregSlopeError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaLinearregSlopeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaLinearregSlopeError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaLinearregSlopeError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-impl std::error::Error for CudaLinearregSlopeError {}
 
 pub struct CudaLinearregSlope {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaLinearregSlopePolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -88,14 +94,10 @@ pub struct CudaLinearregSlope {
 
 impl CudaLinearregSlope {
     pub fn new(device_id: usize) -> Result<Self, CudaLinearregSlopeError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
-        let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
-        let context =
-            Context::new(device).map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/linearreg_slope_kernel.ptx"));
         let module = match Module::from_ptx(
@@ -108,18 +110,17 @@ impl CudaLinearregSlope {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?,
+                Err(_) => Module::from_ptx(ptx, &[])?,
             },
         };
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaLinearregSlopePolicy::default(),
             last_batch: None,
             last_many: None,
@@ -139,9 +140,17 @@ impl CudaLinearregSlope {
     }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaLinearregSlopeError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     #[inline]
@@ -193,21 +202,96 @@ impl CudaLinearregSlope {
     }
     #[inline]
     fn device_mem_info() -> Option<(usize, usize)> {
-        cust::memory::mem_get_info().ok()
+        mem_get_info().ok()
     }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaLinearregSlopeError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaLinearregSlopeError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
         }
+        Ok(())
+    }
+
+    #[inline]
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaLinearregSlopeError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads {
+            return Err(CudaLinearregSlopeError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
     }
 
     // ---------------- Input prep (batch) ----------------
+
+    #[inline]
+    fn expand_periods(sweep: &LinearRegSlopeBatchRange) -> Result<Vec<usize>, CudaLinearregSlopeError> {
+        let (start, end, step) = sweep.period;
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let mut v = Vec::new();
+            let st = step.max(1);
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                match x.checked_add(st) {
+                    Some(next) => x = next,
+                    None => break,
+                }
+            }
+            if v.is_empty() {
+                return Err(CudaLinearregSlopeError::InvalidInput(
+                    "empty period sweep".into(),
+                ));
+            }
+            return Ok(v);
+        }
+        // reversed bounds
+        let mut v = Vec::new();
+        let st = step.max(1) as isize;
+        let mut x = start as isize;
+        let end_i = end as isize;
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(CudaLinearregSlopeError::InvalidInput(
+                "empty period sweep".into(),
+            ));
+        }
+        Ok(v)
+    }
+
     #[allow(clippy::type_complexity)]
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -232,24 +316,16 @@ impl CudaLinearregSlope {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = {
-            // replicate expansion from indicator
-            let (start, end, step) = sweep.period;
-            let periods: Vec<usize> = if step == 0 || start == end {
-                vec![start]
-            } else {
-                (start..=end).step_by(step).collect()
-            };
-            periods
-                .into_iter()
-                .map(|p| LinearRegSlopeParams { period: Some(p) })
-                .collect::<Vec<_>>()
-        };
-        if combos.is_empty() {
+        let periods = Self::expand_periods(sweep)?;
+        if periods.is_empty() {
             return Err(CudaLinearregSlopeError::InvalidInput(
                 "no parameter combinations".into(),
             ));
         }
+        let combos: Vec<LinearRegSlopeParams> = periods
+            .iter()
+            .map(|&p| LinearRegSlopeParams { period: Some(p) })
+            .collect();
 
         let mut periods_i32 = Vec::with_capacity(combos.len());
         let mut x_sums = Vec::with_capacity(combos.len());
@@ -290,9 +366,10 @@ impl CudaLinearregSlope {
         Ok((combos, first_valid, len, periods_i32, x_sums, denom_invs))
     }
 
-    fn grid_1d_for(&self, work_items: usize, block_x: u32) -> GridSize {
+    fn grid_1d_for(&self, work_items: usize, block_x: u32) -> (GridSize, u32) {
         let gx = ((work_items as u32) + block_x - 1) / block_x;
-        (gx.max(self.sm_count as u32), 1, 1).into()
+        let gx_clamped = gx.max(self.sm_count as u32);
+        ((gx_clamped, 1, 1).into(), gx_clamped)
     }
 
     fn launch_batch_kernel(
@@ -309,13 +386,16 @@ impl CudaLinearregSlope {
         let func = self
             .module
             .get_function("linearreg_slope_batch_f32")
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaLinearregSlopeError::MissingKernelSymbol {
+                name: "linearreg_slope_batch_f32",
+            })?;
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
         };
-        let grid = self.grid_1d_for(combos_len, block_x);
+        let (grid, gx) = self.grid_1d_for(combos_len, block_x);
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(gx, 1, 1, block_x, 1, 1)?;
         unsafe {
             (*(self as *const _ as *mut Self)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -341,9 +421,7 @@ impl CudaLinearregSlope {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -358,29 +436,37 @@ impl CudaLinearregSlope {
         first_valid: usize,
     ) -> Result<DeviceArrayF32, CudaLinearregSlopeError> {
         let nrows = periods_i32.len();
-        let elems = nrows * len;
-        let prices_bytes = len * std::mem::size_of::<f32>();
-        let periods_bytes = nrows * std::mem::size_of::<i32>();
-        let consts_bytes = nrows * std::mem::size_of::<f32>();
-        let out_bytes = elems * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + consts_bytes * 2 + out_bytes;
+        let elems = nrows
+            .checked_mul(len)
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (rows*len)".into()))?;
+        let prices_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (prices_bytes)".into()))?;
+        let periods_bytes = nrows
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (periods_bytes)".into()))?;
+        let consts_bytes = nrows
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (consts_bytes)".into()))?;
+        let consts2_bytes = consts_bytes
+            .checked_mul(2)
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (consts_bytes*2)".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (out_bytes)".into()))?;
+        let required = prices_bytes
+            .checked_add(periods_bytes)
+            .and_then(|v| v.checked_add(consts2_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (bytes)".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaLinearregSlopeError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
-        let d_prices = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(periods_i32)
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
-        let d_xs = DeviceBuffer::from_slice(x_sums)
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
-        let d_dinv = DeviceBuffer::from_slice(denom_invs)
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
+        Self::will_fit(required, headroom)?;
+
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let d_periods = DeviceBuffer::from_slice(periods_i32)?;
+        let d_xs = DeviceBuffer::from_slice(x_sums)?;
+        let d_dinv = DeviceBuffer::from_slice(denom_invs)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -414,9 +500,7 @@ impl CudaLinearregSlope {
             len,
             first_valid,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok((dev, combos))
     }
 
@@ -429,10 +513,13 @@ impl CudaLinearregSlope {
         let (combos, first_valid, len, periods_i32, x_sums, denom_invs) =
             Self::prepare_batch_inputs(data_f32, sweep)?;
         let nrows = combos.len();
-        if out.len() != nrows * len {
+        let expected = nrows
+            .checked_mul(len)
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (rows*len)".into()))?;
+        if out.len() != expected {
             return Err(CudaLinearregSlopeError::InvalidInput(format!(
                 "output length mismatch: expected {}, got {}",
-                nrows * len,
+                expected,
                 out.len()
             )));
         }
@@ -444,12 +531,8 @@ impl CudaLinearregSlope {
             len,
             first_valid,
         )?;
-        dev.buf
-            .copy_to(out)
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
+        dev.buf.copy_to(out)?;
+        self.stream.synchronize()?;
         Ok((nrows, len, combos))
     }
 
@@ -460,7 +543,17 @@ impl CudaLinearregSlope {
         rows: usize,
         params: &LinearRegSlopeParams,
     ) -> Result<(Vec<i32>, usize, f32, f32), CudaLinearregSlopeError> {
-        if data_tm_f32.len() != cols * rows {
+        if cols == 0 || rows == 0 {
+            return Err(CudaLinearregSlopeError::InvalidInput(
+                "empty matrix".into(),
+            ));
+        }
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| {
+                CudaLinearregSlopeError::InvalidInput("size overflow (cols*rows)".into())
+            })?;
+        if data_tm_f32.len() != elems {
             return Err(CudaLinearregSlopeError::InvalidInput(
                 "invalid time-major shape".into(),
             ));
@@ -517,13 +610,16 @@ impl CudaLinearregSlope {
         let func = self
             .module
             .get_function("linearreg_slope_many_series_one_param_f32")
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaLinearregSlopeError::MissingKernelSymbol {
+                name: "linearreg_slope_many_series_one_param_f32",
+            })?;
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
         };
-        let grid = self.grid_1d_for(cols, block_x);
+        let (grid, gx) = self.grid_1d_for(cols, block_x);
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(gx, 1, 1, block_x, 1, 1)?;
         unsafe {
             (*(self as *const _ as *mut Self)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -549,9 +645,7 @@ impl CudaLinearregSlope {
                 &mut denom_inv_f as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -566,24 +660,28 @@ impl CudaLinearregSlope {
         x_sum: f32,
         denom_inv: f32,
     ) -> Result<DeviceArrayF32, CudaLinearregSlopeError> {
-        let elems = cols * rows;
-        let prices_bytes = elems * std::mem::size_of::<f32>();
-        let first_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = elems * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_bytes + out_bytes;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (cols*rows)".into()))?;
+        let prices_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (prices_bytes)".into()))?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (first_bytes)".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (out_bytes)".into()))?;
+        let required = prices_bytes
+            .checked_add(first_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (bytes)".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaLinearregSlopeError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(first_valids)
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
+        Self::will_fit(required, headroom)?;
+
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first = DeviceBuffer::from_slice(first_valids)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
         self.launch_many_series_kernel(
             &d_prices, &d_first, cols, rows, period, x_sum, denom_inv, &mut d_out,
@@ -613,9 +711,7 @@ impl CudaLinearregSlope {
             x_sum,
             denom_inv,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(dev)
     }
 }

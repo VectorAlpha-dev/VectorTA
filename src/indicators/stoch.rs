@@ -18,6 +18,9 @@
 //! - **k**: %K line as `Vec<f64>` (length matches input, range 0-100)
 //! - **d**: %D line as `Vec<f64>` (length matches input, range 0-100)
 //!
+//! ## Decision log
+//! SIMD (AVX2/AVX512) implemented; `Auto` prefers scalar for stability; CUDA wrappers enabled with VRAM handles and Python CAI v3 + DLPack v1.x.
+//!
 //! ## Developer Notes
 //! - Decision: SIMD kernels are implemented (AVX2/AVX512) and exposed via explicit
 //!   kernel selection; however, `Kernel::Auto` short-circuits to the scalar path.
@@ -267,8 +270,8 @@ impl StochBuilder {
 #[derive(Debug, Error)]
 pub enum StochError {
     #[error("stoch: Empty data provided.")]
-    EmptyData,
-    #[error("stoch: Mismatched length of input data (high, low, close).")]
+    EmptyInputData,
+    #[error("stoch: Empty data provided.")]
     MismatchedLength,
     #[error("stoch: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
@@ -276,6 +279,12 @@ pub enum StochError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("stoch: All values are NaN.")]
     AllValuesNaN,
+    #[error("stoch: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("stoch: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("stoch: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("stoch: {0}")]
     Other(String),
 }
@@ -306,7 +315,7 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
 
     let data_len = high.len();
     if data_len == 0 || low.is_empty() || close.is_empty() {
-        return Err(StochError::EmptyData);
+        return Err(StochError::EmptyInputData);
     }
     if data_len != low.len() || data_len != close.len() {
         return Err(StochError::MismatchedLength);
@@ -445,8 +454,17 @@ pub fn stoch_into_slices(
     kernel: Kernel,
 ) -> Result<(), StochError> {
     let StochOutput { k, d } = stoch_with_kernel(input, kernel)?;
-    if out_k.len() != k.len() || out_d.len() != d.len() {
-        return Err(StochError::MismatchedLength);
+    if out_k.len() != k.len() {
+        return Err(StochError::OutputLengthMismatch {
+            expected: k.len(),
+            got: out_k.len(),
+        });
+    }
+    if out_d.len() != d.len() {
+        return Err(StochError::OutputLengthMismatch {
+            expected: d.len(),
+            got: out_d.len(),
+        });
     }
     out_k.copy_from_slice(&k);
     out_d.copy_from_slice(&d);
@@ -489,13 +507,22 @@ fn stoch_compute_into(
 
     let len = high.len();
     if len == 0 || low.is_empty() || close.is_empty() {
-        return Err(StochError::EmptyData);
+        return Err(StochError::EmptyInputData);
     }
     if len != low.len() || len != close.len() {
         return Err(StochError::MismatchedLength);
     }
-    if out_k.len() != len || out_d.len() != len {
-        return Err(StochError::MismatchedLength);
+    if out_k.len() != len {
+        return Err(StochError::OutputLengthMismatch {
+            expected: len,
+            got: out_k.len(),
+        });
+    }
+    if out_d.len() != len {
+        return Err(StochError::OutputLengthMismatch {
+            expected: len,
+            got: out_d.len(),
+        });
     }
 
     let fastk_period = input.get_fastk_period();
@@ -1076,12 +1103,7 @@ pub fn stoch_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(StochError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(StochError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1122,12 +1144,38 @@ impl StochBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &StochBatchRange) -> Vec<StochParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &StochBatchRange) -> Result<Vec<StochParams>, StochError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, StochError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+
+        let mut v = Vec::new();
+        if start < end {
+            let mut x = start;
+            loop {
+                v.push(x);
+                match x.checked_add(step) {
+                    Some(next) if next <= end => x = next,
+                    Some(_) | None => break,
+                }
+            }
+        } else {
+            let mut x = start;
+            loop {
+                v.push(x);
+                match x.checked_sub(step) {
+                    Some(next) if next >= end => x = next,
+                    Some(_) | None => break,
+                }
+            }
+        }
+
+        if v.is_empty() {
+            Err(StochError::InvalidRange { start, end, step })
+        } else {
+            Ok(v)
+        }
     }
     fn axis_str((start, end, _): (String, String, f64)) -> Vec<String> {
         if start == end {
@@ -1136,18 +1184,25 @@ fn expand_grid(r: &StochBatchRange) -> Vec<StochParams> {
             vec![start, end]
         }
     }
-    let fastk_periods = axis_usize(r.fastk_period);
-    let slowk_periods = axis_usize(r.slowk_period);
+    let fastk_periods = axis_usize(r.fastk_period)?;
+    let slowk_periods = axis_usize(r.slowk_period)?;
     let slowk_types = axis_str(r.slowk_ma_type.clone());
-    let slowd_periods = axis_usize(r.slowd_period);
+    let slowd_periods = axis_usize(r.slowd_period)?;
     let slowd_types = axis_str(r.slowd_ma_type.clone());
-    let mut out = Vec::with_capacity(
-        fastk_periods.len()
-            * slowk_periods.len()
-            * slowk_types.len()
-            * slowd_periods.len()
-            * slowd_types.len(),
-    );
+
+    let combos_len = fastk_periods
+        .len()
+        .checked_mul(slowk_periods.len())
+        .and_then(|v| v.checked_mul(slowk_types.len()))
+        .and_then(|v| v.checked_mul(slowd_periods.len()))
+        .and_then(|v| v.checked_mul(slowd_types.len()))
+        .ok_or(StochError::InvalidRange {
+            start: r.fastk_period.0,
+            end: r.fastk_period.1,
+            step: r.fastk_period.2,
+        })?;
+
+    let mut out = Vec::with_capacity(combos_len);
     for &fkp in &fastk_periods {
         for &skp in &slowk_periods {
             for skt in &slowk_types {
@@ -1165,7 +1220,7 @@ fn expand_grid(r: &StochBatchRange) -> Vec<StochParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1199,13 +1254,7 @@ fn stoch_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<StochBatchOutput, StochError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(StochError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let n = high.len();
     if n == 0 || low.len() != n || close.len() != n {
@@ -1233,6 +1282,12 @@ fn stoch_batch_inner(
     // Allocate K and D matrices uninitialized
     let rows = combos.len();
     let cols = n;
+
+    rows.checked_mul(cols).ok_or(StochError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 0,
+    })?;
 
     let mut k_mu = make_uninit_matrix(rows, cols);
     let mut d_mu = make_uninit_matrix(rows, cols);
@@ -1929,7 +1984,243 @@ impl StochStream {
 
 // ==================== PYTHON CUDA BINDINGS ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "StochDeviceArrayF32", unsendable)]
+pub struct StochDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl StochDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let buf = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let ptr = buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+
+        let _ = stream;
+
+        if let Some((dev_ty, dev_id)) = dl_device {
+            if dev_ty != 2 || dev_id != self.device_id as i32 {
+                return Err(PyValueError::new_err(
+                    "stoch: requested dl_device does not match buffer device",
+                ));
+            }
+        }
+        if matches!(copy, Some(true)) {
+            return Err(PyValueError::new_err(
+                "stoch: __dlpack__(copy=True) not supported",
+            ));
+        }
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            dl_managed_tensor: DLManagedTensor,
+            version: u32,
+            reserved: u32,
+        }
+
+        struct Holder {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            _ctx: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+        }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).manager_ctx as *mut Holder;
+            if !holder.is_null() {
+                let _ = Box::from_raw(holder);
+                (*p).manager_ctx = std::ptr::null_mut();
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            if capsule.is_null() {
+                return;
+            }
+            let versioned = b"dltensor_versioned\0";
+            let legacy = b"dltensor\0";
+
+            let mut ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                versioned.as_ptr() as *const c_char,
+            );
+            if !ptr.is_null() {
+                let mtv = ptr as *mut DLManagedTensorVersioned;
+                let mt: *mut DLManagedTensor = &mut (*mtv).dl_managed_tensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, std::ptr::null_mut());
+                return;
+            }
+
+            ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, legacy.as_ptr() as *const c_char);
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, std::ptr::null_mut());
+            }
+        }
+
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensorVersioned {
+                dl_managed_tensor: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: if rows == 0 || cols == 0 {
+                            std::ptr::null_mut()
+                        } else {
+                            buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+                        },
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: self.device_id as i32,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: None,
+                },
+                version: 1u32 << 16, // encode 1.0
+                reserved: 0,
+            },
+            shape: [rows, cols],
+            strides: [cols, 1],
+            _ctx: self._ctx.clone(),
+            _buf: buf,
+        });
+
+        let mtv: *mut DLManagedTensorVersioned = &mut holder.managed;
+        let mt: *mut DLManagedTensor = &mut holder.managed.dl_managed_tensor;
+        holder.managed.dl_managed_tensor.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_managed_tensor.dl_tensor.strides = holder.strides.as_mut_ptr();
+        holder.managed.dl_managed_tensor.manager_ctx =
+            &mut *holder as *mut Holder as *mut std::ffi::c_void;
+        holder.managed.dl_managed_tensor.deleter = Some(dlpack_deleter);
+
+        let holder_ptr = Box::into_raw(holder);
+        let _ = holder_ptr;
+
+        let wants_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        let (name_ptr, ptr) = if wants_versioned {
+            (
+                b"dltensor_versioned\0".as_ptr() as *const c_char,
+                mtv as *mut std::ffi::c_void,
+            )
+        } else {
+            (
+                b"dltensor\0".as_ptr() as *const c_char,
+                mt as *mut std::ffi::c_void,
+            )
+        };
+
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                ptr,
+                name_ptr,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe { dlpack_deleter(mt) };
+            return Err(PyValueError::new_err(
+                "stoch: failed to create DLPack capsule",
+            ));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "stoch_cuda_batch_dev")]
@@ -1945,7 +2236,7 @@ pub fn stoch_cuda_batch_dev_py(
     slowk_ma_type: &str,
     slowd_ma_type: &str,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(StochDeviceArrayF32Py, StochDeviceArrayF32Py)> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -1960,14 +2251,38 @@ pub fn stoch_cuda_batch_dev_py(
         slowd_period,
         slowd_ma_type: (slowd_ma_type.to_string(), slowd_ma_type.to_string(), 0.0),
     };
-    let (k, d) = py.allow_threads(|| {
+    let (k_buf, d_buf, rows, cols, ctx, dev_id) = py.allow_threads(|| {
         let cuda = crate::cuda::oscillators::CudaStoch::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.stoch_batch_dev(h, l, c, &sweep)
-            .map(|b| (b.k, b.d))
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let batch = cuda
+            .stoch_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        Ok::<_, PyErr>((
+            batch.k.buf,
+            batch.d.buf,
+            batch.k.rows,
+            batch.k.cols,
+            ctx,
+            cuda.device_id(),
+        ))
     })?;
-    Ok((DeviceArrayF32Py { inner: k }, DeviceArrayF32Py { inner: d }))
+    Ok((
+        StochDeviceArrayF32Py {
+            buf: Some(k_buf),
+            rows,
+            cols,
+            _ctx: ctx.clone(),
+            device_id: dev_id,
+        },
+        StochDeviceArrayF32Py {
+            buf: Some(d_buf),
+            rows,
+            cols,
+            _ctx: ctx,
+            device_id: dev_id,
+        },
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1986,7 +2301,7 @@ pub fn stoch_cuda_many_series_one_param_dev_py(
     slowk_ma_type: &str,
     slowd_ma_type: &str,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(StochDeviceArrayF32Py, StochDeviceArrayF32Py)> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2001,13 +2316,31 @@ pub fn stoch_cuda_many_series_one_param_dev_py(
         slowd_period: Some(slowd_period),
         slowd_ma_type: Some(slowd_ma_type.to_string()),
     };
-    let (k, d) = py.allow_threads(|| {
+    let (k_dev, d_dev, ctx, dev_id) = py.allow_threads(|| {
         let cuda = crate::cuda::oscillators::CudaStoch::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.stoch_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let (k, d) = cuda
+            .stoch_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        Ok::<_, PyErr>((k.buf, d.buf, ctx, cuda.device_id()))
     })?;
-    Ok((DeviceArrayF32Py { inner: k }, DeviceArrayF32Py { inner: d }))
+    Ok((
+        StochDeviceArrayF32Py {
+            buf: Some(k_dev),
+            rows,
+            cols,
+            _ctx: ctx.clone(),
+            device_id: dev_id,
+        },
+        StochDeviceArrayF32Py {
+            buf: Some(d_dev),
+            rows,
+            cols,
+            _ctx: ctx,
+            device_id: dev_id,
+        },
+    ))
 }
 
 // === Python Bindings ===
@@ -2079,12 +2412,15 @@ pub fn stoch_batch_py<'py>(
 
     let rows = out.rows;
     let cols = out.cols;
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("stoch_batch: size overflow in rows*cols"))?;
 
     let dict = PyDict::new(py);
 
     // 2D shape views for convenience; still contiguous
-    let k_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let d_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let k_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let d_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     unsafe { k_arr.as_slice_mut()? }.copy_from_slice(&out.k);
     unsafe { d_arr.as_slice_mut()? }.copy_from_slice(&out.d);
 

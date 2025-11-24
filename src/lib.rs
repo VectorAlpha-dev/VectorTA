@@ -1,7 +1,7 @@
-#![cfg_attr(feature = "nightly-avx", feature(stdarch_x86_avx512))]
-#![cfg_attr(feature = "nightly-avx", feature(avx512_target_feature))]
-#![cfg_attr(feature = "nightly-avx", feature(portable_simd))]
-#![cfg_attr(feature = "nightly-avx", feature(likely_unlikely))]
+#![cfg_attr(all(feature = "nightly-avx", rustc_is_nightly), feature(stdarch_x86_avx512))]
+#![cfg_attr(all(feature = "nightly-avx", rustc_is_nightly), feature(avx512_target_feature))]
+#![cfg_attr(all(feature = "nightly-avx", rustc_is_nightly), feature(portable_simd))]
+#![cfg_attr(all(feature = "nightly-avx", rustc_is_nightly), feature(likely_unlikely))]
 #![allow(warnings)]
 #![allow(clippy::needless_range_loop)]
 

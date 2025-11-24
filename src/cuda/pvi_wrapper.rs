@@ -11,64 +11,95 @@
 //!   - Many-series × one-param (time-major): shared initial value, per-series warmup.
 
 use crate::cuda::moving_averages::DeviceArrayF32;
+use cust::context::CacheConfig;
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
-use cust::context::CacheConfig;
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use std::error::Error;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaPviError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error(
+        "out of memory: required={required}B, free={free}B, headroom={headroom}B"
+    )]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: named symbol not found: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error(
+        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
+    )]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf}, current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("NotImplemented: {0}")]
+    NotImplemented(&'static str),
 }
-
-impl fmt::Display for CudaPviError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Cuda(e) => write!(f, "CUDA error: {}", e),
-            Self::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl Error for CudaPviError {}
 
 pub struct CudaPvi {
     module: Module,
     stream: Stream,
-    _ctx: Context,
+    context: Arc<Context>,
+    device_id: u32,
 }
 
 impl CudaPvi {
     pub fn new(device_id: usize) -> Result<Self, CudaPviError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let ctx = Context::new(device).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let ctx = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/pvi_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             // Most optimized JIT level (default); keep explicit for clarity
             ModuleJitOption::OptLevel(OptLevel::O4),
         ];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) =
+                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
+            }
+        };
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         // Hint to prefer L1 cache for the apply kernel (tiny SMEM usage)
         if let Ok(mut func) = module.get_function("pvi_apply_scale_batch_f32") {
             let _ = func.set_cache_config(CacheConfig::PreferL1);
         }
-        Ok(Self { module, stream, _ctx: ctx })
+        Ok(Self {
+            module,
+            stream,
+            context: ctx,
+            device_id: device_id as u32,
+        })
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     #[inline]
@@ -95,12 +126,56 @@ impl CudaPvi {
     }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if let Ok((free, _)) = mem_get_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaPviError> {
+        if let Some((free, _total)) = Self::device_mem_info() {
+            let required = required_bytes.saturating_add(headroom_bytes);
+            if required > free {
+                return Err(CudaPviError::OutOfMemory {
+                    required,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
         }
+        Ok(())
+    }
+
+    #[inline]
+    fn validate_launch_dims(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaPviError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        let (gx, gy, gz) = grid;
+        let (bx, by, bz) = block;
+        if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 {
+            return Err(CudaPviError::InvalidInput(
+                "zero-sized grid or block".into(),
+            ));
+        }
+        if gx > max_gx || gy > max_gy || gz > max_gz || bx > max_bx || by > max_by || bz > max_bz {
+            return Err(CudaPviError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
     }
 
     /// One series × many params (initial values).
@@ -118,30 +193,47 @@ impl CudaPvi {
                 "no initial values provided".into(),
             ));
         }
-        // Peak-by-stage VRAM estimate
-        let bytes_stage1 = (2 * len + len) * std::mem::size_of::<f32>(); // close + volume + scale
-        let bytes_stage2 = (len + rows + rows * len) * std::mem::size_of::<f32>(); // scale + inits + out
+        // Peak-by-stage VRAM estimate (guarded with checked arithmetic)
+        let elem_size = std::mem::size_of::<f32>();
+        let two_len = len
+            .checked_mul(2)
+            .ok_or_else(|| CudaPviError::InvalidInput("len*2 overflow".into()))?;
+        let stage1_elems = two_len
+            .checked_add(len)
+            .ok_or_else(|| CudaPviError::InvalidInput("len accumulation overflow".into()))?;
+        let bytes_stage1 = stage1_elems
+            .checked_mul(elem_size)
+            .ok_or_else(|| CudaPviError::InvalidInput("bytes_stage1 overflow".into()))?; // close + volume + scale
+        let rows_len = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaPviError::InvalidInput("rows*len overflow".into()))?;
+        let stage2_elems = len
+            .checked_add(rows)
+            .and_then(|v| v.checked_add(rows_len))
+            .ok_or_else(|| CudaPviError::InvalidInput("stage2 element count overflow".into()))?;
+        let bytes_stage2 = stage2_elems
+            .checked_mul(elem_size)
+            .ok_or_else(|| CudaPviError::InvalidInput("bytes_stage2 overflow".into()))?; // scale + inits + out
         let bytes_peak = bytes_stage1.max(bytes_stage2);
-        if !Self::will_fit(bytes_peak, 64 << 20) {
-            return Err(CudaPviError::Cuda("insufficient free VRAM".into()));
-        }
+        Self::will_fit(bytes_peak, 64 << 20)?;
 
         // Upload inputs (stage 1 requirements first)
-        let d_close = DeviceBuffer::from_slice(close).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let d_volume = DeviceBuffer::from_slice(volume).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let d_inits = DeviceBuffer::from_slice(initial_values)
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close)?;
+        let d_volume = DeviceBuffer::from_slice(volume)?;
+        let d_inits = DeviceBuffer::from_slice(initial_values)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows_len) }?;
 
         {
             // Build scale then apply across rows for large batches
-            let mut d_scale: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-                .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+            let mut d_scale: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(len) }?;
             let build = self
                 .module
                 .get_function("pvi_build_scale_f32")
-                .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaPviError::MissingKernelSymbol {
+                    name: "pvi_build_scale_f32",
+                })?;
             unsafe {
                 let mut close_ptr = d_close.as_device_ptr().as_raw();
                 let mut vol_ptr = d_volume.as_device_ptr().as_raw();
@@ -157,9 +249,8 @@ impl CudaPvi {
                 ];
                 let grid: GridSize = (1, 1, 1).into();
                 let block: BlockSize = (1, 1, 1).into();
-                self.stream
-                    .launch(&build, grid, block, 0, args)
-                    .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+                self.validate_launch_dims((1, 1, 1), (1, 1, 1))?;
+                self.stream.launch(&build, grid, block, 0, args)?;
             }
 
             // Now free inputs before Stage 2 to reduce peak VRAM
@@ -169,7 +260,9 @@ impl CudaPvi {
             let apply = self
                 .module
                 .get_function("pvi_apply_scale_batch_f32")
-                .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaPviError::MissingKernelSymbol {
+                    name: "pvi_apply_scale_batch_f32",
+                })?;
             unsafe {
                 let mut scale_ptr = d_scale.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
@@ -189,15 +282,12 @@ impl CudaPvi {
                 let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
                 let grid: GridSize = (grid_x.max(1), 1, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
-                self.stream
-                    .launch(&apply, grid, block, 0, args)
-                    .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+                self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
+                self.stream.launch(&apply, grid, block, 0, args)?;
             }
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -246,25 +336,32 @@ impl CudaPvi {
             }
         }
 
-        // VRAM estimate: 2 inputs + 1 output + first_valids
-        let bytes = (3 * expected) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>();
-        if !Self::will_fit(bytes, 64 << 20) {
-            return Err(CudaPviError::Cuda("insufficient free VRAM".into()));
-        }
+        // VRAM estimate: 2 inputs + 1 output + first_valids (guarded)
+        let elem = std::mem::size_of::<f32>();
+        let bytes_f32 = expected
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(elem))
+            .ok_or_else(|| CudaPviError::InvalidInput("VRAM bytes overflow".into()))?;
+        let bytes_first = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaPviError::InvalidInput("first_valids bytes overflow".into()))?;
+        let bytes = bytes_f32
+            .checked_add(bytes_first)
+            .ok_or_else(|| CudaPviError::InvalidInput("total VRAM bytes overflow".into()))?;
+        Self::will_fit(bytes, 64 << 20)?;
 
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let d_volume =
-            DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close_tm)?;
+        let d_volume = DeviceBuffer::from_slice(volume_tm)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(expected) }?;
 
         let func = self
             .module
             .get_function("pvi_many_series_one_param_f32")
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPviError::MissingKernelSymbol {
+                name: "pvi_many_series_one_param_f32",
+            })?;
         unsafe {
             let mut close_ptr = d_close.as_device_ptr().as_raw();
             let mut vol_ptr = d_volume.as_device_ptr().as_raw();
@@ -286,14 +383,11 @@ impl CudaPvi {
             let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
             let grid: GridSize = (grid_x.max(1), 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+            self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,

@@ -976,29 +976,27 @@ fn uma_core_into(
 
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         match _kernel {
+            #[cfg(target_feature = "avx512f")]
             Kernel::Avx512 => unsafe {
-                if cfg!(target_feature = "avx512f") {
-                    let (sx, sw) = uma_weighted_accumulate_avx512(
-                        data.as_ptr().add(start),
-                        ln_lut.as_ptr(),
-                        len_r,
-                        p,
-                    );
-                    xws = sx;
-                    wsum = sw;
-                }
+                let (sx, sw) = uma_weighted_accumulate_avx512(
+                    data.as_ptr().add(start),
+                    ln_lut.as_ptr(),
+                    len_r,
+                    p,
+                );
+                xws = sx;
+                wsum = sw;
             },
+            #[cfg(target_feature = "avx2")]
             Kernel::Avx2 => unsafe {
-                if cfg!(target_feature = "avx2") {
-                    let (sx, sw) = uma_weighted_accumulate_avx2(
-                        data.as_ptr().add(start),
-                        ln_lut.as_ptr(),
-                        len_r,
-                        p,
-                    );
-                    xws = sx;
-                    wsum = sw;
-                }
+                let (sx, sw) = uma_weighted_accumulate_avx2(
+                    data.as_ptr().add(start),
+                    ln_lut.as_ptr(),
+                    len_r,
+                    p,
+                );
+                xws = sx;
+                wsum = sw;
             },
             _ => {}
         }
@@ -1047,11 +1045,7 @@ fn uma_core_into(
 }
 
 // ====== Optional AVX2/AVX512 accumulation kernels ======
-#[cfg(all(
-    feature = "nightly-avx",
-    target_arch = "x86_64",
-    target_feature = "avx2"
-))]
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn uma_weighted_accumulate_avx2(
     data: *const f64,   // &data[start] pointer
@@ -1210,6 +1204,24 @@ unsafe fn uma_weighted_accumulate_avx512(
         j += 1;
     }
     (xws_acc, wsum_acc)
+}
+
+// Fallback stub for targets without AVX512F enabled at compile time.
+// The AVX512 path is additionally guarded by `cfg!(target_feature = "avx512f")`
+// at the call site, so this stub should never be executed on those targets.
+#[cfg(all(
+    feature = "nightly-avx",
+    target_arch = "x86_64",
+    not(target_feature = "avx512f")
+))]
+#[inline(always)]
+unsafe fn uma_weighted_accumulate_avx512(
+    _data: *const f64,
+    _ln_lut: *const f64,
+    _len_r: usize,
+    _p: f64,
+) -> (f64, f64) {
+    unreachable!("uma_weighted_accumulate_avx512 should not be called without AVX512F")
 }
 
 #[inline]

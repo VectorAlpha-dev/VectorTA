@@ -21,14 +21,12 @@
 //! - Low values (<38.2): Trending market
 //!
 //! ## Developer Notes (Implementation Status)
-//! - SIMD: Implemented as stubs that delegate to the scalar kernel. Rationale: CHOP’s core is a true
-//!   recurrence (RMA of TR) plus sliding-window HH/LL via monotonic deques; both are data-dependent and
-//!   resist wide-lane SIMD. In practice, AVX2/AVX512 wins are marginal and risk numerical drift. We keep
-//!   stubs for parity and future exploration.
+//! - Decision log: SIMD present but delegates to the scalar kernel; CUDA wrapper present. SIMD disabled by
+//!   default because CHOP’s deques/TR recurrence are data-dependent with marginal wide-lane benefit; outputs
+//!   preserved. Python interop provides CAI v3 + DLPack when CUDA is enabled.
 //! - Scalar path: Optimized single-pass implementation using rolling ATR sum and monotonic deques; O(1)
 //!   per-bar update after warmup. Warmup handling and allocation follow alma.rs patterns.
-//! - Batch: Supported via parallel per-row evaluation. Row-specific precompute (TR/RMA prefix, RMQ) was
-//!   considered but deferred to keep changes minimal; revisit only if sweeping many parameter rows dominates.
+//! - Batch: Supported via parallel per-row evaluation.
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -67,7 +65,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaChop;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::oscillators::chop_wrapper::DeviceArrayF32 as DeviceArrayF32Chop;
 
 #[derive(Debug, Clone)]
 pub enum ChopData<'a> {
@@ -246,7 +244,15 @@ pub enum ChopError {
     AllValuesNaN,
     #[error("chop: Not enough valid data: needed={needed}, valid={valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("chop: Underlying function failed: {0}")]
+    #[error("chop: output length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("chop: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("chop: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("chop: invalid input: {0}")]
+    InvalidInput(String),
+    #[error("chop: underlying function failed: {0}")]
     UnderlyingFunctionFailed(String),
 }
 
@@ -378,9 +384,7 @@ pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Resu
     }
 
     if dst.len() != len {
-        return Err(ChopError::UnderlyingFunctionFailed(
-            "dst length mismatch".to_string(),
-        ));
+        return Err(ChopError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
     let period = input.get_period();
@@ -478,9 +482,7 @@ pub fn chop_into(input: &ChopInput, out: &mut [f64]) -> Result<(), ChopError> {
         ChopData::Slice { close, .. } => close.len(),
     };
     if out.len() != len {
-        return Err(ChopError::UnderlyingFunctionFailed(
-            "mismatched output length".to_string(),
-        ));
+        return Err(ChopError::OutputLengthMismatch { expected: len, got: out.len() });
     }
     chop_into_slice(out, input, Kernel::Auto)
 }
@@ -723,11 +725,7 @@ pub fn chop_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(ChopError::UnderlyingFunctionFailed(
-                "non-batch kernel provided to batch function".to_string(),
-            ))
-        }
+        other => return Err(ChopError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -831,41 +829,77 @@ impl ChopBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &ChopBatchRange) -> Vec<ChopParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &ChopBatchRange) -> Result<Vec<ChopParams>, ChopError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, ChopError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(next) => { if next == v { break; } v = next; }
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            while v >= end {
+                out.push(v);
+                if v < end + step { break; }
+                v -= step;
+                if v == 0 { break; }
+            }
+        }
+        if out.is_empty() {
+            return Err(ChopError::InvalidRange { start, end, step });
+        }
+        Ok(out)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, ChopError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start <= end && step > 0.0 {
+            let mut x = start;
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += step;
+            }
+        } else if start >= end && step < 0.0 {
+            let mut x = start;
+            while x >= end - 1e-12 {
+                v.push(x);
+                x += step; // negative
+            }
+        } else {
+            return Err(ChopError::InvalidInput("axis_f64 step direction invalid".into()));
         }
-        v
+        if v.is_empty() {
+            return Err(ChopError::InvalidRange { start: start as usize, end: end as usize, step: step.abs() as usize });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let scalars = axis_f64(r.scalar);
-    let drifts = axis_usize(r.drift);
-    let mut out = Vec::with_capacity(periods.len() * scalars.len() * drifts.len());
+    let periods = axis_usize(r.period)?;
+    let scalars = axis_f64(r.scalar)?;
+    let drifts = axis_usize(r.drift)?;
+    let cap = periods
+        .len()
+        .checked_mul(scalars.len())
+        .and_then(|x| x.checked_mul(drifts.len()))
+        .ok_or_else(|| ChopError::InvalidInput("rows*cols overflow".into()))?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &s in &scalars {
             for &d in &drifts {
-                out.push(ChopParams {
-                    period: Some(p),
-                    scalar: Some(s),
-                    drift: Some(d),
-                });
+                out.push(ChopParams { period: Some(p), scalar: Some(s), drift: Some(d) });
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -897,13 +931,7 @@ fn chop_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<ChopBatchOutput, ChopError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(ChopError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     // Validate input lengths match first, before any other checks
     if !(high.len() == low.len() && low.len() == close.len()) {
         return Err(ChopError::UnderlyingFunctionFailed(
@@ -925,6 +953,9 @@ fn chop_batch_inner(
 
     let rows = combos.len();
     let cols = len;
+    rows
+        .checked_mul(cols)
+        .ok_or_else(|| ChopError::InvalidInput("rows*cols overflow".into()))?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     let warm: Vec<usize> = combos
@@ -2160,13 +2191,7 @@ fn chop_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<ChopParams>, ChopError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(ChopError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     // Validate input lengths match first, before any other checks
     if !(high.len() == low.len() && low.len() == close.len()) {
@@ -2194,7 +2219,15 @@ fn chop_batch_inner_into(
 
     let rows = combos.len();
     let cols = len;
-    debug_assert_eq!(out.len(), rows * cols);
+    let expected_len = rows
+        .checked_mul(cols)
+        .ok_or_else(|| ChopError::InvalidInput("rows*cols overflow".into()))?;
+    if out.len() != expected_len {
+        return Err(ChopError::OutputLengthMismatch {
+            expected: expected_len,
+            got: out.len(),
+        });
+    }
 
     // Work on MaybeUninit view of caller buffer and initialize warm prefixes
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
@@ -2349,12 +2382,15 @@ pub fn chop_batch_py<'py>(
         scalar: scalar_range,
         drift: drift_range,
     };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = c.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
     // preallocate NumPy and fill in-place without copies
-    let arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_slice = unsafe { arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -2416,7 +2452,7 @@ pub fn chop_cuda_batch_dev_py(
     scalar_range: (f64, f64, f64),
     drift_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<ChopDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2435,7 +2471,7 @@ pub fn chop_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>(arr)
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(ChopDeviceArrayF32Py { inner: Some(inner) })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2452,7 +2488,7 @@ pub fn chop_cuda_many_series_one_param_dev_py(
     scalar: f64,
     drift: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<ChopDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2469,7 +2505,256 @@ pub fn chop_cuda_many_series_one_param_dev_py(
         cuda.chop_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(ChopDeviceArrayF32Py { inner: Some(inner) })
+}
+
+// ----- Python device array with CAI v3 + DLPack v1.x (CHOP) -----
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct ChopDeviceArrayF32Py {
+    pub(crate) inner: Option<DeviceArrayF32Chop>,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl ChopDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        let row_stride = inner
+            .cols
+            .checked_mul(itemsize)
+            .ok_or_else(|| PyValueError::new_err("byte stride overflow"))?;
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (row_stride, itemsize))?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // Stream omitted: kernels synchronize before returning
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        Ok((2, inner.device_id as i32))
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CStr, CString};
+
+        let _ = stream;
+        if let Some(true) = copy {
+            return Err(PyValueError::new_err(
+                "copy=True is not supported for chop CUDA buffers",
+            ));
+        }
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        if let Some((dev_type, dev_id)) = dl_device {
+            if dev_type != 2 || dev_id != inner.device_id as i32 {
+                return Err(PyValueError::new_err("dl_device mismatch for chop CUDA buffer"));
+            }
+        }
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _arr: DeviceArrayF32Chop,
+        }
+
+        unsafe extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ = Box::from_raw(ctx_ptr);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            if capsule.is_null() {
+                return;
+            }
+            let name_ptr = pyffi::PyCapsule_GetName(capsule);
+            if name_ptr.is_null() {
+                return;
+            }
+            let name = CStr::from_ptr(name_ptr);
+            let Ok(name_str) = name.to_str() else {
+                return;
+            };
+            if name_str == "dltensor" {
+                let ptr = pyffi::PyCapsule_GetPointer(capsule, name_ptr) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = unsafe { (*ptr).deleter } {
+                        unsafe { del(ptr) };
+                    }
+                    let used = CString::new("used_dltensor").unwrap();
+                    let _ = unsafe { pyffi::PyCapsule_SetName(capsule, used.as_ptr()) };
+                }
+            } else if name_str == "dltensor_versioned" {
+                let ptr = pyffi::PyCapsule_GetPointer(capsule, name_ptr)
+                    as *mut DLManagedTensorVersioned;
+                if !ptr.is_null() {
+                    let manager = unsafe { (*ptr).manager };
+                    if !manager.is_null() {
+                        if let Some(del) = unsafe { (*manager).deleter } {
+                            unsafe { del(manager) };
+                        }
+                    }
+                    unsafe {
+                        drop(Box::from_raw(ptr));
+                    }
+                    let used = CString::new("used_dltensor_versioned").unwrap();
+                    let _ = unsafe { pyffi::PyCapsule_SetName(capsule, used.as_ptr()) };
+                }
+            }
+        }
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let total: i128 = (rows as i128) * (cols as i128);
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _arr: inner,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let manager_ref = unsafe { &*(mgr_ptr as *const ManagerCtx) };
+        let data_ptr = if total == 0 {
+            std::ptr::null_mut()
+        } else {
+            manager_ref
+                ._arr
+                .buf
+                .as_device_ptr()
+                .as_raw() as *mut c_void
+        };
+
+        let dl = DLTensor {
+            data: data_ptr,
+            device: DLDevice {
+                device_type: 2,
+                device_id: manager_ref._arr.device_id as i32,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: manager_ref.shape,
+            strides: manager_ref.strides,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: dl,
+            manager_ctx: mgr_ptr,
+            deleter: Some(managed_deleter),
+        });
+
+        let want_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -2584,9 +2869,14 @@ pub fn chop_batch_unified_js(
         scalar: cfg.scalar_range,
         drift: cfg.drift_range,
     };
-    let rows = expand_grid(&sweep).len();
+    let rows = expand_grid(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?
+        .len();
     let cols = close.len();
-    let mut values = vec![0.0f64; rows * cols];
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+    let mut values = vec![0.0f64; total];
 
     let combos = chop_batch_inner_into(
         high,
@@ -2639,9 +2929,12 @@ pub fn chop_batch_into(
             scalar: (scalar_start, scalar_end, scalar_step),
             drift: (drift_start, drift_end, drift_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * len);
+        let total = rows
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         chop_batch_inner_into(h, l, c, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)

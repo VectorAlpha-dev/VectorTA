@@ -30,6 +30,8 @@
 //!   init_matrix_prefixes) and removes branches in hot loops where IEEE-754 NaN propagation suffices.
 //! - Decision: Mixed MA combos (EMA→SMA, SMA→EMA) fused variants are implemented, but the main
 //!   selection falls back to the generic MA pipeline for those types due to prior underperformance.
+//! - Decision log: CUDA wrapper present with VRAM-backed handles; Python interop exposes CUDA
+//!   Array Interface v3 and DLPack v1.x (versioned capsules) with unchanged numerical outputs.
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -268,14 +270,20 @@ impl RsmkBuilder {
 
 #[derive(Debug, Error)]
 pub enum RsmkError {
-    #[error("rsmk: Empty data provided for RSMK.")]
-    EmptyData,
+    #[error("rsmk: Input data slice is empty.")]
+    EmptyInputData,
     #[error("rsmk: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("rsmk: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("rsmk: All values are NaN.")]
     AllValuesNaN,
+    #[error("rsmk: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("rsmk: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("rsmk: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("rsmk: Error from MA function: {0}")]
     MaError(String),
 }
@@ -306,7 +314,7 @@ pub fn rsmk_with_kernel(input: &RsmkInput, kernel: Kernel) -> Result<RsmkOutput,
         RsmkData::Slices { main, compare } => (*main, *compare),
     };
     if main.is_empty() || compare.is_empty() {
-        return Err(RsmkError::EmptyData);
+        return Err(RsmkError::EmptyInputData);
     }
     if main.len() != compare.len() {
         return Err(RsmkError::InvalidPeriod {
@@ -794,15 +802,24 @@ pub fn rsmk_into_slice(
         RsmkData::Slices { main, compare } => (*main, *compare),
     };
     if main.len() == 0 || compare.len() == 0 {
-        return Err(RsmkError::EmptyData);
+        return Err(RsmkError::EmptyInputData);
     }
-    if main.len() != compare.len()
-        || dst_indicator.len() != main.len()
-        || dst_signal.len() != main.len()
-    {
+    if main.len() != compare.len() {
         return Err(RsmkError::InvalidPeriod {
             period: 0,
             data_len: main.len(),
+        });
+    }
+    if dst_indicator.len() != main.len() {
+        return Err(RsmkError::OutputLengthMismatch {
+            expected: main.len(),
+            got: dst_indicator.len(),
+        });
+    }
+    if dst_signal.len() != main.len() {
+        return Err(RsmkError::OutputLengthMismatch {
+            expected: main.len(),
+            got: dst_signal.len(),
         });
     }
 
@@ -895,15 +912,24 @@ pub fn rsmk_into(
     };
     let len = main.len();
     if len == 0 || compare.len() == 0 {
-        return Err(RsmkError::EmptyData);
+        return Err(RsmkError::EmptyInputData);
     }
-    if main.len() != compare.len()
-        || indicator_out.len() != len
-        || signal_out.len() != len
-    {
+    if main.len() != compare.len() {
         return Err(RsmkError::InvalidPeriod {
             period: 0,
             data_len: len,
+        });
+    }
+    if indicator_out.len() != len {
+        return Err(RsmkError::OutputLengthMismatch {
+            expected: len,
+            got: indicator_out.len(),
+        });
+    }
+    if signal_out.len() != len {
+        return Err(RsmkError::OutputLengthMismatch {
+            expected: len,
+            got: signal_out.len(),
         });
     }
 
@@ -1647,7 +1673,32 @@ fn expand_grid(r: &RsmkBatchRange) -> Vec<RsmkParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut vals = Vec::new();
+        if start <= end {
+            let st = step.max(1);
+            for v in (start..=end).step_by(st) {
+                vals.push(v);
+            }
+        } else {
+            // Support reversed bounds with descending sequence
+            let mut cur = start;
+            let s = step.max(1);
+            loop {
+                vals.push(cur);
+                if cur <= end {
+                    break;
+                }
+                if cur < s {
+                    break;
+                }
+                let next = cur - s;
+                if next == cur {
+                    break;
+                }
+                cur = next;
+            }
+        }
+        vals
     }
     let looks = axis(r.lookback);
     let periods = axis(r.period);
@@ -1679,12 +1730,7 @@ pub fn rsmk_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(RsmkError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(RsmkError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1725,9 +1771,10 @@ fn rsmk_batch_inner_into(
 ) -> Result<Vec<RsmkParams>, RsmkError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(RsmkError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(RsmkError::InvalidRange {
+            start: sweep.lookback.0,
+            end: sweep.lookback.1,
+            step: sweep.lookback.2,
         });
     }
     let first = main
@@ -1755,6 +1802,26 @@ fn rsmk_batch_inner_into(
 
     let rows = combos.len();
     let cols = main.len();
+
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(RsmkError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 0,
+        })?;
+    if indicator_out.len() != expected {
+        return Err(RsmkError::OutputLengthMismatch {
+            expected,
+            got: indicator_out.len(),
+        });
+    }
+    if signal_out.len() != expected {
+        return Err(RsmkError::OutputLengthMismatch {
+            expected,
+            got: signal_out.len(),
+        });
+    }
 
     // Precompute log-ratio once
     let mut lr = Vec::with_capacity(cols);
@@ -1873,9 +1940,10 @@ fn rsmk_batch_inner(
 ) -> Result<RsmkBatchOutput, RsmkError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(RsmkError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(RsmkError::InvalidRange {
+            start: sweep.lookback.0,
+            end: sweep.lookback.1,
+            step: sweep.lookback.2,
         });
     }
     let first = main
@@ -1903,6 +1971,14 @@ fn rsmk_batch_inner(
 
     let rows = combos.len();
     let cols = main.len();
+
+    let _expected = rows
+        .checked_mul(cols)
+        .ok_or(RsmkError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 0,
+        })?;
 
     let mut indicators = make_uninit_matrix(rows, cols);
     let mut signals = make_uninit_matrix(rows, cols);
@@ -2118,9 +2194,13 @@ pub fn rsmk_batch_py<'py>(
     let rows = combos.len();
     let cols = main_slice.len();
 
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err(format!("rsmk: rows*cols overflow (rows={}, cols={})", rows, cols)))?;
+
     // Pre-allocate output arrays
-    let indicator_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let signal_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let indicator_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let signal_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let indicator_slice = unsafe { indicator_arr.as_slice_mut()? };
     let signal_slice = unsafe { signal_arr.as_slice_mut()? };
 
@@ -2402,14 +2482,26 @@ pub fn rsmk_cuda_batch_dev_py(
         period: period_range,
         signal_period: signal_period_range,
     };
-    let (pair, _combos) = py.allow_threads(|| {
+    let (pair, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaRsmk::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.rsmk_batch_dev(main, comp, &sweep)
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda
+            .rsmk_batch_dev(main, comp, &sweep)
+            .map(|pair| (pair, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: pair.a },
-        DeviceArrayF32Py { inner: pair.b },
+        DeviceArrayF32Py {
+            inner: pair.a,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id),
+        },
+        DeviceArrayF32Py {
+            inner: pair.b,
+            _ctx: Some(ctx),
+            device_id: Some(dev_id),
+        },
     ))
 }
 
@@ -2439,14 +2531,26 @@ pub fn rsmk_cuda_many_series_one_param_dev_py(
         matype: Some("ema".into()),
         signal_matype: Some("ema".into()),
     };
-    let pair = py.allow_threads(|| {
+    let (pair, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaRsmk::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.rsmk_many_series_one_param_time_major_dev(main_tm, comp_tm, cols, rows, &params)
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda
+            .rsmk_many_series_one_param_time_major_dev(main_tm, comp_tm, cols, rows, &params)
+            .map(|pair| (pair, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: pair.a },
-        DeviceArrayF32Py { inner: pair.b },
+        DeviceArrayF32Py {
+            inner: pair.a,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id),
+        },
+        DeviceArrayF32Py {
+            inner: pair.b,
+            _ctx: Some(ctx),
+            device_id: Some(dev_id),
+        },
     ))
 }
 
