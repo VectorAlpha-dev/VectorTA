@@ -21,6 +21,7 @@
 //!   near bit-for-bit equality). The O(1) recurrence state is retained, but we rebase from the ring
 //!   every step to produce identical outputs.
 //! - Memory: GOOD — constant ring buffer; no per-tick allocations; no per-tick Vec growth.
+// Decision log: SIMD present but selects scalar for parity; CUDA wrappers provided for FP32 with JIT PTX; outputs match scalar reference; no change to unit references.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -33,7 +34,7 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyAny, PyDict, PyList};
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -102,14 +103,23 @@ impl DeviceArrayF32Py {
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
-    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<&PyAny>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        let _ = stream; // producer already synchronized before return; no pending work
         // Move ownership of the device buffer into the DLManagedTensor capsule
         let buf = self
             .buf
             .take()
             .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
 
-        // Minimal DLPack structs
+        // Minimal DLPack structs (legacy and versioned)
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
         #[repr(C)]
@@ -130,6 +140,16 @@ impl DeviceArrayF32Py {
             manager_ctx: *mut c_void,
             deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
         }
+        #[repr(C)]
+        struct DLPackVersion { major: u32, minor: u32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
 
         // Manager keeps CUDA context, buffer, and shape/strides alive until consumer frees
         struct Manager {
@@ -146,7 +166,22 @@ impl DeviceArrayF32Py {
             drop(mt);
         }
 
+        unsafe extern "C" fn dlpack_deleter_v(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() { return; }
+            let mt = Box::from_raw(p);
+            let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
+            drop(mt);
+        }
+
         unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            // Try versioned first, then legacy; only call deleter when capsule still has original name
+            let name_v = std::ffi::CString::new("dltensor_versioned").unwrap();
+            let ptr_v = pyo3::ffi::PyCapsule_GetPointer(capsule, name_v.as_ptr());
+            if !ptr_v.is_null() {
+                let mt = ptr_v as *mut DLManagedTensorVersioned;
+                if let Some(del) = (*mt).deleter { del(mt) }
+                return;
+            }
             let name = std::ffi::CString::new("dltensor").unwrap();
             let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
             if !ptr.is_null() {
@@ -159,29 +194,52 @@ impl DeviceArrayF32Py {
         let cols = self.cols as i64;
         let shape = Box::new([rows, cols]);
         let strides = Box::new([cols, 1]); // element strides, row-major
-        let data_ptr = buf.as_device_ptr().as_raw() as *mut c_void;
+        let elem_count = (rows.max(0) as usize).saturating_mul(cols.max(0) as usize);
+        let data_ptr = if elem_count == 0 { std::ptr::null_mut() } else { buf.as_device_ptr().as_raw() as *mut c_void };
         let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
         let mgr_ptr = Box::into_raw(mgr);
         let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
         let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
 
-        let mt = Box::new(DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
-                ndim: 2,
-                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                shape: shape_ptr,
-                strides: strides_ptr,
-                byte_offset: 0,
-            },
-            manager_ctx: mgr_ptr as *mut c_void,
-            deleter: Some(dlpack_deleter),
-        });
-
-        let raw_capsule = unsafe {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
+        let use_versioned = match max_version { Some((maj, _min)) if maj >= 1 => true, _ => false };
+        let raw_capsule = if use_versioned {
+            let mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 0 },
+                manager_ctx: mgr_ptr as *mut c_void,
+                deleter: Some(dlpack_deleter_v),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: shape_ptr,
+                    strides: strides_ptr,
+                    byte_offset: 0,
+                },
+            });
+            unsafe {
+                let name = std::ffi::CString::new("dltensor_versioned").unwrap();
+                pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
+            }
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: shape_ptr,
+                    strides: strides_ptr,
+                    byte_offset: 0,
+                },
+                manager_ctx: mgr_ptr as *mut c_void,
+                deleter: Some(dlpack_deleter),
+            });
+            unsafe {
+                let name = std::ffi::CString::new("dltensor").unwrap();
+                pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
+            }
         };
         if raw_capsule.is_null() {
             return Err(PyValueError::new_err("failed to create DLPack capsule"));

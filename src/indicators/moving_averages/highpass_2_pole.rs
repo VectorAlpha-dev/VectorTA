@@ -19,6 +19,9 @@
 //!   routes to the AVX2 body. Keep both enabled; scalar remains reference.
 //! - Batch: adds optional precomputed second-difference shared across rows; engaged when rows ≥ 2.
 //!   Helps large parameter grids; neutral overhead for single-row default benches.
+//! - CUDA: kernels enabled with typed wrapper errors and preflight VRAM checks; Python interop implements
+//!   CAI v3 (byte strides, synchronized producer) and DLPack v1.x with version negotiation. Context lifetime
+//!   is retained via primary-context RAII on the Python handle; numerics unchanged.
 //! - Streaming update: O(1) state rotation retained; semantics unchanged.
 //! - Memory: follows `alma.rs` patterns (`alloc_with_nan_prefix`, `make_uninit_matrix`).
 
@@ -110,13 +113,31 @@ impl HighPass2DeviceArrayF32Py {
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
-    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
-        // Move ownership of the device buffer into the DLManagedTensor so consumer owns it
+    #[pyo3(signature = (*, stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<&pyo3::types::PyAny>,
+        _dl_device: Option<&pyo3::types::PyAny>,
+        _copy: Option<&pyo3::types::PyAny>,
+    ) -> PyResult<PyObject> {
+        // We synchronize producers before returning any handle, so we ignore `stream`.
+        // Move ownership of the device buffer into the DLManagedTensor so consumer owns it.
         let buf = self
             .buf
             .take()
             .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
 
+        // Parse max_version=(major, minor) → decide capsule name
+        let mut versioned = false;
+        if let Some(v) = max_version {
+            if let Ok(tup) = v.extract::<(i64, i64)>() {
+                if tup.0 > 1 || (tup.0 == 1 && tup.1 >= 0) { versioned = true; }
+            }
+        }
+
+        // DLPack defs (minimal subset)
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
         #[repr(C)]
@@ -132,11 +153,9 @@ impl HighPass2DeviceArrayF32Py {
             byte_offset: u64,
         }
         #[repr(C)]
-        struct DLManagedTensor {
-            dl_tensor: DLTensor,
-            manager_ctx: *mut c_void,
-            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
-        }
+        struct DLManagedTensor { dl_tensor: DLTensor, manager_ctx: *mut c_void, deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)> }
+        #[repr(C)]
+        struct DLManagedTensorVersioned { manager: DLManagedTensor, version: i64 }
 
         struct Manager {
             _ctx: Arc<Context>,
@@ -153,25 +172,32 @@ impl HighPass2DeviceArrayF32Py {
         }
 
         unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
-            let name = std::ffi::CString::new("dltensor").unwrap();
+            // Call deleter only if capsule still named dltensor[_versioned]
+            let cname_ptr = pyo3::ffi::PyCapsule_GetName(capsule);
+            if cname_ptr.is_null() { return; }
+            let cname = std::ffi::CStr::from_ptr(cname_ptr).to_string_lossy();
+            let valid = cname == "dltensor" || cname == "dltensor_versioned";
+            if !valid { return; }
+            // Get pointer using the same name
+            let name = std::ffi::CString::new(cname.as_ref()).unwrap();
             let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
-            if !ptr.is_null() {
-                let mt = ptr as *mut DLManagedTensor;
-                if let Some(del) = (*mt).deleter { del(mt) }
-            }
+            if ptr.is_null() { return; }
+            let mt = ptr as *mut DLManagedTensor;
+            if let Some(del) = unsafe { (*mt).deleter } { unsafe { del(mt) } }
         }
 
         let rows = self.rows as i64;
         let cols = self.cols as i64;
         let shape = Box::new([rows, cols]);
-        let strides = Box::new([cols, 1]); // element strides (row-major)
-        let data_ptr = buf.as_device_ptr().as_raw() as *mut c_void;
+        let strides = Box::new([cols, 1]); // in ELEMENTS
+        let is_empty = (rows == 0) || (cols == 0);
+        let data_ptr = if is_empty { std::ptr::null_mut() } else { buf.as_device_ptr().as_raw() as *mut c_void };
         let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
         let mgr_ptr = Box::into_raw(mgr);
         let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
         let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
 
-        let mt = Box::new(DLManagedTensor {
+        let mt = DLManagedTensor {
             dl_tensor: DLTensor {
                 data: data_ptr,
                 device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
@@ -183,11 +209,18 @@ impl HighPass2DeviceArrayF32Py {
             },
             manager_ctx: mgr_ptr as *mut c_void,
             deleter: Some(dlpack_deleter),
-        });
+        };
+
+        let (capsule_name, capsule_ptr): (&str, *mut c_void) = if versioned {
+            let mtv = Box::new(DLManagedTensorVersioned { manager: mt, version: 1 });
+            ("dltensor_versioned", Box::into_raw(mtv) as *mut c_void)
+        } else {
+            ("dltensor", Box::into_raw(Box::new(mt)) as *mut c_void)
+        };
 
         let raw_capsule = unsafe {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
+            let name = std::ffi::CString::new(capsule_name).unwrap();
+            pyo3::ffi::PyCapsule_New(capsule_ptr, name.as_ptr(), Some(capsule_destructor))
         };
         if raw_capsule.is_null() {
             return Err(PyValueError::new_err("failed to create DLPack capsule"));
@@ -2317,8 +2350,11 @@ pub fn highpass_2_pole_batch_py<'py>(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let total: usize = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py

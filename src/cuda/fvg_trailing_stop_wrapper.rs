@@ -15,7 +15,7 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::fvg_trailing_stop::{FvgTsBatchRange, FvgTrailingStopParams};
 use cust::context::{CacheConfig, Context};
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -23,22 +23,28 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaFvgTsError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaFvgTsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaFvgTsError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaFvgTsError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaFvgTsError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -79,49 +85,117 @@ pub struct CudaFvgTsBatch {
 pub struct CudaFvgTs {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaFvgTsPolicy,
 }
 
 impl CudaFvgTs {
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
+    }
+
+    #[inline]
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaFvgTsError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaFvgTsError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
+    }
+
     pub fn new(device_id: usize) -> Result<Self, CudaFvgTsError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/fvg_trailing_stop_kernel.ptx"));
-        let jit = &[
+        let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, jit)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) =
+                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
+            }
+        };
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaFvgTsPolicy::default(),
         })
     }
 
     pub fn set_policy(&mut self, p: CudaFvgTsPolicy) {
         self.policy = p;
-    }
-
-    #[inline]
-    fn will_fit(bytes: usize, headroom: usize) -> bool {
-        if env::var("CUDA_MEM_CHECK").ok().as_deref() == Some("0") {
-            return true;
-        }
-        if let Ok((free, _)) = mem_get_info() {
-            bytes.saturating_add(headroom) <= free
-        } else {
-            true
-        }
     }
 
     fn first_valid_ohlc_f32(h: &[f32], l: &[f32], c: &[f32]) -> Option<usize> {
@@ -134,21 +208,64 @@ impl CudaFvgTs {
         None
     }
 
-    fn expand_grid(range: &FvgTsBatchRange) -> Vec<FvgTrailingStopParams> {
-        fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
-            if st == 0 || s == e {
-                vec![s]
-            } else {
-                (s..=e).step_by(st).collect()
+    fn expand_grid(range: &FvgTsBatchRange) -> Result<Vec<FvgTrailingStopParams>, CudaFvgTsError> {
+        fn axis_usize(
+            (s, e, st): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaFvgTsError> {
+            if st == 0 {
+                return Ok(vec![s]);
             }
+            let mut out = Vec::new();
+            if s <= e {
+                let mut v = s;
+                while v <= e {
+                    out.push(v);
+                    match v.checked_add(st) {
+                        Some(nv) => v = nv,
+                        None => break,
+                    }
+                }
+            } else {
+                let mut v = s;
+                loop {
+                    if v < e {
+                        break;
+                    }
+                    out.push(v);
+                    match v.checked_sub(st) {
+                        Some(next) => v = next,
+                        None => break,
+                    }
+                }
+            }
+            if out.is_empty() {
+                return Err(CudaFvgTsError::InvalidInput(format!(
+                    "invalid range: start={} end={} step={}",
+                    s, e, st
+                )));
+            }
+            Ok(out)
         }
-        let looks = axis_usize(range.lookback);
-        let smooth = axis_usize(range.smoothing);
+
+        let looks = axis_usize(range.lookback)?;
+        let smooth = axis_usize(range.smoothing)?;
         let mut resets = Vec::new();
-        if range.reset_on_cross.0 { resets.push(false); }
-        if range.reset_on_cross.1 { resets.push(true); }
-        if resets.is_empty() { resets.push(false); }
-        let mut out = Vec::with_capacity(looks.len() * smooth.len() * resets.len());
+        if range.reset_on_cross.0 {
+            resets.push(false);
+        }
+        if range.reset_on_cross.1 {
+            resets.push(true);
+        }
+        if resets.is_empty() {
+            resets.push(false);
+        }
+
+        let combos_cap = looks
+            .len()
+            .checked_mul(smooth.len())
+            .and_then(|n| n.checked_mul(resets.len()))
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("combination count overflow".into()))?;
+        let mut out = Vec::with_capacity(combos_cap);
         for &lb in &looks {
             for &sm in &smooth {
                 for &rs in &resets {
@@ -160,7 +277,7 @@ impl CudaFvgTs {
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     pub fn fvg_ts_batch_dev(
@@ -176,14 +293,17 @@ impl CudaFvgTs {
                 "inconsistent or empty inputs".into(),
             ));
         }
-        let _first = Self::first_valid_ohlc_f32(high, low, close)
-            .ok_or_else(|| CudaFvgTsError::InvalidInput("all values are NaN".into()))?;
-        let combos = Self::expand_grid(sweep);
+        let _first = Self::first_valid_ohlc_f32(high, low, close).ok_or_else(|| {
+            CudaFvgTsError::InvalidInput("all values are NaN".into())
+        })?;
+
+        let combos = Self::expand_grid(sweep)?;
         if combos.is_empty() {
             return Err(CudaFvgTsError::InvalidInput(
                 "no parameter combinations".into(),
             ));
         }
+
         // Conservative param limits must match kernel constants
         const MAX_LOOK: usize = 256;
         const MAX_W: usize = 256;
@@ -202,44 +322,52 @@ impl CudaFvgTs {
                     w, MAX_W
                 )));
             }
-            let w = p.smoothing_length.unwrap_or(9);
-            if lb == 0 || lb > MAX_LOOK {
-                return Err(CudaFvgTsError::InvalidInput(format!(
-                    "lookback {} exceeds max {}",
-                    lb, MAX_LOOK
-                )));
-            }
-            if w == 0 || w > MAX_W {
-                return Err(CudaFvgTsError::InvalidInput(format!(
-                    "smoothing_length {} exceeds max {}",
-                    w, MAX_W
-                )));
+        }
+
+        let nrows = combos.len();
+        let rows_cols = nrows
+            .checked_mul(len)
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("rows*cols overflow".into()))?;
+
+        let prices_bytes = len
+            .checked_mul(3)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("price bytes overflow".into()))?;
+        let params_bytes = nrows
+            .checked_mul(3)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<i32>()))
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("param bytes overflow".into()))?;
+        let out_bytes = rows_cols
+            .checked_mul(4)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|n| n.checked_add(out_bytes))
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("total bytes overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaFvgTsError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaFvgTsError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
             }
         }
 
         // Upload invariants
-        let d_high =
-            DeviceBuffer::from_slice(high).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high)?;
+        let d_low = DeviceBuffer::from_slice(low)?;
+        let d_close = DeviceBuffer::from_slice(close)?;
 
-        let nrows = combos.len();
         let mut h_lb: Vec<i32> = Vec::with_capacity(nrows);
         let mut h_sw: Vec<i32> = Vec::with_capacity(nrows);
         let mut h_rs: Vec<i32> = Vec::with_capacity(nrows);
-        for p in &combos {
-            h_lb.push(p.unmitigated_fvg_lookback.unwrap_or(5) as i32);
-            h_sw.push(p.smoothing_length.unwrap_or(9) as i32);
-            h_rs.push(if p.reset_on_cross.unwrap_or(false) { 1 } else { 0 });
-        }
-        let d_lb =
-            DeviceBuffer::from_slice(&h_lb).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let d_sw =
-            DeviceBuffer::from_slice(&h_sw).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let d_rs =
-            DeviceBuffer::from_slice(&h_rs).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
         for p in &combos {
             h_lb.push(p.unmitigated_fvg_lookback.unwrap_or(5) as i32);
             h_sw.push(p.smoothing_length.unwrap_or(9) as i32);
@@ -249,45 +377,50 @@ impl CudaFvgTs {
                 0
             });
         }
-        let d_lb =
-            DeviceBuffer::from_slice(&h_lb).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let d_sw =
-            DeviceBuffer::from_slice(&h_sw).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let d_rs =
-            DeviceBuffer::from_slice(&h_rs).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
+        let d_lb = DeviceBuffer::from_slice(&h_lb)?;
+        let d_sw = DeviceBuffer::from_slice(&h_sw)?;
+        let d_rs = DeviceBuffer::from_slice(&h_rs)?;
 
         // Outputs (four matrices: rows=nrows, cols=len)
-        let bytes_out = 4usize * nrows * len * std::mem::size_of::<f32>();
-        if !Self::will_fit(bytes_out, 64 * 1024 * 1024) {
-            return Err(CudaFvgTsError::InvalidInput(
-                "insufficient VRAM for outputs".into(),
-            ));
-        }
-        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(nrows * len) }
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(nrows * len) }
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let mut d_upper_ts: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(nrows * len) }
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let mut d_lower_ts: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(nrows * len) }
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
+        let mut d_upper: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows_cols) }?;
+        let mut d_lower: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows_cols) }?;
+        let mut d_upper_ts: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows_cols) }?;
+        let mut d_lower_ts: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows_cols) }?;
 
         // ---- choose launch + shared-mem heuristic ----
         let mut func = self
             .module
             .get_function("fvg_trailing_stop_batch_f32")
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaFvgTsError::MissingKernelSymbol {
+                name: "fvg_trailing_stop_batch_f32",
+            })?;
 
         // Default block size or policy override
-        let mut block_x = match self.policy.batch { BatchKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+        let mut block_x = match self.policy.batch {
+            BatchKernelPolicy::OneD { block_x } => block_x,
+            _ => 128,
+        };
 
         // Runtime heuristic: use shared rings only if max(w) ≤ 64
-        let max_w: usize = h_sw.iter().copied().map(|v| v as i32).max().unwrap_or(0).max(1) as usize;
+        let max_w: usize = h_sw
+            .iter()
+            .copied()
+            .map(|v| v as usize)
+            .max()
+            .unwrap_or(0)
+            .max(1);
         let want_shmem = max_w <= 64;
 
         // Each thread needs 3 * smem_stride floats; we pack per-thread slices back-to-back.
         let smem_stride: usize = if want_shmem { max_w } else { 0 };
-        let bytes_per_thread: usize = 3 * smem_stride * std::mem::size_of::<f32>();
+        let bytes_per_thread: usize = 3usize
+            .checked_mul(smem_stride)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .unwrap_or(0);
 
         // If using shared memory, clamp block_x so that dynamic shared memory fits per block.
         // If query fails, fall back to ~48KB (typical default without opt-in).
@@ -302,13 +435,15 @@ impl CudaFvgTs {
                 .unwrap_or(48 * 1024);
 
             let max_threads_by_smem = if bytes_per_thread > 0 {
-                (avail_dyn / bytes_per_thread) as u32
-            } else { block_x };
+                (avail_dyn as usize / bytes_per_thread) as u32
+            } else {
+                block_x
+            };
 
             if max_threads_by_smem >= 32 {
                 block_x = block_x.min(max_threads_by_smem);
                 use_shmem_rings = 1;
-                dynamic_smem_bytes = bytes_per_thread * (block_x as usize);
+                dynamic_smem_bytes = bytes_per_thread.saturating_mul(block_x as usize);
                 let _ = func.set_cache_config(CacheConfig::PreferShared);
             } else {
                 let _ = func.set_cache_config(CacheConfig::PreferL1);
@@ -318,13 +453,15 @@ impl CudaFvgTs {
         }
 
         // Final launch shape
-        let grid_x = (((nrows as u32) + block_x - 1) / block_x).max(1);
+        let grid_x = ((nrows as u32) + block_x - 1) / block_x;
+        let grid_x = grid_x.max(1);
+        self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
+
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut p_hi = d_high.as_device_ptr().as_raw();
-            let mut p_lo = d_low.as_device_ptr().as_raw();
             let mut p_lo = d_low.as_device_ptr().as_raw();
             let mut p_cl = d_close.as_device_ptr().as_raw();
             let mut len_i = len as i32;
@@ -334,13 +471,14 @@ impl CudaFvgTs {
             let mut n_i = nrows as i32;
             let mut p_u = d_upper.as_device_ptr().as_raw();
             let mut p_l = d_lower.as_device_ptr().as_raw();
-            let mut n_i = nrows as i32;
-            let mut p_u = d_upper.as_device_ptr().as_raw();
-            let mut p_l = d_lower.as_device_ptr().as_raw();
             let mut p_ut = d_upper_ts.as_device_ptr().as_raw();
             let mut p_lt = d_lower_ts.as_device_ptr().as_raw();
             let mut use_shmem_i = use_shmem_rings as i32;
-            let mut smem_stride_i = if use_shmem_rings != 0 { smem_stride as i32 } else { 0i32 };
+            let mut smem_stride_i = if use_shmem_rings != 0 {
+                smem_stride as i32
+            } else {
+                0i32
+            };
             let args: &mut [*mut c_void] = &mut [
                 &mut p_hi as *mut _ as *mut c_void,
                 &mut p_lo as *mut _ as *mut c_void,
@@ -352,24 +490,15 @@ impl CudaFvgTs {
                 &mut n_i as *mut _ as *mut c_void,
                 &mut p_u as *mut _ as *mut c_void,
                 &mut p_l as *mut _ as *mut c_void,
-                &mut n_i as *mut _ as *mut c_void,
-                &mut p_u as *mut _ as *mut c_void,
-                &mut p_l as *mut _ as *mut c_void,
                 &mut p_ut as *mut _ as *mut c_void,
                 &mut p_lt as *mut _ as *mut c_void,
                 &mut use_shmem_i as *mut _ as *mut c_void,
                 &mut smem_stride_i as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&func, grid, block, dynamic_smem_bytes as u32, args)
-                .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
+                .launch(&func, grid, block, dynamic_smem_bytes as u32, args)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(CudaFvgTsBatch {
             upper: DeviceArrayF32 {
@@ -382,8 +511,16 @@ impl CudaFvgTs {
                 rows: nrows,
                 cols: len,
             },
-            upper_ts: DeviceArrayF32 { buf: d_upper_ts, rows: nrows, cols: len },
-            lower_ts: DeviceArrayF32 { buf: d_lower_ts, rows: nrows, cols: len },
+            upper_ts: DeviceArrayF32 {
+                buf: d_upper_ts,
+                rows: nrows,
+                cols: len,
+            },
+            lower_ts: DeviceArrayF32 {
+                buf: d_lower_ts,
+                rows: nrows,
+                cols: len,
+            },
             combos,
         })
     }
@@ -408,9 +545,12 @@ impl CudaFvgTs {
         if cols == 0 || rows == 0 {
             return Err(CudaFvgTsError::InvalidInput("cols/rows must be > 0".into()));
         }
+        let n = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("cols*rows overflow".into()))?;
         if high_tm.len() != low_tm.len()
             || high_tm.len() != close_tm.len()
-            || high_tm.len() != cols * rows
+            || high_tm.len() != n
         {
             return Err(CudaFvgTsError::InvalidInput(
                 "time-major arrays must match cols*rows".into(),
@@ -430,27 +570,55 @@ impl CudaFvgTs {
         }
         let rst = if params.reset_on_cross.unwrap_or(false) { 1i32 } else { 0i32 };
 
-        let d_hi =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let d_lo =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let d_cl =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let mut d_u: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let mut d_l: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let mut d_ut: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let mut d_lt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
+        let prices_bytes = n
+            .checked_mul(3)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("price bytes overflow".into()))?;
+        let out_bytes = n
+            .checked_mul(4)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("total bytes overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaFvgTsError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaFvgTsError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
+        }
 
-        let mut func = self.module.get_function("fvg_trailing_stop_many_series_one_param_f32")
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
+        let d_hi = DeviceBuffer::from_slice(high_tm)?;
+        let d_lo = DeviceBuffer::from_slice(low_tm)?;
+        let d_cl = DeviceBuffer::from_slice(close_tm)?;
+        let mut d_u: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
+        let mut d_l: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
+        let mut d_ut: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
+        let mut d_lt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
+
+        let mut func = self
+            .module
+            .get_function("fvg_trailing_stop_many_series_one_param_f32")
+            .map_err(|_| CudaFvgTsError::MissingKernelSymbol {
+                name: "fvg_trailing_stop_many_series_one_param_f32",
+            })?;
         // Prefer L1 on this path (per-thread local histories)
         let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::OneD{block_x} => block_x, _ => 128 };
-        let grid_x = (((cols as u32) + block_x - 1) / block_x).max(1);
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            _ => 128,
+        };
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let grid_x = grid_x.max(1);
+        self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -481,35 +649,15 @@ impl CudaFvgTs {
                 &mut p_ut as *mut _ as *mut c_void,
                 &mut p_lt as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok((
-            DeviceArrayF32 {
-                buf: d_u,
-                rows,
-                cols,
-            },
-            DeviceArrayF32 {
-                buf: d_l,
-                rows,
-                cols,
-            },
-            DeviceArrayF32 {
-                buf: d_ut,
-                rows,
-                cols,
-            },
-            DeviceArrayF32 {
-                buf: d_lt,
-                rows,
-                cols,
-            },
+            DeviceArrayF32 { buf: d_u, rows, cols },
+            DeviceArrayF32 { buf: d_l, rows, cols },
+            DeviceArrayF32 { buf: d_ut, rows, cols },
+            DeviceArrayF32 { buf: d_lt, rows, cols },
         ))
     }
 }

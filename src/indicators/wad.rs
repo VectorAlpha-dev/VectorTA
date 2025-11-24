@@ -13,14 +13,16 @@
 //! ## Returns
 //! - **values**: Cumulative WAD values as `Vec<f64>` (length matches input)
 //!
-//! ## Developer Notes
+//! ## Developer Notes / Decision Log
 //! - SIMD status: AVX2/AVX512 variants are implemented as unrolled, pointer-based kernels.
 //!   WAD is inherently loop-carried (depends on previous close and cumulative sum),
 //!   so SIMD here focuses on reducing branch mispredictions and improving ILP via unrolling
 //!   and FMA-friendly expressions rather than true wide data-parallelism.
 //! - Scalar path remains the reference; it is safe and branchless to minimize mispredictions.
-//! - Decision: streaming update uses a branchless, FMA‑friendly kernel (cold start only) matching scalar semantics.
-//! - Streaming update: O(1) with minimal state.
+//! - CUDA status: single-series and many-series FP32 kernels are provided; wrappers return VRAM
+//!   handles that integrate with Python via CAI v3 and DLPack v1.x, with work synchronized
+//!   before the handle is exposed.
+//! - Streaming update: O(1) with minimal state; matches scalar batch semantics.
 //! - Memory: Uses the crate’s zero-copy/uninitialized helpers where applicable.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -143,12 +145,22 @@ impl WadBuilder {
 
 #[derive(Debug, Error)]
 pub enum WadError {
-    #[error("wad: Empty data provided.")]
-    EmptyData,
+    #[error("wad: Input data slice is empty.")]
+    EmptyInputData,
     #[error("wad: All values are NaN.")]
     AllValuesNaN,
-    #[error("wad: Invalid batch kernel.")]
-    InvalidKernel,
+    #[error("wad: Invalid period: period = {period}, data length = {data_len}.")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("wad: Not enough valid data: needed = {needed}, valid = {valid}.")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("wad: Output length mismatch: expected = {expected}, got = {got}.")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("wad: Invalid range: start={start}, end={end}, step={step}.")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("wad: Invalid kernel for batch: {0:?}.")]
+    InvalidKernelForBatch(Kernel),
+    #[error("wad: Invalid input: {msg}.")]
+    InvalidInput { msg: String },
 }
 
 #[inline]
@@ -166,11 +178,11 @@ pub fn wad_with_kernel(input: &WadInput, kernel: Kernel) -> Result<WadOutput, Wa
         WadData::Slices { high, low, close } => (*high, *low, *close),
     };
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(WadError::EmptyData);
+        return Err(WadError::EmptyInputData);
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        return Err(WadError::EmptyData);
+        return Err(WadError::OutputLengthMismatch { expected: len, got: low.len().max(close.len()) });
     }
     if high.iter().all(|x| x.is_nan())
         || low.iter().all(|x| x.is_nan())
@@ -726,7 +738,7 @@ pub fn wad_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(WadError::InvalidKernel),
+        other => return Err(WadError::InvalidKernelForBatch(other)),
     };
     wad_batch_par_slice(high, low, close, kernel)
 }
@@ -783,11 +795,11 @@ fn wad_batch_inner(
     _parallel: bool,
 ) -> Result<WadBatchOutput, WadError> {
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(WadError::EmptyData);
+        return Err(WadError::EmptyInputData);
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        return Err(WadError::EmptyData);
+        return Err(WadError::OutputLengthMismatch { expected: len, got: low.len().max(close.len()) });
     }
     if high.iter().all(|x| x.is_nan())
         || low.iter().all(|x| x.is_nan())
@@ -833,11 +845,11 @@ fn wad_batch_inner_into(
     out: &mut [f64],
 ) -> Result<(), WadError> {
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(WadError::EmptyData);
+        return Err(WadError::EmptyInputData);
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        return Err(WadError::EmptyData);
+        return Err(WadError::OutputLengthMismatch { expected: len, got: low.len().max(close.len()) });
     }
     if high.iter().all(|x| x.is_nan())
         || low.iter().all(|x| x.is_nan())
@@ -846,7 +858,7 @@ fn wad_batch_inner_into(
         return Err(WadError::AllValuesNaN);
     }
     if out.len() != len {
-        return Err(WadError::EmptyData); // length guard
+        return Err(WadError::OutputLengthMismatch { expected: len, got: out.len() });
     }
 
     let actual = match kern {
@@ -1457,11 +1469,11 @@ fn wad_prepare<'a>(
     };
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(WadError::EmptyData);
+        return Err(WadError::EmptyInputData);
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        return Err(WadError::EmptyData);
+        return Err(WadError::OutputLengthMismatch { expected: len, got: low.len().max(close.len()) });
     }
     if high.iter().all(|x| x.is_nan())
         || low.iter().all(|x| x.is_nan())
@@ -1483,7 +1495,7 @@ pub fn wad_into_slice(dst: &mut [f64], input: &WadInput, kern: Kernel) -> Result
     let (high, low, close, len, chosen) = wad_prepare(input, kern)?;
 
     if dst.len() != len {
-        return Err(WadError::EmptyData);
+        return Err(WadError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
     unsafe {
@@ -1654,7 +1666,11 @@ pub fn wad_batch_py<'py>(
     let cols = high_slice.len();
     let rows = 1usize;
 
-    let out_arr = unsafe { numpy::PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("wad_batch: size overflow in rows*cols"))?;
+
+    let out_arr = unsafe { numpy::PyArray1::<f64>::new(py, [total], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;

@@ -18,7 +18,7 @@
 //! - Batch: Reuses MA per (period, ma_type) across rows to avoid redundant computation; results identical to single-series path.
 //! - Memory: Uses zero-copy helpers; batch initializes warmup prefixes per-row.
 //!
-//! Decision: SIMD disabled by default for OTT; streaming kernel is scalar O(1) and validated against batch tests.
+//! Decision log: SIMD disabled by default for OTT; CUDA wrapper present with typed errors and VRAM checks; Python interop uses CUDA Array Interface v3 + DLPack v1.x; streaming kernel is scalar O(1) and validated against batch tests.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -277,25 +277,25 @@ impl OttBuilder {
 pub enum OttError {
     #[error("ott: Input data slice is empty.")]
     EmptyInputData,
-
     #[error("ott: All values are NaN.")]
     AllValuesNaN,
-
     #[error("ott: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-
     #[error("ott: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-
     #[error("ott: Invalid percent: {percent}")]
     InvalidPercent { percent: f64 },
-
     #[error("ott: Invalid moving average type: {ma_type}")]
     InvalidMaType { ma_type: String },
-
     #[error("ott: Moving average calculation failed: {reason}")]
     MaCalculationFailed { reason: String },
-
+    #[error("ott: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("ott: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("ott: Invalid kernel for batch operation. Expected batch kernel, got: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    // Back-compat only; prefer InvalidKernelForBatch going forward.
     #[error("ott: Invalid kernel for batch operation")]
     InvalidBatchKernel,
 }
@@ -363,9 +363,9 @@ pub fn ott_into_slice(dst: &mut [f64], input: &OttInput, kern: Kernel) -> Result
     let (data, period, percent, ma_type, first, chosen) = ott_prepare(input, kern)?;
 
     if dst.len() != data.len() {
-        return Err(OttError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(OttError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -1487,31 +1487,90 @@ impl OttBatchBuilder {
 }
 
 #[inline(always)]
-fn expand_grid_ott(r: &OttBatchRange) -> Vec<OttParams> {
-    fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
-        if st == 0 || s == e {
-            return vec![s];
+fn expand_grid_ott(r: &OttBatchRange) -> Result<Vec<OttParams>, OttError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, OttError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
         }
-        (s..=e).step_by(st).collect()
-    }
-    fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
-        if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
-            return vec![s];
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
         }
         let mut v = Vec::new();
-        let mut x = s;
-        while x <= e + 1e-12 {
-            v.push(x);
-            x += st;
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
         }
-        v
+        if v.is_empty() {
+            return Err(OttError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let percents = axis_f64(r.percent);
-    let mut out = Vec::with_capacity(periods.len() * percents.len() * r.ma_types.len());
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, OttError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(OttError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
+        let mut x = start;
+        let st = step.abs();
+        while x + 1e-12 >= end {
+            v.push(x);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(OttError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
+    }
+
+    let periods = axis_usize(r.period)?;
+    let percents = axis_f64(r.percent)?;
+    let types = if r.ma_types.is_empty() {
+        vec!["VAR".to_string()]
+    } else {
+        r.ma_types.clone()
+    };
+    let cap = periods
+        .len()
+        .checked_mul(percents.len())
+        .and_then(|x| x.checked_mul(types.len()))
+        .ok_or_else(|| OttError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &pct in &percents {
-            for mt in &r.ma_types {
+            for mt in &types {
                 out.push(OttParams {
                     period: Some(p),
                     percent: Some(pct),
@@ -1520,7 +1579,14 @@ fn expand_grid_ott(r: &OttBatchRange) -> Vec<OttParams> {
             }
         }
     }
-    out
+    if out.is_empty() {
+        return Err(OttError::InvalidRange {
+            start: r.period.0.to_string(),
+            end: r.period.1.to_string(),
+            step: r.period.2.to_string(),
+        });
+    }
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1531,13 +1597,7 @@ fn ott_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<OttParams>, OttError> {
-    let combos = expand_grid_ott(sweep);
-    if combos.is_empty() {
-        return Err(OttError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_ott(sweep)?;
 
     let cols = data.len();
     if cols == 0 {
@@ -1665,13 +1725,18 @@ fn ott_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<OttBatchOutput, OttError> {
-    let combos = expand_grid_ott(sweep);
+    let combos = expand_grid_ott(sweep)?;
     let cols = data.len();
     if cols == 0 {
         return Err(OttError::EmptyInputData);
     }
 
     let rows = combos.len();
+    rows.checked_mul(cols).ok_or_else(|| OttError::InvalidRange {
+        start: sweep.period.0.to_string(),
+        end: sweep.period.1.to_string(),
+        step: sweep.period.2.to_string(),
+    })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     // zero-copy view as &mut [f64]
@@ -1706,7 +1771,7 @@ pub fn ott_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(OttError::InvalidBatchKernel),
+        _ => return Err(OttError::InvalidKernelForBatch(k)),
     };
     // run parallel like ALMA
     ott_batch_par_slice(data, sweep, kernel)
@@ -1787,12 +1852,17 @@ pub fn ott_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     // Precompute combos to size the NumPy buffer
-    let combos = expand_grid_ott(&sweep);
+    let combos =
+        expand_grid_ott(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
+
     // Allocate NumPy buffer and compute directly into it
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
@@ -2120,7 +2190,8 @@ pub fn ott_batch_into(
         percent: (q_start, q_end, q_step),
         ma_types: types,
     };
-    let combos = expand_grid_ott(&sweep);
+    let combos = expand_grid_ott(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     if combos.is_empty() {
         return Err(JsValue::from_str("no parameter combinations"));
     }
@@ -2130,7 +2201,11 @@ pub fn ott_batch_into(
         let rows = combos.len();
         let cols = len;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows * cols overflow"))?;
+
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         // batch → per-row kernel (mirrors ALMA)
         let row_kern = match detect_best_batch_kernel() {

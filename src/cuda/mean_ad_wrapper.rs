@@ -16,31 +16,33 @@ use crate::indicators::mean_ad::{MeanAdBatchRange, MeanAdParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu_sys; // raw driver API interop
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CudaMeanAdError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
     NotImplemented,
 }
-
-impl fmt::Display for CudaMeanAdError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaMeanAdError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaMeanAdError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-            CudaMeanAdError::NotImplemented => write!(f, "CUDA MeanAd not implemented"),
-        }
-    }
-}
-impl std::error::Error for CudaMeanAdError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -70,7 +72,8 @@ impl Default for CudaMeanAdPolicy {
 pub struct CudaMeanAd {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaMeanAdPolicy,
     sm_count: i32,           // cached SMs on device
     max_smem_per_block: i32, // cached per-block dynamic shared memory limit (bytes)
@@ -78,20 +81,15 @@ pub struct CudaMeanAd {
 
 impl CudaMeanAd {
     pub fn new(device_id: usize) -> Result<Self, CudaMeanAdError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         // Cache device attributes we use for launch sizing
         let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+            .get_attribute(DeviceAttribute::MultiprocessorCount)?;
         let max_smem_per_block = device
-            .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+            .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mean_ad_kernel.ptx"));
         // Highest JIT opt level
@@ -101,14 +99,13 @@ impl CudaMeanAd {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaMeanAdPolicy::default(),
             sm_count,
             max_smem_per_block,
@@ -117,6 +114,83 @@ impl CudaMeanAd {
 
     pub fn set_policy(&mut self, policy: CudaMeanAdPolicy) { self.policy = policy; }
     pub fn policy(&self) -> &CudaMeanAdPolicy { &self.policy }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaMeanAdError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaMeanAdError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaMeanAdError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaMeanAdError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
+    }
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -129,33 +203,62 @@ impl CudaMeanAd {
             .iter()
             .position(|x| !x.is_nan())
             .ok_or_else(|| CudaMeanAdError::InvalidInput("all values are NaN".into()))?;
-        // Local expansion: (start, end, step) -> [start..=end step-by-step]; if step==0 or start==end => [start]
+
+        // Local expansion mirroring CPU batch grid rules:
+        // (start, end, step) with step==0 or start==end => static; support reversed bounds.
         let combos: Vec<MeanAdParams> = {
-            let (s, e, st) = sweep.period;
-            if st == 0 || s == e {
-                vec![MeanAdParams { period: Some(s) }]
-            } else {
+            let (start, end, step) = sweep.period;
+            if step == 0 || start == end {
+                vec![MeanAdParams { period: Some(start) }]
+            } else if start < end {
+                let st = step.max(1);
                 let mut v = Vec::new();
-                let mut p = s;
-                while p <= e {
+                let mut p = start;
+                loop {
+                    if p > end {
+                        break;
+                    }
                     v.push(MeanAdParams { period: Some(p) });
-                    p += st;
+                    let next = match p.checked_add(st) {
+                        Some(n) => n,
+                        None => break,
+                    };
+                    if next == p {
+                        break;
+                    }
+                    p = next;
+                }
+                if v.is_empty() {
+                    return Err(CudaMeanAdError::InvalidInput(
+                        "invalid period range (empty expansion)".into(),
+                    ));
+                }
+                v
+            } else {
+                // reversed bounds
+                let st = step.max(1);
+                let mut v = Vec::new();
+                let mut x = start as isize;
+                let end_i = end as isize;
+                let st_i = st as isize;
+                while x >= end_i {
+                    v.push(MeanAdParams { period: Some(x as usize) });
+                    x -= st_i;
+                }
+                if v.is_empty() {
+                    return Err(CudaMeanAdError::InvalidInput(
+                        "invalid period range (empty expansion)".into(),
+                    ));
                 }
                 v
             }
         };
-        if combos.is_empty() {
-            return Err(CudaMeanAdError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
-        if combos.is_empty() {
-            return Err(CudaMeanAdError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+
         let len = data_f32.len();
         let mut max_period = 0usize;
+        let valid = len
+            .checked_sub(first_valid)
+            .ok_or_else(|| CudaMeanAdError::InvalidInput("first_valid out of range".into()))?;
         for prm in &combos {
             let p = prm.period.unwrap_or(0);
             if p == 0 {
@@ -166,18 +269,7 @@ impl CudaMeanAd {
                     "period exceeds data length".into(),
                 ));
             }
-            if p == 0 {
-                return Err(CudaMeanAdError::InvalidInput("period must be > 0".into()));
-            }
-            if p > len {
-                return Err(CudaMeanAdError::InvalidInput(
-                    "period exceeds data length".into(),
-                ));
-            }
-            if len - first_valid < p {
-                return Err(CudaMeanAdError::InvalidInput(
-                    "not enough valid data for period".into(),
-                ));
+            if valid < p {
                 return Err(CudaMeanAdError::InvalidInput(
                     "not enough valid data for period".into(),
                 ));
@@ -206,19 +298,16 @@ impl CudaMeanAd {
         let warms_bytes = n_combos
             .checked_mul(std::mem::size_of::<i32>())
             .ok_or_else(|| CudaMeanAdError::InvalidInput("size overflow".into()))?;
-        let out_bytes = n_combos
+        let total_elems = n_combos
             .checked_mul(series_len)
-            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaMeanAdError::InvalidInput("size overflow".into()))?;
-        if let Ok((free, _)) = mem_get_info() {
-            let required = prices_bytes + periods_bytes + warms_bytes + out_bytes;
-            let headroom = 64usize * 1024 * 1024;
-            if required.saturating_add(headroom) > free {
-                return Err(CudaMeanAdError::InvalidInput(
-                    "insufficient free VRAM".into(),
-                ));
-            }
-        }
+        let out_bytes = total_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMeanAdError::InvalidInput("size overflow".into()))?;
+
+        let required = prices_bytes + periods_bytes + warms_bytes + out_bytes;
+        let headroom = 64usize * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
 
         let mut periods_i32 = Vec::with_capacity(n_combos);
         let mut warms_i32 = Vec::with_capacity(n_combos);
@@ -229,20 +318,18 @@ impl CudaMeanAd {
             warms_i32.push(warm as i32);
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
-        let d_warms = DeviceBuffer::from_slice(&warms_i32)
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+        let d_warms = DeviceBuffer::from_slice(&warms_i32)?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
         let mut func = self
             .module
             .get_function("mean_ad_batch_f32")
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMeanAdError::MissingKernelSymbol {
+                name: "mean_ad_batch_f32",
+            })?;
 
         // --- Launch policy for warp-per-combo kernel ---
         // Start with a warp-aligned block size; default 128 if not specified.
@@ -269,6 +356,7 @@ impl CudaMeanAd {
         let grid_x = base_blocks.max(min_busy).max(1);
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
 
         // Best-effort: request larger dynamic SMEM when supported (no-op if unsupported)
         unsafe {
@@ -299,13 +387,10 @@ impl CudaMeanAd {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&mut func, grid, block, shared_bytes, &mut args)
-                .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+                .launch(&mut func, grid, block, shared_bytes, &mut args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -322,7 +407,10 @@ impl CudaMeanAd {
         if cols == 0 || rows == 0 {
             return Err(CudaMeanAdError::InvalidInput("empty grid".into()));
         }
-        if data_tm_f32.len() != cols * rows {
+        let expected_len = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMeanAdError::InvalidInput("size overflow".into()))?;
+        if data_tm_f32.len() != expected_len {
             return Err(CudaMeanAdError::InvalidInput("data length mismatch".into()));
         }
         let period = params.period.unwrap_or(5);
@@ -347,17 +435,6 @@ impl CudaMeanAd {
             }
             firsts[s] = f;
         }
-        for s in 0..cols {
-            let mut f = -1;
-            for t in 0..rows {
-                let v = data_tm_f32[t * cols + s];
-                if !v.is_nan() {
-                    f = t as i32;
-                    break;
-                }
-            }
-            firsts[s] = f;
-        }
         Ok((firsts, period))
     }
 
@@ -369,6 +446,9 @@ impl CudaMeanAd {
         params: &MeanAdParams,
     ) -> Result<DeviceArrayF32, CudaMeanAdError> {
         let (firsts, period) = Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
+        let total_elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMeanAdError::InvalidInput("size overflow".into()))?;
 
         // Heuristic for dynamic shared memory: ring per thread => period * block_x * 4 bytes
         let max_shmem: usize = 48 * 1024; // conservative default
@@ -391,18 +471,30 @@ impl CudaMeanAd {
         } else {
             0
         };
+        self.validate_launch(grid_x, 1, 1, block_x as u32, 1, 1)?;
 
-        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
-        let d_firsts =
-            DeviceBuffer::from_slice(&firsts).map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+        // VRAM estimate: prices + firsts + out
+        let prices_bytes = total_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMeanAdError::InvalidInput("size overflow".into()))?;
+        let firsts_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaMeanAdError::InvalidInput("size overflow".into()))?;
+        let out_bytes = prices_bytes;
+        let required = prices_bytes + firsts_bytes + out_bytes;
+        let headroom = 64usize * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
+
+        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_firsts = DeviceBuffer::from_slice(&firsts)?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
         let mut func = self
             .module
             .get_function("mean_ad_many_series_one_param_f32")
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMeanAdError::MissingKernelSymbol {
+                name: "mean_ad_many_series_one_param_f32",
+            })?;
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -420,13 +512,10 @@ impl CudaMeanAd {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&mut func, grid, block, shared_bytes, &mut args)
-                .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+                .launch(&mut func, grid, block, shared_bytes, &mut args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMeanAdError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
             rows,

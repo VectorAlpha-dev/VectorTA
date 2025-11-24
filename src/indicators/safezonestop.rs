@@ -17,6 +17,9 @@
 //! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (delegate to scalar).
 //!   Decision: DM smoothing is a scalar recurrence and the rolling extremum is branchy;
 //!   no consistent wins observed across CPUs, so runtime selection short-circuits to scalar.
+//! - **CUDA Status**: CUDA batch and many-series kernels are enabled with typed errors, VRAM checks,
+//!   and zero-copy Python interop via CUDA Array Interface v3 + DLPack v1.x; producing streams
+//!   synchronize before returning device buffers.
 //! - **Streaming Performance**: O(1) streaming via a fixed-size ring buffer + FMA for the
 //!   Wilder recurrence and candidate formation. Replaces VecDeque to avoid allocator churn
 //!   and matches scalar warmup/emission semantics exactly.
@@ -234,16 +237,24 @@ impl SafeZoneStopBuilder {
 
 #[derive(Debug, Error)]
 pub enum SafeZoneStopError {
+    #[error("safezonestop: Input data slice is empty.")]
+    EmptyInputData,
     #[error("safezonestop: All values are NaN.")]
     AllValuesNaN,
     #[error("safezonestop: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("safezonestop: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("safezonestop: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
     #[error("safezonestop: Mismatched lengths")]
     MismatchedLengths,
     #[error("safezonestop: Invalid direction. Must be 'long' or 'short'.")]
     InvalidDirection,
+    #[error("safezonestop: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
+    #[error("safezonestop: Invalid kernel type for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -276,6 +287,10 @@ pub fn safezonestop_with_kernel(
     let mult = input.get_mult();
     let max_lookback = input.get_max_lookback();
     let len = high.len();
+
+    if len == 0 {
+        return Err(SafeZoneStopError::EmptyInputData);
+    }
 
     if period == 0 || period > len {
         return Err(SafeZoneStopError::InvalidPeriod {
@@ -371,7 +386,10 @@ pub fn safezonestop_into_slice(
         return Err(SafeZoneStopError::MismatchedLengths);
     }
     if dst.len() != len {
-        return Err(SafeZoneStopError::MismatchedLengths);
+        return Err(SafeZoneStopError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
 
     let period = input.get_period();
@@ -449,11 +467,20 @@ pub fn safezonestop_into(
         SafeZoneStopData::Slices { high, low, direction } => (*high, *low, *direction),
     };
 
-    if high.len() != low.len() || out.len() != high.len() {
+    if high.len() != low.len() {
         return Err(SafeZoneStopError::MismatchedLengths);
     }
-
     let len = high.len();
+    if len == 0 {
+        return Err(SafeZoneStopError::EmptyInputData);
+    }
+    if out.len() != len {
+        return Err(SafeZoneStopError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
+    }
+
     let period = input.get_period();
     let max_lookback = input.get_max_lookback();
     if period == 0 || period > len {
@@ -1124,12 +1151,7 @@ pub fn safezonestop_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(SafeZoneStopError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(SafeZoneStopError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1164,29 +1186,84 @@ impl SafeZoneStopBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &SafeZoneStopBatchRange) -> Vec<SafeZoneStopParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &SafeZoneStopBatchRange) -> Result<Vec<SafeZoneStopParams>, SafeZoneStopError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, SafeZoneStopError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut vals = Vec::new();
+        if start < end {
+            let mut x = start;
+            while x <= end {
+                vals.push(x);
+                x = x
+                    .checked_add(step)
+                    .ok_or(SafeZoneStopError::InvalidRange {
+                        start: start as f64,
+                        end: end as f64,
+                        step: step as f64,
+                    })?;
+            }
+        } else {
+            let mut x = start;
+            while x >= end {
+                vals.push(x);
+                if x == end {
+                    break;
+                }
+                x = x
+                    .checked_sub(step)
+                    .ok_or(SafeZoneStopError::InvalidRange {
+                        start: start as f64,
+                        end: end as f64,
+                        step: step as f64,
+                    })?;
+            }
+        }
+        if vals.is_empty() {
+            return Err(SafeZoneStopError::InvalidRange {
+                start: start as f64,
+                end: end as f64,
+                step: step as f64,
+            });
+        }
+        Ok(vals)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, SafeZoneStopError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if step > 0.0 {
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += step;
+            }
+        } else {
+            while x >= end - 1e-12 {
+                v.push(x);
+                x += step;
+            }
         }
-        v
+        if v.is_empty() {
+            return Err(SafeZoneStopError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let mults = axis_f64(r.mult);
-    let lookbacks = axis_usize(r.max_lookback);
-    let mut out = Vec::with_capacity(periods.len() * mults.len() * lookbacks.len());
+    let periods = axis_usize(r.period)?;
+    let mults = axis_f64(r.mult)?;
+    let lookbacks = axis_usize(r.max_lookback)?;
+    let cap = periods
+        .len()
+        .checked_mul(mults.len())
+        .and_then(|v| v.checked_mul(lookbacks.len()))
+        .ok_or(SafeZoneStopError::InvalidRange {
+            start: r.period.0 as f64,
+            end: r.period.1 as f64,
+            step: r.period.2 as f64,
+        })?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &m in &mults {
             for &l in &lookbacks {
@@ -1198,7 +1275,7 @@ fn expand_grid(r: &SafeZoneStopBatchRange) -> Vec<SafeZoneStopParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1232,17 +1309,14 @@ fn safezonestop_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<SafeZoneStopBatchOutput, SafeZoneStopError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(SafeZoneStopError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     if high.len() != low.len() {
         return Err(SafeZoneStopError::MismatchedLengths);
     }
     let len = high.len();
+    if len == 0 {
+        return Err(SafeZoneStopError::EmptyInputData);
+    }
     let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
     let max_need = combos
         .iter()
@@ -1375,17 +1449,14 @@ pub fn safezonestop_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<SafeZoneStopParams>, SafeZoneStopError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(SafeZoneStopError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     if high.len() != low.len() {
         return Err(SafeZoneStopError::MismatchedLengths);
     }
     let len = high.len();
+    if len == 0 {
+        return Err(SafeZoneStopError::EmptyInputData);
+    }
     let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
     let max_need = combos
         .iter()
@@ -1400,6 +1471,19 @@ pub fn safezonestop_batch_inner_into(
     }
     let rows = combos.len();
     let cols = len;
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(SafeZoneStopError::InvalidRange {
+            start: sweep.period.0 as f64,
+            end: sweep.period.1 as f64,
+            step: sweep.period.2 as f64,
+        })?;
+    if out.len() != expected {
+        return Err(SafeZoneStopError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Precompute dm_raw once per direction
     let dir_long = direction
@@ -1899,8 +1983,12 @@ pub fn safezonestop_batch_into(
             max_lookback: (max_lookback_start, max_lookback_end, max_lookback_step),
         };
 
-        let combos = expand_grid(&sweep);
-        let total_size = combos.len() * len;
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let total_size = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("safezonestop_batch_into: rows * cols overflow"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
         // FIX: choose batch kernel, then map to row kernel
@@ -2842,11 +2930,24 @@ pub fn safezonestop_batch_py<'py>(
         max_lookback: max_lookback_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| {
+            PyValueError::new_err(
+                SafeZoneStopError::InvalidRange {
+                    start: period_range.0 as f64,
+                    end: period_range.1 as f64,
+                    step: period_range.2 as f64,
+                }
+                .to_string(),
+            )
+        })?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;

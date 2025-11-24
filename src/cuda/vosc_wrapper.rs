@@ -14,7 +14,6 @@
 
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::vosc::{VoscBatchRange, VoscParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -25,7 +24,8 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
 // Host mirror for CUDA float2 (8-byte aligned). Used for DS-packed prefixes.
 #[repr(C, align(8))]
@@ -48,20 +48,44 @@ fn pack_f64_to_float2_host(src: &[f64]) -> Vec<Float2> {
     dst
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaVoscError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf}, current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaVoscError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaVoscError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaVoscError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
+
+/// VRAM-backed array handle returned by the VOSC CUDA wrapper.
+pub struct DeviceArrayF32 {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
+}
+impl DeviceArrayF32 {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.rows.saturating_mul(self.cols)
     }
 }
-impl std::error::Error for CudaVoscError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -101,7 +125,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaVosc {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaVoscPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -112,10 +136,9 @@ pub struct CudaVosc {
 
 impl CudaVosc {
     pub fn new(device_id: usize) -> Result<Self, CudaVoscError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vosc_kernel.ptx"));
         let jit_opts = &[
@@ -124,16 +147,14 @@ impl CudaVosc {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaVoscPolicy::default(),
             last_batch: None,
@@ -147,10 +168,10 @@ impl CudaVosc {
     pub fn policy(&self) -> &CudaVoscPolicy { &self.policy }
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
     pub fn synchronize(&self) -> Result<(), CudaVoscError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVoscError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
 
     #[inline]
@@ -161,18 +182,73 @@ impl CudaVosc {
         }
     }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Ok((free, _total)) = mem_get_info() {
-            required_bytes.saturating_add(headroom) <= free
-        } else { true }
+    fn will_fit(required_bytes: usize, headroom: usize) -> Result<(), CudaVoscError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        match mem_get_info() {
+            Ok((free, _total)) => {
+                if required_bytes.saturating_add(headroom) <= free {
+                    Ok(())
+                } else {
+                    Err(CudaVoscError::OutOfMemory {
+                        required: required_bytes,
+                        free,
+                        headroom,
+                    })
+                }
+            }
+            Err(e) => Err(CudaVoscError::Cuda(e)),
+        }
+    }
+
+    #[inline]
+    fn checked_add(a: usize, b: usize) -> Result<usize, CudaVoscError> {
+        a.checked_add(b)
+            .ok_or_else(|| CudaVoscError::InvalidInput("size overflow".into()))
+    }
+
+    #[inline]
+    fn checked_mul(a: usize, b: usize) -> Result<usize, CudaVoscError> {
+        a.checked_mul(b)
+            .ok_or_else(|| CudaVoscError::InvalidInput("size overflow".into()))
     }
 
     // --------------- Batch (one-series × many-params) ---------------
     fn expand_combos(range: &VoscBatchRange) -> Vec<VoscParams> {
         fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-            if step == 0 || start == end { return vec![start]; }
-            (start..=end).step_by(step).collect()
+            if step == 0 || start == end {
+                return vec![start];
+            }
+            let mut out = Vec::new();
+            if start <= end {
+                let mut v = start;
+                while v <= end {
+                    out.push(v);
+                    match v.checked_add(step) {
+                        Some(next) if next > v => v = next,
+                        _ => break,
+                    }
+                }
+            } else {
+                let mut v = start;
+                loop {
+                    out.push(v);
+                    if v <= end {
+                        break;
+                    }
+                    match v.checked_sub(step) {
+                        Some(next) if next < v => {
+                            v = next;
+                            if v < end {
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            out
         }
         let shorts = axis_usize(range.short_period);
         let longs = axis_usize(range.long_period);
@@ -253,14 +329,12 @@ impl CudaVosc {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         };
-        let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
-            BatchKernelPolicy::Plain { block_x } => block_x.max(64),
-        };
         let func = self
             .module
             .get_function("vosc_batch_prefix_f32_ds")
-            .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVoscError::MissingKernelSymbol {
+                name: "vosc_batch_prefix_f32_ds",
+            })?;
         unsafe {
             (*(self as *const _ as *mut CudaVosc)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -279,7 +353,7 @@ impl CudaVosc {
             }
         }
 
-        let grid_x = ((len as u32) + block_x - 1) / block_x;
+        let grid_x = ((len as u32).saturating_add(block_x - 1)) / block_x;
         const MAX_GRID_Y: usize = 65_535;
         let block: BlockSize = (block_x, 1, 1).into();
         let mut start = 0usize;
@@ -290,31 +364,33 @@ impl CudaVosc {
                 let mut p_ptr = d_prefix.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
+                let offset_i_bytes =
+                    match Self::checked_mul(start, std::mem::size_of::<i32>()) {
+                        Ok(v) => v as u64,
+                        Err(e) => return Err(e),
+                    };
                 let mut s_ptr = d_short
                     .as_device_ptr()
                     .as_raw()
-                    .wrapping_add((start * std::mem::size_of::<i32>()) as u64);
+                    .wrapping_add(offset_i_bytes);
                 let mut l_ptr = d_long
                     .as_device_ptr()
                     .as_raw()
-                    .wrapping_add((start * std::mem::size_of::<i32>()) as u64);
-                let mut s_ptr = d_short
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((start * std::mem::size_of::<i32>()) as u64);
-                let mut l_ptr = d_long
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((start * std::mem::size_of::<i32>()) as u64);
+                    .wrapping_add(offset_i_bytes);
                 let mut n_i = chunk as i32;
+                let offset_elems = match Self::checked_mul(start, len) {
+                    Ok(v) => v,
+                    Err(e) => return Err(e),
+                };
+                let offset_f_bytes =
+                    match Self::checked_mul(offset_elems, std::mem::size_of::<f32>()) {
+                        Ok(v) => v as u64,
+                        Err(e) => return Err(e),
+                    };
                 let mut out_ptr = d_out
                     .as_device_ptr()
                     .as_raw()
-                    .wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
+                    .wrapping_add(offset_f_bytes);
                 let args: &mut [*mut c_void] = &mut [
                     &mut p_ptr as *mut _ as *mut c_void,
                     &mut len_i as *mut _ as *mut c_void,
@@ -326,7 +402,7 @@ impl CudaVosc {
                 ];
                 self.stream
                     .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+                    .map_err(CudaVoscError::Cuda)?;
             }
             start += chunk;
         }
@@ -352,28 +428,22 @@ impl CudaVosc {
             .collect();
 
         // VRAM estimate (+64MB headroom)
-        let bytes = (len + 1) * std::mem::size_of::<Float2>()
-            + (shorts.len() + longs.len()) * std::mem::size_of::<i32>()
-            + (n_combos * len) * std::mem::size_of::<f32>();
+        let prefix_bytes = Self::checked_mul(len + 1, std::mem::size_of::<Float2>())?;
+        let params_len = shorts.len().saturating_add(longs.len());
+        let params_bytes = Self::checked_mul(params_len, std::mem::size_of::<i32>())?;
+        let out_elems = Self::checked_mul(n_combos, len)?;
+        let out_bytes = Self::checked_mul(out_elems, std::mem::size_of::<f32>())?;
+        let tmp = Self::checked_add(prefix_bytes, params_bytes)?;
+        let bytes = Self::checked_add(tmp, out_bytes)?;
         let headroom = 64 * 1024 * 1024usize;
-        if !Self::will_fit(bytes, headroom) {
-            return Err(CudaVoscError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (bytes + headroom) as f64 / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(bytes, headroom)?;
 
         // Async copies for better overlap
-        let d_prefix = unsafe { DeviceBuffer::from_slice_async(&prefix_f2, &self.stream) }
-            .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
-        let d_short = unsafe { DeviceBuffer::from_slice_async(&shorts, &self.stream) }
-            .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
-        let d_long = unsafe { DeviceBuffer::from_slice_async(&longs, &self.stream) }
-            .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(n_combos * len, &self.stream)
-                .map_err(|e| CudaVoscError::Cuda(e.to_string()))?
-        };
+        let d_prefix = unsafe { DeviceBuffer::from_slice_async(&prefix_f2, &self.stream) }?;
+        let d_short = unsafe { DeviceBuffer::from_slice_async(&shorts, &self.stream) }?;
+        let d_long = unsafe { DeviceBuffer::from_slice_async(&longs, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
         self.launch_batch_kernel(
             &d_prefix,
@@ -384,15 +454,15 @@ impl CudaVosc {
             n_combos,
             &mut d_out,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
                 rows: n_combos,
                 cols: len,
+                ctx: self.context_arc(),
+                device_id: self.device_id,
             },
             combos,
         ))
@@ -406,7 +476,8 @@ impl CudaVosc {
         short: usize,
         long: usize,
     ) -> Result<(Vec<f64>, Vec<i32>), CudaVoscError> {
-        if data_tm_f32.len() != cols * rows {
+        let elems = Self::checked_mul(cols, rows)?;
+        if data_tm_f32.len() != elems {
             return Err(CudaVoscError::InvalidInput("shape mismatch".into()));
         }
         if short == 0 || long == 0 || short > long || long > rows {
@@ -440,7 +511,8 @@ impl CudaVosc {
                 ));
             }
         }
-        let mut prefix_tm = vec![0.0f64; (rows + 1) * cols];
+        let prefix_len = Self::checked_mul(rows + 1, cols)?;
+        let mut prefix_tm = vec![0.0f64; prefix_len];
         for s in 0..cols {
             let stride = cols;
             let mut acc = 0.0f64;
@@ -462,7 +534,8 @@ impl CudaVosc {
         short: usize,
         long: usize,
     ) -> Result<(Vec<Float2>, Vec<i32>), CudaVoscError> {
-        if data_tm_f32.len() != cols * rows {
+        let elems = Self::checked_mul(cols, rows)?;
+        if data_tm_f32.len() != elems {
             return Err(CudaVoscError::InvalidInput("shape mismatch".into()));
         }
         if short == 0 || long == 0 || short > long || long > rows {
@@ -486,7 +559,8 @@ impl CudaVosc {
                 ));
             }
         }
-        let mut prefix_tm = vec![Float2 { x: 0.0, y: 0.0 }; (rows + 1) * cols];
+        let prefix_len = Self::checked_mul(rows + 1, cols)?;
+        let mut prefix_tm = vec![Float2 { x: 0.0, y: 0.0 }; prefix_len];
         for s in 0..cols {
             let stride = cols;
             let mut acc = 0.0f64;
@@ -518,14 +592,12 @@ impl CudaVosc {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
         };
-        let block_x: u32 = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 256,
-            ManySeriesKernelPolicy::OneD { block_x } => block_x,
-        };
         let func = self
             .module
             .get_function("vosc_many_series_one_param_f32")
-            .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVoscError::MissingKernelSymbol {
+                name: "vosc_many_series_one_param_f32",
+            })?;
 
         unsafe {
             (*(self as *const _ as *mut CudaVosc)).last_many =
@@ -574,7 +646,7 @@ impl CudaVosc {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+                .map_err(CudaVoscError::Cuda)?;
         }
         Ok(())
     }
@@ -588,7 +660,7 @@ impl CudaVosc {
         short: usize,
         long: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
-    ) -> Result<(), CudaVoscError> {
+        ) -> Result<(), CudaVoscError> {
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
@@ -596,7 +668,9 @@ impl CudaVosc {
         let func = self
             .module
             .get_function("vosc_many_series_one_param_f32_ds_tm_coalesced")
-            .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVoscError::MissingKernelSymbol {
+                name: "vosc_many_series_one_param_f32_ds_tm_coalesced",
+            })?;
 
         unsafe {
             (*(self as *const _ as *mut CudaVosc)).last_many =
@@ -642,7 +716,7 @@ impl CudaVosc {
                 ];
                 self.stream
                     .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+                    .map_err(CudaVoscError::Cuda)?;
             }
             row_base += chunk_y;
         }
@@ -662,24 +736,28 @@ impl CudaVosc {
         // Heuristic: prefer f64 original kernel for small/medium shapes; DS/coalesced for huge
         let use_ds = rows >= 131_072 || cols >= 1024;
 
+        let elems = Self::checked_mul(rows, cols)?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
-                .map_err(|e| CudaVoscError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(elems, &self.stream)?
         };
 
         if use_ds {
             let (prefix_tm, first_valids) =
                 Self::prepare_many_series_inputs(data_tm_f32, cols, rows, short, long)?;
-            let bytes = (rows + 1) * cols * std::mem::size_of::<Float2>()
-                + cols * std::mem::size_of::<i32>()
-                + rows * cols * std::mem::size_of::<f32>();
-            if !Self::will_fit(bytes, 64 * 1024 * 1024) {
-                return Err(CudaVoscError::InvalidInput("insufficient VRAM".into()));
-            }
-            let d_prefix_tm = unsafe { DeviceBuffer::from_slice_async(&prefix_tm, &self.stream) }
-                .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
-            let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-                .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+            let prefix_bytes =
+                Self::checked_mul(rows + 1, cols)?
+                    .checked_mul(std::mem::size_of::<Float2>())
+                    .ok_or_else(|| CudaVoscError::InvalidInput("size overflow".into()))?;
+            let fv_bytes =
+                Self::checked_mul(cols, std::mem::size_of::<i32>())?;
+            let out_bytes =
+                Self::checked_mul(elems, std::mem::size_of::<f32>())?;
+            let tmp = Self::checked_add(prefix_bytes, fv_bytes)?;
+            let bytes = Self::checked_add(tmp, out_bytes)?;
+            Self::will_fit(bytes, 64 * 1024 * 1024)?;
+            let d_prefix_tm = unsafe { DeviceBuffer::from_slice_async(&prefix_tm, &self.stream) }?;
+            let d_first =
+                unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
             self.launch_many_series_kernel_ds(
                 &d_prefix_tm,
                 &d_first,
@@ -698,7 +776,7 @@ impl CudaVosc {
                 short_period: Some(short),
                 long_period: Some(long),
             };
-            let mut host_out = vec![0f32; rows * cols];
+            let mut host_out = vec![0f32; elems];
             for s in 0..cols {
                 let mut series = vec![f64::NAN; rows];
                 for t in 0..rows {
@@ -715,18 +793,17 @@ impl CudaVosc {
                 }
             }
             // Zero-copy allocation on device; then async copy host results into it
-            d_out_tm = unsafe { DeviceBuffer::uninitialized_async(rows * cols, &self.stream) }
-                .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
-            unsafe { d_out_tm.async_copy_from(host_out.as_slice(), &self.stream) }
-                .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+            d_out_tm =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+            unsafe { d_out_tm.async_copy_from(host_out.as_slice(), &self.stream) }?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVoscError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
             rows,
             cols,
+            ctx: self.context_arc(),
+            device_id: self.device_id,
         })
     }
 }

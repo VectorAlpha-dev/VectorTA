@@ -1089,7 +1089,9 @@ use crate::indicators::rocp::{rocp_cuda_batch_dev_py, rocp_cuda_many_series_one_
 #[cfg(feature = "python")]
 use crate::indicators::rocr::{rocr_batch_py, rocr_py, RocrStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::rocr::{rocr_cuda_batch_dev_py, rocr_cuda_many_series_one_param_dev_py};
+use crate::indicators::rocr::{
+    rocr_cuda_batch_dev_py, rocr_cuda_many_series_one_param_dev_py, RocrDeviceArrayF32Py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::rsi::{rsi_batch_py, rsi_py, RsiStreamPy};
 #[cfg(feature = "python")]
@@ -1303,6 +1305,14 @@ pub fn tsf_cuda_many_series_one_param_dev_py_bindings(
     let flat_in = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("tsf_cuda_many_series_one_param_dev: rows*cols overflow"))?;
+    if flat_in.len() != expected {
+        return Err(PyValueError::new_err(
+            "tsf_cuda_many_series_one_param_dev: time-major input length mismatch",
+        ));
+    }
     let params = TsfParams {
         period: Some(period),
     };
@@ -1574,6 +1584,7 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BollingerBandsStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
+        use crate::indicators::bollinger_bands::BollingerDeviceArrayF32Py;
         m.add_function(wrap_pyfunction!(
             crate::indicators::bollinger_bands::bollinger_bands_cuda_batch_dev_py,
             m
@@ -1582,6 +1593,7 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
             crate::indicators::bollinger_bands::bollinger_bands_cuda_many_series_one_param_dev_py,
             m
         )?)?;
+        m.add_class::<BollingerDeviceArrayF32Py>()?;
     }
 
     // Register CWMA functions with their user-facing names
@@ -3428,6 +3440,7 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         m.add_function(wrap_pyfunction!(rocr_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(rocr_cuda_many_series_one_param_dev_py, m)?)?;
+        m.add_class::<RocrDeviceArrayF32Py>()?;
     }
 
     // Register SAR functions with their user-facing names

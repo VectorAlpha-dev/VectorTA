@@ -11,6 +11,8 @@
 //! - **`Ok(AsoOutput)`** on success, containing bulls and bears Vec<f64> of length matching the input.
 //! - **`Err(AsoError)`** otherwise.
 //!
+//! Decision log: SIMD stubs delegate to scalar; CUDA wrappers and Python interop enabled with CAI v3 + DLPack; scalar path is the reference and matches tests.
+//!
 //! ## Developer Notes
 //! - SIMD: Implemented as stubs that delegate to scalar; disabled by default due to
 //!   control-flow/deque costs. Scalar is the reference path and matches tests.
@@ -992,7 +994,11 @@ fn expand_grid_aso(r: &AsoBatchRange) -> Result<Vec<AsoParams>, AsoError> {
 
     let ps = axis_usize(r.period)?;
     let ms = axis_usize(r.mode)?;
-    let mut out = Vec::with_capacity(ps.len().saturating_mul(ms.len()));
+    let total = ps
+        .len()
+        .checked_mul(ms.len())
+        .ok_or(AsoError::InvalidRange { start: ps.len(), end: ms.len(), step: 0 })?;
+    let mut out = Vec::with_capacity(total);
     for &p in &ps {
         for &m in &ms {
             out.push(AsoParams { period: Some(p), mode: Some(m) });
@@ -1263,11 +1269,7 @@ fn aso_batch_inner_into(
         let e = core::slice::from_raw_parts_mut(er.as_mut_ptr() as *mut f64, er.len());
 
         match actual {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                aso_scalar(open, high, low, close, p, m, first, b, e)
-            }
-            // Accept non-batch variants by delegating to scalar to preserve semantics
-            Kernel::Avx2 | Kernel::Avx512 => {
+            Kernel::ScalarBatch => {
                 aso_scalar(open, high, low, close, p, m, first, b, e)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1280,7 +1282,7 @@ fn aso_batch_inner_into(
             Kernel::Avx2Batch | Kernel::Avx512Batch => {
                 aso_scalar(open, high, low, close, p, m, first, b, e)
             }
-            Kernel::Auto => unreachable!(),
+            Kernel::Auto | Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => unreachable!(),
         }
     };
 
@@ -1715,12 +1717,15 @@ impl AsoDeviceArrayF32Py {
                 std::mem::size_of::<f32>(),
             ),
         )?;
-        let ptr = self
-            .buf
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
-            .as_device_ptr()
-            .as_raw() as usize;
+        let ptr = if self.rows == 0 || self.cols == 0 {
+            0usize
+        } else {
+            self.buf
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+                .as_device_ptr()
+                .as_raw() as usize
+        };
         d.set_item("data", (ptr, false))?;
         // Stream omitted: producing stream is synchronized before return
         d.set_item("version", 3)?;
@@ -1729,8 +1734,17 @@ impl AsoDeviceArrayF32Py {
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
-    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
-        // Take ownership of the device buffer for transfer to consumer
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<PyObject>,
+        max_version: Option<PyObject>,
+        dl_device: Option<PyObject>,
+        copy: Option<PyObject>,
+    ) -> PyResult<PyObject> {
+        let _ = stream;
+
         let buf = self
             .buf
             .take()
@@ -1768,16 +1782,53 @@ impl AsoDeviceArrayF32Py {
             if p.is_null() { return; }
             let mt: Box<DLManagedTensor> = Box::from_raw(p);
             let mgr_ptr = mt.manager_ctx as *mut Manager;
-            if !mgr_ptr.is_null() { let _mgr: Box<Manager> = Box::from_raw(mgr_ptr); drop(_mgr); }
+            if !mgr_ptr.is_null() {
+                let _mgr: Box<Manager> = Box::from_raw(mgr_ptr);
+                drop(_mgr);
+            }
             drop(mt);
         }
 
         unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
-            if !ptr.is_null() {
-                let mt = ptr as *mut DLManagedTensor;
-                if let Some(del) = (*mt).deleter { del(mt) }
+            use pyo3::ffi::{PyCapsule_GetName, PyCapsule_GetPointer};
+            if capsule.is_null() { return; }
+            let cname = PyCapsule_GetName(capsule);
+            if cname.is_null() { return; }
+            let n = std::ffi::CStr::from_ptr(cname);
+            let name_str = n.to_string_lossy();
+            if name_str == "dltensor" || name_str == "dltensor_versioned" {
+                let want = std::ffi::CString::new(name_str.as_ref()).unwrap();
+                let ptr = PyCapsule_GetPointer(capsule, want.as_ptr());
+                if !ptr.is_null() {
+                    let mt = ptr as *mut DLManagedTensor;
+                    if let Some(del) = (*mt).deleter { del(mt) }
+                }
+            }
+        }
+
+        if let Some(dev_obj) = dl_device {
+            let ty_id: (i32, i32) = dev_obj.extract(py).unwrap_or((2, self.device_id as i32));
+            if ty_id.0 != 2 || ty_id.1 != self.device_id as i32 {
+                let do_copy = copy
+                    .as_ref()
+                    .and_then(|c| c.extract::<bool>(py).ok())
+                    .unwrap_or(false);
+                if do_copy {
+                    return Err(PyValueError::new_err(
+                        "__dlpack__(copy=True) not implemented for ASO device handle",
+                    ));
+                } else {
+                    return Err(PyValueError::new_err("dl_device mismatch for ASO tensor"));
+                }
+            }
+        }
+
+        let mut capsule_name = "dltensor";
+        if let Some(ver_obj) = max_version {
+            if let Ok((maj, _min)) = ver_obj.extract::<(i32, i32)>(py) {
+                if maj >= 1 {
+                    capsule_name = "dltensor_versioned";
+                }
             }
         }
 
@@ -1785,27 +1836,46 @@ impl AsoDeviceArrayF32Py {
         let cols = self.cols as i64;
         let shape = Box::new([rows, cols]);
         let strides = Box::new([cols, 1]);
-        let data_ptr = buf.as_device_ptr().as_raw() as *mut std::ffi::c_void;
-        let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
+        let data_ptr = if rows == 0 || cols == 0 {
+            core::ptr::null_mut()
+        } else {
+            buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+        };
+        let mgr = Box::new(Manager {
+            _ctx: self._ctx.clone(),
+            _buf: buf,
+            _shape: shape,
+            _strides: strides,
+        });
         let mgr_ptr = Box::into_raw(mgr);
         let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
         let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
 
-        let mt = Box::new(DLManagedTensor { dl_tensor: DLTensor {
-            data: data_ptr,
-            device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
-            ndim: 2,
-            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-            shape: shape_ptr,
-            strides: strides_ptr,
-            byte_offset: 0,
-        }, manager_ctx: mgr_ptr as *mut std::ffi::c_void, deleter: Some(dlpack_deleter) });
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr,
+                strides: strides_ptr,
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr as *mut std::ffi::c_void,
+            deleter: Some(dlpack_deleter),
+        });
 
         let raw_capsule = unsafe {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut std::ffi::c_void, name.as_ptr(), Some(capsule_destructor))
+            let name = std::ffi::CString::new(capsule_name).unwrap();
+            pyo3::ffi::PyCapsule_New(
+                Box::into_raw(mt) as *mut std::ffi::c_void,
+                name.as_ptr(),
+                Some(capsule_destructor),
+            )
         };
-        if raw_capsule.is_null() { return Err(PyValueError::new_err("failed to create DLPack capsule")); }
+        if raw_capsule.is_null() {
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
         Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
     }
 }
@@ -2076,11 +2146,14 @@ pub fn aso_batch_into(
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("size overflow"))?;
 
-        let b = std::slice::from_raw_parts_mut(bulls_out, rows * cols);
-        let e = std::slice::from_raw_parts_mut(bears_out, rows * cols);
+        let b = std::slice::from_raw_parts_mut(bulls_out, total);
+        let e = std::slice::from_raw_parts_mut(bears_out, total);
 
-        aso_batch_inner_into(o, h, l, c, &sweep, detect_best_kernel(), false, b, e)
+        aso_batch_inner_into(o, h, l, c, &sweep, detect_best_batch_kernel(), false, b, e)
             .map_err(|er| JsValue::from_str(&er.to_string()))?;
         Ok(rows)
     }
@@ -2148,7 +2221,10 @@ pub fn aso_batch_unified_js(
     let mut guard = core::mem::ManuallyDrop::new(mu);
     let dst: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
-    let (bulls_dst, bears_dst) = dst.split_at_mut(rows * cols);
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("size overflow"))?;
+    let (bulls_dst, bears_dst) = dst.split_at_mut(total);
 
     // compute in-place
     let kern = detect_best_batch_kernel();

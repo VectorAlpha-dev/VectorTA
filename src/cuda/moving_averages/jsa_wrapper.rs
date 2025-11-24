@@ -849,12 +849,7 @@ impl CudaJsa {
             return Err(CudaJsaError::InvalidInput("input data is empty".into()));
         }
 
-        let combos = expand_periods(sweep);
-        if combos.is_empty() {
-            return Err(CudaJsaError::InvalidInput(
-                "no period combinations provided".into(),
-            ));
-        }
+        let combos = expand_periods(sweep)?;
 
         let series_len = data_f32.len();
         let first_valid = data_f32
@@ -879,7 +874,9 @@ impl CudaJsa {
             }
             let period_i32 = i32::try_from(period)
                 .map_err(|_| CudaJsaError::InvalidInput("period exceeds i32".into()))?;
-            let warm = first_valid + period;
+            let warm = first_valid
+                .checked_add(period)
+                .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
             periods_i32.push(period_i32);
             warm_indices.push(warm as i32);
         }
@@ -947,7 +944,10 @@ impl CudaJsa {
                 )));
             }
             first_valids.push(fv as i32);
-            warm_indices.push((fv + period) as i32);
+            let warm = (fv as usize)
+                .checked_add(period as usize)
+                .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
+            warm_indices.push(warm as i32);
         }
 
         Ok(PreparedJsaManySeries {
@@ -981,10 +981,10 @@ pub mod benches {
     pub use jsa_benches::bench_profiles;
 }
 
-fn expand_periods(range: &JsaBatchRange) -> Vec<JsaParams> {
+fn expand_periods(range: &JsaBatchRange) -> Result<Vec<JsaParams>, CudaJsaError> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {
-        return vec![JsaParams { period: Some(start) }];
+        return Ok(vec![JsaParams { period: Some(start) }]);
     }
     let mut out = Vec::new();
     if start < end {
@@ -1002,5 +1002,12 @@ fn expand_periods(range: &JsaBatchRange) -> Vec<JsaParams> {
             if v == usize::MAX { break; }
         }
     }
-    if out.is_empty() { vec![JsaParams { period: Some(start) }] } else { out }
+    if out.is_empty() {
+        Err(CudaJsaError::InvalidInput(format!(
+            "invalid range expansion: start={}, end={}, step={}",
+            start, end, step
+        )))
+    } else {
+        Ok(out)
+    }
 }

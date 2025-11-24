@@ -42,8 +42,6 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaUma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
@@ -783,7 +781,10 @@ fn uma_core_into(
     };
 
     // Warmup (prefix already NaN-initialized by caller)
-    let warmup_end = first + max_length - 1;
+    let warmup_end = first
+        .checked_add(max_length)
+        .and_then(|x| x.checked_sub(1))
+        .ok_or(UmaError::ArithmeticOverflow { context: "first + max_length - 1 (warmup_end)" })?;
     if warmup_end >= len {
         return Ok(()); // nothing to do; prefix already set by alloc_with_nan_prefix/uma_into_slice
     }
@@ -1110,6 +1111,37 @@ unsafe fn uma_weighted_accumulate_avx2(
     (xws, wsum)
 }
 
+// When AVX512F is not enabled for the target, provide a scalar fallback so that
+// nightly-avx builds still type-check on non-AVX512 CPUs. The optimized AVX512
+// kernel below is compiled only when `target_feature = "avx512f"` is present.
+#[cfg(all(
+    feature = "nightly-avx",
+    target_arch = "x86_64",
+    not(target_feature = "avx512f")
+))]
+#[inline(always)]
+unsafe fn uma_weighted_accumulate_avx512(
+    data: *const f64,
+    ln_lut: *const f64,
+    len_r: usize,
+    p: f64,
+) -> (f64, f64) {
+    let mut xws = 0.0f64;
+    let mut wsum = 0.0f64;
+    let mut j = 0usize;
+    while j < len_r {
+        let k = len_r - j;
+        let w = exp_kernel(p * *ln_lut.add(k));
+        let x = *data.add(j);
+        if !x.is_nan() {
+            xws = x.mul_add(w, xws);
+            wsum += w;
+        }
+        j += 1;
+    }
+    (xws, wsum)
+}
+
 #[cfg(all(
     feature = "nightly-avx",
     target_arch = "x86_64",
@@ -1187,7 +1219,10 @@ pub fn uma(input: &UmaInput) -> Result<UmaOutput, UmaError> {
 
 pub fn uma_with_kernel(input: &UmaInput, kernel: Kernel) -> Result<UmaOutput, UmaError> {
     let (data, first, min_len, max_len, accel) = uma_prepare(input)?;
-    let warm = first + max_len - 1;
+    let warm = first
+        .checked_add(max_len)
+        .and_then(|x| x.checked_sub(1))
+        .ok_or(UmaError::ArithmeticOverflow { context: "first + max_len - 1 (warm)" })?;
 
     // Primary buffer: NaN prefix allocated once.
     let mut out = alloc_with_nan_prefix(data.len(), warm);
@@ -1227,7 +1262,10 @@ pub fn uma_into_slice(dst: &mut [f64], input: &UmaInput, kern: Kernel) -> Result
     }
 
     // Ensure warmup NaNs even if later smoothing overwrites.
-    let warm = first + max_len - 1;
+    let warm = first
+        .checked_add(max_len)
+        .and_then(|x| x.checked_sub(1))
+        .ok_or(UmaError::ArithmeticOverflow { context: "first + max_len - 1 (warm)" })?;
     let warm_end = warm.min(dst.len());
     for v in &mut dst[..warm_end] {
         *v = f64::NAN;
@@ -1593,6 +1631,13 @@ fn uma_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<UmaParams>, UmaError> {
+    // Disallow explicitly non-batch kernels on batch APIs
+    match kern {
+        Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => {
+            return Err(UmaError::InvalidKernelForBatch(kern));
+        }
+        _ => {}
+    }
     let combos = expand_grid_uma(sweep);
     let combos = combos;
     if combos.is_empty() {
@@ -1617,8 +1662,17 @@ fn uma_batch_inner_into(
     let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.max_length.unwrap_or(50) - 1 + c.smooth_length.unwrap_or(4) - 1)
-        .collect();
+        .map(|c| {
+            let a = first
+                .checked_add(c.max_length.unwrap_or(50))
+                .and_then(|x| x.checked_sub(1))
+                .ok_or(UmaError::ArithmeticOverflow { context: "first + max_length - 1 (batch warm)" })?;
+            a
+                .checked_add(c.smooth_length.unwrap_or(4))
+                .and_then(|x| x.checked_sub(1))
+                .ok_or(UmaError::ArithmeticOverflow { context: "+ smooth_length - 1 (batch warm)" })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Initialize NaN prefixes on an uninitialized view to avoid extra writes.
     let out_mu = unsafe {
@@ -1661,6 +1715,13 @@ fn uma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<UmaBatchOutput, UmaError> {
+    // Disallow explicitly non-batch kernels on batch APIs
+    match kern {
+        Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => {
+            return Err(UmaError::InvalidKernelForBatch(kern));
+        }
+        _ => {}
+    }
     let combos = expand_grid_uma(sweep);
     let cols = data.len();
     let rows = combos.len();
@@ -1685,9 +1746,16 @@ fn uma_batch_inner(
         .iter()
         .map(|c| {
             let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-            first + c.max_length.unwrap_or(50) - 1 + c.smooth_length.unwrap_or(4) - 1
+            let a = first
+                .checked_add(c.max_length.unwrap_or(50))
+                .and_then(|x| x.checked_sub(1))
+                .ok_or(UmaError::ArithmeticOverflow { context: "first + max_length - 1 (batch warm alloc)" })?;
+            a
+                .checked_add(c.smooth_length.unwrap_or(4))
+                .and_then(|x| x.checked_sub(1))
+                .ok_or(UmaError::ArithmeticOverflow { context: "+ smooth_length - 1 (batch warm alloc)" })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
@@ -1920,7 +1988,15 @@ impl UmaDeviceArrayF32Py {
         (2, self.device_id as i32) // 2 == kDLCUDA
     }
 
-    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<PyObject>,
+        max_version: Option<PyObject>,
+        dl_device: Option<PyObject>,
+        copy: Option<PyObject>,
+    ) -> PyResult<PyObject> {
         // Move DeviceBuffer into DLManagedTensor so consumer owns it
         let buf = self
             .buf
@@ -1965,11 +2041,49 @@ impl UmaDeviceArrayF32Py {
         }
 
         unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
-            if !ptr.is_null() {
-                let mt = ptr as *mut DLManagedTensor;
-                if let Some(del) = (*mt).deleter { del(mt) }
+            use pyo3::ffi::{PyCapsule_GetName, PyCapsule_GetPointer};
+            if capsule.is_null() { return; }
+            let cname = PyCapsule_GetName(capsule);
+            if cname.is_null() { return; }
+            let n = std::ffi::CStr::from_ptr(cname);
+            let name_str = n.to_string_lossy();
+            // Only call deleter if capsule still named one of the producer names
+            if name_str == "dltensor" || name_str == "dltensor_versioned" {
+                let want = std::ffi::CString::new(name_str.as_ref()).unwrap();
+                let ptr = PyCapsule_GetPointer(capsule, want.as_ptr());
+                if !ptr.is_null() {
+                    let mt = ptr as *mut DLManagedTensor;
+                    if let Some(del) = (*mt).deleter { del(mt) }
+                }
+            }
+        }
+
+        // If consumer specifies a device, ensure it matches our allocation device
+        if let Some(dev_obj) = dl_device {
+            // Expect tuple (device_type, device_id)
+            let ty_id: (i32, i32) = dev_obj.extract(py).unwrap_or((2, self.device_id as i32));
+            if ty_id.0 != 2 || ty_id.1 != self.device_id as i32 {
+                // Optional: support copy parameter – currently not implemented
+                let do_copy = copy
+                    .as_ref()
+                    .and_then(|c| c.extract::<bool>(py).ok())
+                    .unwrap_or(false);
+                if do_copy {
+                    return Err(PyValueError::new_err(
+                        "__dlpack__(copy=True) not implemented for UMA device handle",
+                    ));
+                } else {
+                    return Err(PyValueError::new_err("dl_device mismatch for UMA tensor"));
+                }
+            }
+        }
+
+        // Determine capsule name by version negotiation
+        let mut capsule_name = "dltensor";
+        if let Some(ver_obj) = max_version {
+            // Accept (major, minor) – treat >= (1, 0) as versioned
+            if let Ok((maj, _min)) = ver_obj.extract::<(i32, i32)>(py) {
+                if maj >= 1 { capsule_name = "dltensor_versioned"; }
             }
         }
 
@@ -1977,7 +2091,11 @@ impl UmaDeviceArrayF32Py {
         let cols = self.cols as i64;
         let shape = Box::new([rows, cols]);
         let strides = Box::new([cols, 1]); // element strides (row-major)
-        let data_ptr = buf.as_device_ptr().as_raw() as *mut c_void;
+        let data_ptr = if rows == 0 || cols == 0 {
+            core::ptr::null_mut()
+        } else {
+            buf.as_device_ptr().as_raw() as *mut c_void
+        };
         let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
         let mgr_ptr = Box::into_raw(mgr);
         let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
@@ -1997,9 +2115,9 @@ impl UmaDeviceArrayF32Py {
             deleter: Some(dlpack_deleter),
         });
 
-        // Wrap in PyCapsule named "dltensor"
+        // Wrap in PyCapsule (name depends on version negotiation)
         let raw_capsule = unsafe {
-            let name = std::ffi::CString::new("dltensor").unwrap();
+            let name = std::ffi::CString::new(capsule_name).unwrap();
             pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
         };
         if raw_capsule.is_null() {

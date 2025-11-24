@@ -610,12 +610,7 @@ impl CudaEma {
             return Err(CudaEmaError::InvalidInput("input data is empty".into()));
         }
 
-        let combos = expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaEmaError::InvalidInput(
-                "no parameter combinations provided".into(),
-            ));
-        }
+        let combos = expand_grid(sweep)?;
 
         let series_len = data_f32.len();
         let first_valid = data_f32
@@ -731,7 +726,7 @@ pub mod benches {
     pub use ema_benches::bench_profiles;
 }
 
-fn expand_grid(range: &EmaBatchRange) -> Vec<EmaParams> {
+fn expand_grid(range: &EmaBatchRange) -> Result<Vec<EmaParams>, CudaEmaError> {
     fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {
             return vec![start];
@@ -740,10 +735,14 @@ fn expand_grid(range: &EmaBatchRange) -> Vec<EmaParams> {
         (lo..=hi).step_by(step).collect()
     }
 
-    axis(range.period)
-        .into_iter()
-        .map(|p| EmaParams { period: Some(p) })
-        .collect()
+    let vals = axis(range.period);
+    if vals.is_empty() {
+        return Err(CudaEmaError::InvalidInput(format!(
+            "invalid range: start={} end={} step={}",
+            range.period.0, range.period.1, range.period.2
+        )));
+    }
+    Ok(vals.into_iter().map(|p| EmaParams { period: Some(p) }).collect())
 }
 
 // ---------- Utilities (VRAM + debug) ----------

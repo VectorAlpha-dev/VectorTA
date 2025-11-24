@@ -21,6 +21,7 @@
 //!   Matches scalar/AVX semantics; middle = fast MA; bands = slow MA ± dev·RMS.
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 //! - Note: Row-specific batch fast-path uses shared dev vector when only devup/devdn vary.
+//! - **Decision log**: SIMD enabled; CUDA wrapper uses typed errors + VRAM/overflow checks; Python CUDA handles expose CAI v3 and DLPack v1.x with unchanged numerical outputs.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -171,32 +172,48 @@ impl<'a> MabInput<'a> {
 
 #[derive(Error, Debug)]
 pub enum MabError {
+    #[error("mab: Input data slice is empty.")]
+    EmptyInputData,
     #[error("mab: All values are NaN.")]
     AllValuesNaN,
-    #[error("mab: Invalid period: fast={fast} slow={slow} len={len}")]
+    #[error("mab: Invalid period: fast={fast} slow={slow} len={data_len}")]
     InvalidPeriod {
         fast: usize,
         slow: usize,
-        len: usize,
+        data_len: usize,
     },
-    #[error("mab: Not enough valid data: need={need} valid={valid}")]
-    NotEnoughValidData { need: usize, valid: usize },
-    #[error("mab: Input data slice is empty.")]
-    EmptyData,
-    #[error("mab: Insufficient length: upper={upper_len} middle={middle_len} lower={lower_len} expected={expected}")]
-    InvalidLength {
+    #[error("mab: Not enough valid data: need={needed} valid={valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error(
+        "mab: Output length mismatch: expected={expected} upper={upper_len} middle={middle_len} lower={lower_len}"
+    )]
+    OutputLengthMismatch {
         upper_len: usize,
         middle_len: usize,
         lower_len: usize,
         expected: usize,
     },
+    #[error("mab: Invalid range (start={start}, end={end}, step={step})")]
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
+    #[error("mab: Invalid range (f64) (start={start}, end={end}, step={step})")]
+    InvalidRangeF64 {
+        start: f64,
+        end: f64,
+        step: f64,
+    },
+    #[error("mab: non-batch kernel passed to batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline(always)]
 fn mab_validate(input: &MabInput) -> Result<usize, MabError> {
     let data = input.as_ref();
     if data.is_empty() {
-        return Err(MabError::EmptyData);
+        return Err(MabError::EmptyInputData);
     }
     let fast = input.get_fast_period();
     let slow = input.get_slow_period();
@@ -204,7 +221,7 @@ fn mab_validate(input: &MabInput) -> Result<usize, MabError> {
         return Err(MabError::InvalidPeriod {
             fast,
             slow,
-            len: data.len(),
+            data_len: data.len(),
         });
     }
 
@@ -215,7 +232,7 @@ fn mab_validate(input: &MabInput) -> Result<usize, MabError> {
     let max_period = fast.max(slow);
     if data.len() - first_valid < max_period {
         return Err(MabError::NotEnoughValidData {
-            need: max_period,
+            needed: max_period,
             valid: data.len() - first_valid,
         });
     }
@@ -249,7 +266,7 @@ fn mab_prepare2<'a>(
     // Single pass validate + warmup
     let data = input.as_ref();
     if data.is_empty() {
-        return Err(MabError::EmptyData);
+        return Err(MabError::EmptyInputData);
     }
     let fast = input.get_fast_period();
     let slow = input.get_slow_period();
@@ -257,7 +274,7 @@ fn mab_prepare2<'a>(
         return Err(MabError::InvalidPeriod {
             fast,
             slow,
-            len: data.len(),
+            data_len: data.len(),
         });
     }
     let first = data
@@ -269,7 +286,7 @@ fn mab_prepare2<'a>(
     let need_total = need + fast - 1;
     if data.len() - first < need_total {
         return Err(MabError::NotEnoughValidData {
-            need: need_total,
+            needed: need_total,
             valid: data.len() - first,
         });
     }
@@ -306,7 +323,7 @@ pub fn mab_into_slice(
 
     let n = data.len();
     if upper_dst.len() != n || middle_dst.len() != n || lower_dst.len() != n {
-        return Err(MabError::InvalidLength {
+        return Err(MabError::OutputLengthMismatch {
             upper_len: upper_dst.len(),
             middle_len: middle_dst.len(),
             lower_len: lower_dst.len(),
@@ -328,7 +345,7 @@ pub fn mab_into_slice(
             };
             ema(&EmaInput::from_slice(data, params))
                 .map_err(|_| MabError::NotEnoughValidData {
-                    need: fast_period,
+                    needed: fast_period,
                     valid: n - first,
                 })?
                 .values
@@ -339,7 +356,7 @@ pub fn mab_into_slice(
             };
             sma(&SmaInput::from_slice(data, params))
                 .map_err(|_| MabError::NotEnoughValidData {
-                    need: fast_period,
+                    needed: fast_period,
                     valid: n - first,
                 })?
                 .values
@@ -354,7 +371,7 @@ pub fn mab_into_slice(
             };
             ema(&EmaInput::from_slice(data, params))
                 .map_err(|_| MabError::NotEnoughValidData {
-                    need: slow_period,
+                    needed: slow_period,
                     valid: n - first,
                 })?
                 .values
@@ -365,7 +382,7 @@ pub fn mab_into_slice(
             };
             sma(&SmaInput::from_slice(data, params))
                 .map_err(|_| MabError::NotEnoughValidData {
-                    need: slow_period,
+                    needed: slow_period,
                     valid: n - first,
                 })?
                 .values
@@ -1090,58 +1107,58 @@ impl MabBatchOutput {
     }
 }
 
-fn expand_grid(p: &MabBatchRange) -> Vec<MabParams> {
-    let mut combos = vec![];
-
-    // Generate all fast periods
-    let mut fast_periods = vec![];
-    if p.fast_period.2 == 0 {
-        fast_periods.push(p.fast_period.0);
-    } else {
-        let mut period = p.fast_period.0;
-        while period <= p.fast_period.1 {
-            fast_periods.push(period);
-            period += p.fast_period.2;
+pub(crate) fn expand_grid(p: &MabBatchRange) -> Result<Vec<MabParams>, MabError> {
+    fn axis_usize(axis: (usize, usize, usize)) -> Result<Vec<usize>, MabError> {
+        let (start, end, step) = axis;
+        if step == 0 || start == end {
+            return Ok(vec![start]);
         }
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let v: Vec<usize> = (lo..=hi).step_by(step).collect();
+        if v.is_empty() {
+            return Err(MabError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
 
-    // Generate all slow periods
-    let mut slow_periods = vec![];
-    if p.slow_period.2 == 0 {
-        slow_periods.push(p.slow_period.0);
-    } else {
-        let mut period = p.slow_period.0;
-        while period <= p.slow_period.1 {
-            slow_periods.push(period);
-            period += p.slow_period.2;
+    fn axis_f64(axis: (f64, f64, f64)) -> Result<Vec<f64>, MabError> {
+        let (start, end, step) = axis;
+        const EPS: f64 = 1e-12;
+        if step.abs() < EPS || (start - end).abs() < EPS {
+            return Ok(vec![start]);
         }
+        let step_eff = if start <= end { step.abs() } else { -step.abs() };
+        let mut v = Vec::new();
+        let mut x = start;
+        if step_eff > 0.0 {
+            while x <= end + EPS {
+                v.push(x);
+                x += step_eff;
+            }
+        } else {
+            while x >= end - EPS {
+                v.push(x);
+                x += step_eff;
+            }
+        }
+        if v.is_empty() {
+            return Err(MabError::InvalidRangeF64 { start, end, step });
+        }
+        Ok(v)
     }
 
-    // Generate all devup values
-    let mut devups = vec![];
-    if p.devup.2 == 0.0 {
-        devups.push(p.devup.0);
-    } else {
-        let mut dev = p.devup.0;
-        while dev <= p.devup.1 {
-            devups.push(dev);
-            dev += p.devup.2;
-        }
-    }
+    let fast_periods = axis_usize(p.fast_period)?;
+    let slow_periods = axis_usize(p.slow_period)?;
+    let devups = axis_f64(p.devup)?;
+    let devdns = axis_f64(p.devdn)?;
 
-    // Generate all devdn values
-    let mut devdns = vec![];
-    if p.devdn.2 == 0.0 {
-        devdns.push(p.devdn.0);
-    } else {
-        let mut dev = p.devdn.0;
-        while dev <= p.devdn.1 {
-            devdns.push(dev);
-            dev += p.devdn.2;
-        }
-    }
+    let mut combos = Vec::with_capacity(
+        fast_periods.len()
+            * slow_periods.len()
+            * devups.len()
+            * devdns.len(),
+    );
 
-    // Create all combinations
     for &fast in &fast_periods {
         for &slow in &slow_periods {
             for &devup in &devups {
@@ -1159,7 +1176,7 @@ fn expand_grid(p: &MabBatchRange) -> Vec<MabParams> {
         }
     }
 
-    combos
+    Ok(combos)
 }
 
 pub fn mab_batch(input: &[f64], sweep: &MabBatchRange) -> Result<MabBatchOutput, MabError> {
@@ -1180,12 +1197,21 @@ fn mab_batch_inner(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => unreachable!(),
+        other => {
+            return Err(MabError::InvalidKernelForBatch(other));
+        }
     };
 
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let rows = combos.len();
     let cols = input.len();
+    rows
+        .checked_mul(cols)
+        .ok_or(MabError::InvalidRange {
+            start: sweep.fast_period.0,
+            end: sweep.fast_period.1,
+            step: sweep.fast_period.2,
+        })?;
 
     // Calculate warmup periods for each combination
     let first = input.iter().position(|x| !x.is_nan()).unwrap_or(0);
@@ -1271,19 +1297,26 @@ fn mab_batch_inner_into(
     middle_out: &mut [f64],
     lower_out: &mut [f64],
 ) -> Result<Vec<MabParams>, MabError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let rows = combos.len();
     let cols = input.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(MabError::InvalidRange {
+            start: sweep.fast_period.0,
+            end: sweep.fast_period.1,
+            step: sweep.fast_period.2,
+        })?;
 
-    if upper_out.len() != rows * cols
-        || middle_out.len() != rows * cols
-        || lower_out.len() != rows * cols
+    if upper_out.len() != expected
+        || middle_out.len() != expected
+        || lower_out.len() != expected
     {
-        return Err(MabError::InvalidLength {
+        return Err(MabError::OutputLengthMismatch {
             upper_len: upper_out.len(),
             middle_len: middle_out.len(),
             lower_len: lower_out.len(),
-            expected: rows * cols,
+            expected,
         });
     }
 
@@ -1315,7 +1348,7 @@ fn mab_batch_inner_into(
                     let params = EmaParams { period: Some(fast) };
                     ema(&EmaInput::from_slice(input, params))
                         .map_err(|_| MabError::NotEnoughValidData {
-                            need: fast,
+                            needed: fast,
                             valid: n - first,
                         })?
                         .values
@@ -1324,7 +1357,7 @@ fn mab_batch_inner_into(
                     let params = SmaParams { period: Some(fast) };
                     sma(&SmaInput::from_slice(input, params))
                         .map_err(|_| MabError::NotEnoughValidData {
-                            need: fast,
+                            needed: fast,
                             valid: n - first,
                         })?
                         .values
@@ -1336,7 +1369,7 @@ fn mab_batch_inner_into(
                     let params = EmaParams { period: Some(slow) };
                     ema(&EmaInput::from_slice(input, params))
                         .map_err(|_| MabError::NotEnoughValidData {
-                            need: slow,
+                            needed: slow,
                             valid: n - first,
                         })?
                         .values
@@ -1345,7 +1378,7 @@ fn mab_batch_inner_into(
                     let params = SmaParams { period: Some(slow) };
                     sma(&SmaInput::from_slice(input, params))
                         .map_err(|_| MabError::NotEnoughValidData {
-                            need: slow,
+                            needed: slow,
                             valid: n - first,
                         })?
                         .values
@@ -1620,14 +1653,17 @@ pub fn mab_batch_py<'py>(
         ),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("mab_batch: rows*cols overflow"))?;
 
     // Pre-allocate output arrays for batch operations
-    let upper_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let middle_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let lower_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let upper_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let middle_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let lower_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
 
     let slice_upper = unsafe { upper_arr.as_slice_mut()? };
     let slice_middle = unsafe { middle_arr.as_slice_mut()? };
@@ -1650,15 +1686,15 @@ pub fn mab_batch_py<'py>(
     // Reinterpret NumPy buffers as MaybeUninit and set warm prefixes
     let mu_upper: &mut [MaybeUninit<f64>] = unsafe {
         let ptr = upper_arr.as_array_mut().as_mut_ptr();
-        std::slice::from_raw_parts_mut(ptr as *mut MaybeUninit<f64>, rows * cols)
+        std::slice::from_raw_parts_mut(ptr as *mut MaybeUninit<f64>, total)
     };
     let mu_middle: &mut [MaybeUninit<f64>] = unsafe {
         let ptr = middle_arr.as_array_mut().as_mut_ptr();
-        std::slice::from_raw_parts_mut(ptr as *mut MaybeUninit<f64>, rows * cols)
+        std::slice::from_raw_parts_mut(ptr as *mut MaybeUninit<f64>, total)
     };
     let mu_lower: &mut [MaybeUninit<f64>] = unsafe {
         let ptr = lower_arr.as_array_mut().as_mut_ptr();
-        std::slice::from_raw_parts_mut(ptr as *mut MaybeUninit<f64>, rows * cols)
+        std::slice::from_raw_parts_mut(ptr as *mut MaybeUninit<f64>, total)
     };
     init_matrix_prefixes(mu_upper, cols, &warmup_periods);
     init_matrix_prefixes(mu_middle, cols, &warmup_periods);
@@ -2029,13 +2065,16 @@ pub fn mab_batch_into(
             ),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("mab_batch_into: rows*cols overflow"))?;
 
-        let upper_out = std::slice::from_raw_parts_mut(upper_ptr, rows * cols);
-        let middle_out = std::slice::from_raw_parts_mut(middle_ptr, rows * cols);
-        let lower_out = std::slice::from_raw_parts_mut(lower_ptr, rows * cols);
+        let upper_out = std::slice::from_raw_parts_mut(upper_ptr, total);
+        let middle_out = std::slice::from_raw_parts_mut(middle_ptr, total);
+        let lower_out = std::slice::from_raw_parts_mut(lower_ptr, total);
 
         mab_batch_inner_into(
             data,

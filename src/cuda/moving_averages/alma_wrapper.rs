@@ -611,11 +611,24 @@ impl CudaAlma {
         let (combos, first_valid, series_len, max_period) =
             Self::prepare_batch_inputs(data_f32, sweep)?;
 
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAlmaError::InvalidInput("series_len bytes overflow".into()))?;
         // Upper bound for legacy path; on-device path avoids weight traffic
-        let weights_bytes = combos.len() * max_period * std::mem::size_of::<f32>();
-        let out_bytes = combos.len() * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + weights_bytes + out_bytes;
+        let weights_bytes = combos
+            .len()
+            .checked_mul(max_period)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaAlmaError::InvalidInput("weights bytes overflow".into()))?;
+        let out_bytes = combos
+            .len()
+            .checked_mul(series_len)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaAlmaError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(weights_bytes)
+            .and_then(|n| n.checked_add(out_bytes))
+            .ok_or_else(|| CudaAlmaError::InvalidInput("total bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // 64MB safety
         if !Self::will_fit(required, headroom) {
             if let Some((free, _total)) = Self::device_mem_info() {
@@ -660,13 +673,18 @@ impl CudaAlma {
         // Best-effort: keep the large, read-mostly prices region warm in L2 for this stream
         self.try_enable_persisting_l2(
             d_prices.as_device_ptr().as_raw(),
-            series_len * std::mem::size_of::<f32>(),
+            series_len
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| CudaAlmaError::InvalidInput("series_len bytes overflow".into()))?,
         );
 
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaAlmaError::InvalidInput("n_combos*series_len overflow".into()))?;
+
         // Output buffer
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)?
-        };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
 
         // Prefer precomputed host weights for large sweeps; allow opt-in to on-device
         // weights via env ALMA_BATCH_ONDEV=1.
@@ -689,7 +707,10 @@ impl CudaAlma {
             // Legacy: build CPU weights + inv_norms per-combo
             let mut periods_i32 = vec![0i32; n_combos];
             let mut inv_norms = vec![0f32; n_combos];
-            let mut weights_flat = vec![0f32; n_combos * max_period];
+            let weights_cap = n_combos
+                .checked_mul(max_period)
+                .ok_or_else(|| CudaAlmaError::InvalidInput("n_combos*max_period overflow".into()))?;
+            let mut weights_flat = vec![0f32; weights_cap];
 
             for (idx, prm) in combos.iter().enumerate() {
                 let period = prm.period.unwrap() as usize;
@@ -752,11 +773,15 @@ impl CudaAlma {
     ) -> Result<(usize, usize, Vec<AlmaParams>), CudaAlmaError> {
         let (combos, first_valid, series_len, max_period) =
             Self::prepare_batch_inputs(data_f32, sweep)?;
-        if out.len() != combos.len() * series_len {
+        let expected_len = combos
+            .len()
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaAlmaError::InvalidInput("combos*series_len overflow".into()))?;
+        if out.len() != expected_len {
             return Err(CudaAlmaError::InvalidInput(format!(
                 "out slice wrong length: got {}, expected {}",
                 out.len(),
-                combos.len() * series_len
+                expected_len
             )));
         }
         let arr = self.run_batch_with_prices_device(
@@ -793,10 +818,22 @@ impl CudaAlma {
         let (first_valids, period, offset, sigma) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        let prices_bytes = cols * rows * std::mem::size_of::<f32>();
-        let weights_bytes = period * std::mem::size_of::<f32>(); // legacy upper bound
-        let out_bytes = cols * rows * std::mem::size_of::<f32>();
-        let required = prices_bytes + weights_bytes + out_bytes;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAlmaError::InvalidInput("cols*rows overflow".into()))?;
+        let prices_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAlmaError::InvalidInput("prices bytes overflow".into()))?;
+        let weights_bytes = period
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAlmaError::InvalidInput("weights bytes overflow".into()))?; // legacy upper bound
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAlmaError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(weights_bytes)
+            .and_then(|n| n.checked_add(out_bytes))
+            .ok_or_else(|| CudaAlmaError::InvalidInput("total bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _total)) = Self::device_mem_info() {
@@ -810,12 +847,14 @@ impl CudaAlma {
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
 
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream)? };
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream)? };
 
         // Best-effort: persist the time-major price matrix in L2 for this stream
         self.try_enable_persisting_l2(
             d_prices.as_device_ptr().as_raw(),
-            cols * rows * std::mem::size_of::<f32>(),
+            elems
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| CudaAlmaError::InvalidInput("prices bytes overflow".into()))?,
         );
 
         // Prefer host-precomputed weights/normalization for accuracy.
@@ -853,11 +892,14 @@ impl CudaAlma {
         params: &AlmaParams,
         out_tm: &mut [f32],
     ) -> Result<(), CudaAlmaError> {
-        if out_tm.len() != cols * rows {
+        let expected_len = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAlmaError::InvalidInput("cols*rows overflow".into()))?;
+        if out_tm.len() != expected_len {
             return Err(CudaAlmaError::InvalidInput(format!(
                 "out slice wrong length: got {}, expected {}",
                 out_tm.len(),
-                cols * rows
+                expected_len
             )));
         }
         let arr =
@@ -897,11 +939,16 @@ impl CudaAlma {
             Err(_) => self
                 .module
                 .get_function("alma_batch_f32_onthefly")
-                .map_err(|_| CudaAlmaError::MissingKernelSymbol { name: "alma_batch_f32_ondev/alma_batch_f32_onthefly" })?,
+                .map_err(|_| CudaAlmaError::MissingKernelSymbol {
+                    name: "alma_batch_f32_ondev/alma_batch_f32_onthefly",
+                })?,
         };
 
         // Shared memory needed for weights (dynamic) ~ max_period * sizeof(f32)
-        let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
+        let shared_bytes = max_period
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAlmaError::InvalidInput("shared bytes overflow".into()))?
+            as u32;
 
         // Ask occupancy for a good block size
         let (_, suggested_block) = func
@@ -1163,7 +1210,8 @@ impl CudaAlma {
         let try_2d = |tx: u32, ty: u32| -> Option<()> {
             let total = tx as usize + period - 1;
             // Shared = weights + tile
-            let shared_bytes = ((period + total * ty as usize) * std::mem::size_of::<f32>()) as u32;
+            let shared_elems = period.checked_add(total.checked_mul(ty as usize)? )?;
+            let shared_bytes = shared_elems.checked_mul(std::mem::size_of::<f32>())? as u32;
             if (shared_bytes as usize) > max_smem {
                 return None;
             }
@@ -1263,7 +1311,10 @@ impl CudaAlma {
             .get_function("alma_multi_series_one_param_f32")
             .map_err(|_| CudaAlmaError::MissingKernelSymbol { name: "alma_multi_series_one_param_f32" })?;
 
-        let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
+        let shared_bytes = period
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAlmaError::InvalidInput("shared bytes overflow".into()))?
+            as u32;
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => 128,

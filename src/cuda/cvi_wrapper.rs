@@ -11,7 +11,7 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::cvi::CviBatchRange;
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -20,21 +20,27 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CudaCviError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaCviError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaCviError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaCviError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaCviError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -65,54 +71,45 @@ impl Default for CudaCviPolicy {
 pub struct CudaCvi {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaCviPolicy,
 }
 
 impl CudaCvi {
     pub fn new(device_id: usize) -> Result<Self, CudaCviError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaCviError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaCviError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaCviError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cvi_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaCviError::Cuda(e.to_string()))?
-                }
-            }
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaCviError::Cuda(e.to_string()))?;
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaCviPolicy::default(),
         })
     }
 
+    #[inline]
+    pub fn ctx(&self) -> Arc<Context> { self.context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+
     pub fn set_policy(&mut self, policy: CudaCviPolicy) {
         self.policy = policy;
     }
-    pub fn synchronize(&self) -> Result<(), CudaCviError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCviError::Cuda(e.to_string()))
-    }
+    pub fn synchronize(&self) -> Result<(), CudaCviError> { self.stream.synchronize().map_err(Into::into) }
 
     fn first_valid_hl(high: &[f32], low: &[f32]) -> Result<usize, CudaCviError> {
         if high.is_empty() || low.is_empty() {
@@ -127,7 +124,7 @@ impl CudaCvi {
         Err(CudaCviError::InvalidInput("all values are NaN".into()))
     }
 
-    fn device_will_fit(bytes: usize, headroom: usize) -> bool {
+    fn will_fit(bytes: usize, headroom: usize) -> bool {
         let check = match env::var("CUDA_MEM_CHECK") {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
             Err(_) => true,
@@ -143,19 +140,21 @@ impl CudaCvi {
     }
 
     #[inline(always)]
-    fn grid_1d_for_elems(elems: usize, block_x: u32) -> GridSize {
+    fn grid_1d_for_elems(elems: usize, block_x: u32) -> (u32, GridSize) {
         let gx = ((elems as u32) + block_x - 1) / block_x;
-        (gx.max(1), 1, 1).into()
+        let gx_clamped = gx.max(1);
+        (gx_clamped, (gx_clamped, 1, 1).into())
     }
 
     #[inline(always)]
-    fn bytes_required_batch(n_combos: usize, len: usize) -> usize {
+    fn bytes_required_batch(n_combos: usize, len: usize) -> Option<usize> {
         let f32b = std::mem::size_of::<f32>();
         let i32b = std::mem::size_of::<i32>();
-        let in_bytes = 2 * len * f32b; // high + low
-        let params_bytes = n_combos * (2 * i32b + f32b); // period, warm, alpha
-        let out_bytes = n_combos * len * f32b; // output
-        in_bytes + params_bytes + out_bytes
+        let in_bytes = (2usize).checked_mul(len)?.checked_mul(f32b)?; // high + low
+        let params_each = (2usize).checked_mul(i32b)?.checked_add(f32b)?;
+        let params_bytes = n_combos.checked_mul(params_each)?;
+        let out_bytes = n_combos.checked_mul(len)?.checked_mul(f32b)?;
+        in_bytes.checked_add(params_bytes)?.checked_add(out_bytes)
     }
 
     fn chunk_size_for_batch(n_combos: usize, len: usize) -> usize {
@@ -167,12 +166,26 @@ impl CudaCvi {
         let mut chunk = n_combos.max(1);
         while chunk > 1 {
             let need = in_bytes + params_bytes + chunk * out_per_combo + headroom;
-            if Self::device_will_fit(need, 0) {
+            if Self::will_fit(need, 0) {
                 break;
             }
             chunk = (chunk + 1) / 2;
         }
         chunk.max(1)
+    }
+
+    fn validate_launch(&self, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32) -> Result<(), CudaCviError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        if gx > max_gx || gy > max_gy || gz > max_gz || bx > max_bx || by > max_by || bz > max_bz {
+            return Err(CudaCviError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
     }
 
     pub fn cvi_batch_dev(
@@ -197,11 +210,26 @@ impl CudaCvi {
         }
         let periods: Vec<usize> = if pst == 0 || ps == pe {
             vec![ps]
-        } else {
+        } else if ps < pe {
             (ps..=pe).step_by(pst).collect()
+        } else {
+            let mut v = Vec::new();
+            let s = pst.max(1);
+            let mut cur = ps;
+            loop {
+                v.push(cur);
+                if cur <= pe { break; }
+                let next = cur.saturating_sub(s);
+                if next == cur { break; }
+                cur = next;
+            }
+            v.retain(|&x| x >= pe);
+            v
         };
         if periods.is_empty() {
-            return Err(CudaCviError::InvalidInput("no parameter combos".into()));
+            return Err(CudaCviError::InvalidInput(format!(
+                "invalid period range: start={} end={} step={}", ps, pe, pst
+            )));
         }
         for &p in &periods {
             if p == 0 || p > len || (len - first_valid) < (2 * p - 1) {
@@ -219,13 +247,11 @@ impl CudaCvi {
 
         // Fail fast if the full output + inputs cannot fit (chunking won't help d_out size)
         let headroom = 64 * 1024 * 1024; // 64 MiB safety margin
-        let need = Self::bytes_required_batch(n_combos, len);
-        if !Self::device_will_fit(need, headroom) {
-            return Err(CudaCviError::Cuda(format!(
-                "insufficient device memory: need ~{:.2} MiB (+{:.0} MiB headroom)",
-                (need as f64) / (1024.0 * 1024.0),
-                (headroom as f64) / (1024.0 * 1024.0)
-            )));
+        let need = Self::bytes_required_batch(n_combos, len)
+            .ok_or_else(|| CudaCviError::InvalidInput("size overflow".into()))?;
+        if !Self::will_fit(need, headroom) {
+            let (free, _) = mem_get_info().unwrap_or((0, 0));
+            return Err(CudaCviError::OutOfMemory { required: need, free, headroom });
         }
 
         // Host params
@@ -240,39 +266,24 @@ impl CudaCvi {
             .collect();
 
         // Device buffers
-        let mut d_high_opt = Some(
-            DeviceBuffer::from_slice(high).map_err(|e| CudaCviError::Cuda(e.to_string()))?,
-        );
-        let mut d_low_opt = Some(
-            DeviceBuffer::from_slice(low).map_err(|e| CudaCviError::Cuda(e.to_string()))?,
-        );
-        let d_periods =
-            DeviceBuffer::from_slice(&h_periods).map_err(|e| CudaCviError::Cuda(e.to_string()))?;
-        let d_alphas =
-            DeviceBuffer::from_slice(&h_alphas).map_err(|e| CudaCviError::Cuda(e.to_string()))?;
-        let d_warms =
-            DeviceBuffer::from_slice(&h_warms).map_err(|e| CudaCviError::Cuda(e.to_string()))?;
+        let mut d_high_opt = Some(DeviceBuffer::from_slice(high)?);
+        let mut d_low_opt = Some(DeviceBuffer::from_slice(low)?);
+        let d_periods = DeviceBuffer::from_slice(&h_periods)?;
+        let d_alphas = DeviceBuffer::from_slice(&h_alphas)?;
+        let d_warms = DeviceBuffer::from_slice(&h_warms)?;
 
         // Can we use the range-based kernel and build range on device?
-        let has_cvi_from_range = self
-            .module
-            .get_function("cvi_batch_from_range_f32")
-            .is_ok();
-        let has_range_kernel = self
-            .module
-            .get_function("range_from_high_low_f32")
-            .is_ok();
+        let has_cvi_from_range = self.module.get_function("cvi_batch_from_range_f32").is_ok();
+        let has_range_kernel = self.module.get_function("range_from_high_low_f32").is_ok();
         let mut d_range_opt: Option<DeviceBuffer<f32>> = None;
         if has_cvi_from_range {
             if has_range_kernel {
                 // Build range on device: range[t] = high[t] - low[t]
-                let mut d_range: DeviceBuffer<f32> =
-                    unsafe { DeviceBuffer::uninitialized(len) }
-                        .map_err(|e| CudaCviError::Cuda(e.to_string()))?;
+                let mut d_range: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
                 let range_func = self
                     .module
                     .get_function("range_from_high_low_f32")
-                    .unwrap();
+                    .map_err(|_| CudaCviError::MissingKernelSymbol { name: "range_from_high_low_f32" })?;
                 unsafe {
                     let mut len_i = len as i32;
                     let mut high_ptr = d_high_opt
@@ -287,17 +298,16 @@ impl CudaCvi {
                         .as_raw();
                     let mut out_ptr = d_range.as_device_ptr().as_raw();
                     let block_x_range = 256u32;
-                    let grid = Self::grid_1d_for_elems(len, block_x_range);
+                    let (gx_range, grid) = Self::grid_1d_for_elems(len, block_x_range);
                     let block: BlockSize = (block_x_range, 1, 1).into();
+                    self.validate_launch(gx_range, 1, 1, block_x_range, 1, 1)?;
                     let args: &mut [*mut c_void] = &mut [
                         &mut high_ptr as *mut _ as *mut c_void,
                         &mut low_ptr as *mut _ as *mut c_void,
                         &mut len_i as *mut _ as *mut c_void,
                         &mut out_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&range_func, grid, block, 0, args)
-                        .map_err(|e| CudaCviError::Cuda(e.to_string()))?;
+                    self.stream.launch(&range_func, grid, block, 0, args)?;
                 }
                 // Free high/low early once range exists
                 d_high_opt = None;
@@ -309,8 +319,7 @@ impl CudaCvi {
                 for i in 0..len {
                     r[i] = high[i] - low[i];
                 }
-                let dev = DeviceBuffer::from_slice(&r)
-                    .map_err(|e| CudaCviError::Cuda(e.to_string()))?;
+                let dev = DeviceBuffer::from_slice(&r)?;
                 d_range_opt = Some(dev);
                 // Inputs no longer needed once range is available
                 d_high_opt = None;
@@ -319,19 +328,20 @@ impl CudaCvi {
         }
 
         // Output buffer (full size; we already checked it fits)
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * len) }
-                .map_err(|e| CudaCviError::Cuda(e.to_string()))?;
+        let total = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaCviError::InvalidInput("n_combos*len overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
 
         // Choose kernel once
         let func = if has_cvi_from_range {
             self.module
                 .get_function("cvi_batch_from_range_f32")
-                .unwrap()
+                .map_err(|_| CudaCviError::MissingKernelSymbol { name: "cvi_batch_from_range_f32" })?
         } else {
             self.module
                 .get_function("cvi_batch_f32")
-                .map_err(|e| CudaCviError::Cuda(e.to_string()))?
+                .map_err(|_| CudaCviError::MissingKernelSymbol { name: "cvi_batch_f32" })?
         };
 
         // Keep chunking purely as launch heuristic (not memory workaround)
@@ -347,8 +357,9 @@ impl CudaCvi {
         let mut launched = 0usize;
         while launched < n_combos {
             let cur = (n_combos - launched).min(chunk);
-            let grid: GridSize = Self::grid_1d_for_elems(cur, block_x);
+            let (gx, grid): (u32, GridSize) = Self::grid_1d_for_elems(cur, block_x);
             let block: BlockSize = (block_x, 1, 1).into();
+            self.validate_launch(gx, 1, 1, block_x, 1, 1)?;
             unsafe {
                 let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
@@ -382,9 +393,7 @@ impl CudaCvi {
                         &mut cur_i as *mut _ as *mut c_void,
                         &mut out_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&func, grid, block, 0, args)
-                        .map_err(|e| CudaCviError::Cuda(e.to_string()))?;
+                    self.stream.launch(&func, grid, block, 0, args)?;
                 } else {
                     let mut high_ptr = d_high_opt
                         .as_ref()
@@ -407,13 +416,14 @@ impl CudaCvi {
                         &mut cur_i as *mut _ as *mut c_void,
                         &mut out_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&func, grid, block, 0, args)
-                        .map_err(|e| CudaCviError::Cuda(e.to_string()))?;
+                    self.stream.launch(&func, grid, block, 0, args)?;
                 }
             }
             launched += cur;
         }
+
+        // Synchronize producing stream so consumers via CAI v3 need no stream key
+        self.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -476,27 +486,41 @@ impl CudaCvi {
             ));
         }
 
-        let d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaCviError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaCviError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaCviError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaCviError::Cuda(e.to_string()))?;
+        let total = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaCviError::InvalidInput("rows*cols overflow".into()))?;
+        // Approximate required VRAM: 2×inputs + first_valids + outputs
+        let f32b = std::mem::size_of::<f32>();
+        let i32b = std::mem::size_of::<i32>();
+        let need = total
+            .checked_mul(3 * f32b)
+            .and_then(|v| v.checked_add(cols.checked_mul(i32b)?))
+            .ok_or_else(|| CudaCviError::InvalidInput("size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(need, headroom) {
+            let (free, _) = mem_get_info().unwrap_or((0, 0));
+            return Err(CudaCviError::OutOfMemory { required: need, free, headroom });
+        }
+
+        let d_high = DeviceBuffer::from_slice(high_tm)?;
+        let d_low = DeviceBuffer::from_slice(low_tm)?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
 
         let func = self
             .module
             .get_function("cvi_many_series_one_param_f32")
-            .map_err(|e| CudaCviError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCviError::MissingKernelSymbol { name: "cvi_many_series_one_param_f32" })?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             ManySeriesKernelPolicy::Auto => 256,
         };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let gx = grid_x.max(1);
+        let grid: GridSize = (gx, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(gx, 1, 1, block_x, 1, 1)?;
 
         unsafe {
             let mut high_ptr = d_high.as_device_ptr().as_raw();
@@ -517,10 +541,11 @@ impl CudaCvi {
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaCviError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
+
+        // synchronize producing stream for CAI v3 consumers
+        self.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,

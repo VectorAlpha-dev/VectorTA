@@ -22,6 +22,7 @@
 //! - AVX2/AVX512 stubs short-circuit to scalar at runtime; nightly tests still cover them.
 //! - Scalar path optimized: removed VecDeque sums/retains and O(w) smoothing loops; now O(1) ring updates.
 //! - Batch uses the same scalar kernel per row (Rayon-parallel); row-specific shared-precompute left for future work.
+//! - CUDA wrapper enabled on `feature = \"cuda\"`; returns VRAM handles with CAI v3 + DLPack v1.x interop via shared helpers; kernels mirror scalar semantics.
 //!
 //! ### TODO - Performance Improvements
 //! - [ ] Row-specific batch: precompute FVG candidates and close prefix sums if/when needed.
@@ -182,6 +183,15 @@ pub enum FvgTrailingStopError {
 
     #[error("fvg_trailing_stop: Invalid unmitigated_fvg_lookback: {lookback}")]
     InvalidLookback { lookback: usize },
+
+    #[error("fvg_trailing_stop: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("fvg_trailing_stop: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("fvg_trailing_stop: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // ==================== KERNEL IMPLEMENTATIONS ====================
@@ -828,10 +838,7 @@ pub fn fvg_trailing_stop_into_slices(
         .iter()
         .any(|&n| n != len)
     {
-        return Err(FvgTrailingStopError::InvalidPeriod {
-            period: len,
-            data_len: len,
-        });
+        return Err(FvgTrailingStopError::OutputLengthMismatch { expected: len, got: upper.len().min(lower.len()).min(upper_ts.len()).min(lower_ts.len()) });
     }
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -917,46 +924,74 @@ impl FvgTsBatchOutput {
 }
 
 #[inline]
-fn expand_grid_ts(r: &FvgTsBatchRange) -> Vec<FvgTrailingStopParams> {
-    let mut v = Vec::new();
-    let looks = if r.lookback.2 == 0 {
-        vec![r.lookback.0]
-    } else {
-        (r.lookback.0..=r.lookback.1)
-            .step_by(r.lookback.2)
-            .collect()
-    };
-    let smooths = if r.smoothing.2 == 0 {
-        vec![r.smoothing.0]
-    } else {
-        (r.smoothing.0..=r.smoothing.1)
-            .step_by(r.smoothing.2)
-            .collect()
-    };
-    // reset_on_cross is (include_false, include_true)
-    let mut resets = Vec::new();
-    if r.reset_on_cross.0 {
-        resets.push(false);
+fn expand_axis_usize(
+    (start, end, step): (usize, usize, usize),
+) -> Result<Vec<usize>, FvgTrailingStopError> {
+    if step == 0 {
+        return Ok(vec![start]);
     }
-    if r.reset_on_cross.1 {
-        resets.push(true);
-    }
-    if resets.is_empty() {
-        resets.push(false);
-    } // Default to false if neither is selected
-
-    for &lb in &looks {
-        for &sm in &smooths {
-            for &rs in &resets {
-                v.push(FvgTrailingStopParams {
-                    unmitigated_fvg_lookback: Some(lb),
-                    smoothing_length: Some(sm),
-                    reset_on_cross: Some(rs),
-                });
+    let mut out = Vec::new();
+    if start <= end {
+        let mut v = start;
+        while v <= end {
+            out.push(v);
+            match v.checked_add(step) {
+                Some(nv) => v = nv,
+                None => break,
+            }
+        }
+    } else {
+        // reversed bounds supported
+        let mut v = start;
+        loop {
+            if v < end {
+                break;
+            }
+            out.push(v);
+            match v.checked_sub(step) {
+                Some(next) => v = next,
+                None => break,
             }
         }
     }
-    v
+    if out.is_empty() {
+        return Err(FvgTrailingStopError::InvalidRange { start, end, step });
+    }
+    Ok(out)
+}
+
+#[inline]
+fn expand_grid_ts(
+    r: &FvgTsBatchRange,
+) -> Result<Vec<FvgTrailingStopParams>, FvgTrailingStopError> {
+    let looks = expand_axis_usize(r.lookback)?;
+    let smooths = expand_axis_usize(r.smoothing)?;
+    let mut resets = Vec::new();
+    if r.reset_on_cross.0 { resets.push(false); }
+    if r.reset_on_cross.1 { resets.push(true); }
+    if resets.is_empty() { resets.push(false); }
+
+    let mut v = Vec::with_capacity(
+        looks
+            .len()
+            .saturating_mul(smooths.len())
+            .saturating_mul(resets.len()),
+    );
+    for &lb in &looks {
+        for &sm in &smooths {
+            for &rs in &resets {
+                v.push(FvgTrailingStopParams { unmitigated_fvg_lookback: Some(lb), smoothing_length: Some(sm), reset_on_cross: Some(rs) });
+            }
+        }
+    }
+    if v.is_empty() {
+        return Err(FvgTrailingStopError::InvalidRange {
+            start: r.lookback.0,
+            end: r.lookback.1,
+            step: r.lookback.2,
+        });
+    }
+    Ok(v)
 }
 
 #[inline(always)]
@@ -969,24 +1004,31 @@ pub fn fvg_ts_batch_inner_into(
     parallel: bool,
     out: &mut [f64], // layout: for each combo, 4 consecutive rows: upper,lower,upper_ts,lower_ts
 ) -> Result<Vec<FvgTrailingStopParams>, FvgTrailingStopError> {
-    let combos = expand_grid_ts(sweep);
-    if combos.is_empty() {
-        return Err(FvgTrailingStopError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+    if !matches!(
+        kern,
+        Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch
+    ) {
+        return Err(FvgTrailingStopError::InvalidKernelForBatch(kern));
     }
+
+    let combos = expand_grid_ts(sweep)?;
     let len = h.len();
     let rows = combos.len();
     let cols = len;
-    assert_eq!(out.len(), 4 * rows * cols, "out size mismatch");
+    let expected = rows
+        .checked_mul(4)
+        .and_then(|x| x.checked_mul(cols))
+        .ok_or_else(|| FvgTrailingStopError::InvalidRange { start: rows, end: cols, step: 4 })?;
+    if out.len() != expected {
+        return Err(FvgTrailingStopError::OutputLengthMismatch { expected, got: out.len() });
+    }
 
     let first = first_valid_ohlc(h, l, c);
     if first == usize::MAX {
         return Err(FvgTrailingStopError::AllValuesNaN);
     }
 
-    let chosen = match kern {
+    let _chosen = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
@@ -1376,8 +1418,11 @@ pub fn fvg_trailing_stop_batch_with_kernel(
             data_len: len,
         });
     }
+    if !matches!(kernel, Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch) {
+        return Err(FvgTrailingStopError::InvalidKernelForBatch(kernel));
+    }
 
-    let combos = expand_grid_ts(sweep);
+    let combos = expand_grid_ts(sweep)?;
     let rows = combos.len();
     let cols = len;
 
@@ -1393,7 +1438,8 @@ pub fn fvg_trailing_stop_batch_with_kernel(
         warms.extend_from_slice(&[w, w, w, w]);
     }
 
-    let mut buf_mu = make_uninit_matrix(4 * rows, cols);
+    let rows4 = rows.checked_mul(4).ok_or_else(|| FvgTrailingStopError::InvalidRange { start: rows, end: 4, step: 1 })?;
+    let mut buf_mu = make_uninit_matrix(rows4, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
     // one pass fill
@@ -2289,12 +2335,18 @@ pub fn fvg_trailing_stop_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     // compute combos count to size flat buffer once
-    let combos = expand_grid_ts(&sweep);
+    let combos = expand_grid_ts(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = h.len();
+    let rows4 = rows
+        .checked_mul(4)
+        .ok_or_else(|| PyValueError::new_err("rows*4 overflow"))?;
+    let total = rows4
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*4*cols overflow"))?;
 
     // flat buffer: (rows*4*cols), filled in one pass
-    let flat = unsafe { PyArray1::<f64>::new(py, [rows * 4 * cols], false) };
+    let flat = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let flat_mut = unsafe { flat.as_slice_mut()? };
 
     py.allow_threads(|| fvg_ts_batch_inner_into(h, l, c, &sweep, kern, true, flat_mut))
@@ -2302,7 +2354,7 @@ pub fn fvg_trailing_stop_batch_py<'py>(
 
     let dict = PyDict::new(py);
     // expose a single 2D view like alma.rs does
-    dict.set_item("values", flat.reshape((rows * 4, cols))?)?;
+    dict.set_item("values", flat.reshape((rows4, cols))?)?;
     dict.set_item(
         "lookbacks",
         combos
@@ -2524,13 +2576,16 @@ pub fn fvg_trailing_stop_batch_js(
         smoothing: (smoothing_start, smoothing_end, smoothing_step),
         reset_on_cross: (reset_include_false, reset_include_true),
     };
-    let combos = expand_grid_ts(&sweep);
+    let combos = expand_grid_ts(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let cols = high.len();
     let rows = combos.len();
 
-    let mut buf_mu = make_uninit_matrix(4 * rows, cols);
+    let rows4 = rows
+        .checked_mul(4)
+        .ok_or_else(|| JsValue::from_str("rows*4 overflow"))?;
+    let mut buf_mu = make_uninit_matrix(rows4, cols);
     let first = first_valid_ohlc(high, low, close);
-    let mut warms = Vec::with_capacity(4 * rows);
+    let mut warms = Vec::with_capacity(rows4);
     for prm in &combos {
         let sm = prm.smoothing_length.unwrap_or(9);
         let w = if first == usize::MAX {

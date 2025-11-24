@@ -16,8 +16,8 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
 use crate::indicators::pma::PmaBatchRange;
 
@@ -63,22 +63,25 @@ pub enum ManySeriesKernelSelected {
     Tiled2D { tx: u32, ty: u32 },
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaPmaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaPmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaPmaError::Cuda(e) => write!(f, "CUDA error: {e}"),
-            CudaPmaError::InvalidInput(e) => write!(f, "Invalid input: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for CudaPmaError {}
 
 /// VRAM-backed pair of PMA outputs (predict + trigger)
 pub struct DevicePmaPair {
@@ -122,10 +125,9 @@ struct BatchInputs {
 
 impl CudaPma {
     pub fn new(device_id: usize) -> Result<Self, CudaPmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/pma_kernel.ptx"));
         let jit_opts = &[
@@ -134,11 +136,9 @@ impl CudaPma {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -171,9 +171,8 @@ impl CudaPma {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaPmaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPmaError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
     }
 
     #[inline]
@@ -188,15 +187,78 @@ impl CudaPma {
         mem_get_info().ok()
     }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaPmaError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Some((free, _t)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+            let required = required_bytes.saturating_add(headroom_bytes);
+            if required <= free {
+                Ok(())
+            } else {
+                Err(CudaPmaError::OutOfMemory {
+                    required,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
         } else {
-            true
+            Ok(())
         }
+    }
+
+    #[inline]
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaPmaError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaPmaError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
     }
 
     fn maybe_log_batch_debug(&self) {
@@ -268,25 +330,36 @@ impl CudaPma {
         prices: &[f32],
         inputs: &BatchInputs,
     ) -> Result<DevicePmaPair, CudaPmaError> {
-        let prices_bytes = inputs.series_len * core::mem::size_of::<f32>();
-        let out_bytes = inputs.combos * inputs.series_len * core::mem::size_of::<f32>();
-        let required = prices_bytes + 2 * out_bytes;
+        let elem = core::mem::size_of::<f32>();
+        let prices_bytes = inputs
+            .series_len
+            .checked_mul(elem)
+            .ok_or_else(|| CudaPmaError::InvalidInput("series_len * sizeof(f32) overflow".into()))?;
+        let out_elems = inputs
+            .combos
+            .checked_mul(inputs.series_len)
+            .ok_or_else(|| {
+                CudaPmaError::InvalidInput("combos * series_len overflow".into())
+            })?;
+        let out_bytes = out_elems
+            .checked_mul(elem)
+            .ok_or_else(|| CudaPmaError::InvalidInput("out_elems * sizeof(f32) overflow".into()))?;
+        let two_out = out_bytes
+            .checked_mul(2)
+            .ok_or_else(|| CudaPmaError::InvalidInput("2 * out_bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(two_out)
+            .ok_or_else(|| {
+                CudaPmaError::InvalidInput("prices_bytes + 2*out_bytes overflow".into())
+            })?;
         let headroom = 64 * 1024 * 1024; // 64MB safety
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaPmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(required, headroom)?;
 
-        let mut d_prices: DeviceBuffer<f32> =
-            DeviceBuffer::from_slice(prices).map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
+        let mut d_prices: DeviceBuffer<f32> = DeviceBuffer::from_slice(prices)?;
         let mut d_predict: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(inputs.combos * inputs.series_len) }
-                .map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(inputs.combos * inputs.series_len) }?;
         let mut d_trigger: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(inputs.combos * inputs.series_len) }
-                .map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(inputs.combos * inputs.series_len) }?;
 
         self.launch_batch_kernel_select(
             &d_prices,
@@ -320,13 +393,23 @@ impl CudaPma {
         d_predict: &mut DeviceBuffer<f32>,
         d_trigger: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaPmaError> {
-        let (fname, block, grid, sel) = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => (
-                "pma_batch_f32",
-                BlockSize::xy(block_x.max(1), 1),
-                GridSize::xyz(n_combos as u32, 1, 1),
-                Some(BatchKernelSelected::Plain { block_x }),
-            ),
+        let (fname, block, grid, sel, gx, gy, gz, bx, by, bz) = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => {
+                let bx = block_x.max(1);
+                let gx = n_combos as u32;
+                (
+                    "pma_batch_f32",
+                    BlockSize::xy(bx, 1),
+                    GridSize::xyz(gx, 1, 1),
+                    Some(BatchKernelSelected::Plain { block_x }),
+                    gx,
+                    1,
+                    1,
+                    bx,
+                    1,
+                    1,
+                )
+            }
             BatchKernelPolicy::Tiled { tile } => {
                 let sym = if tile >= 256 {
                     "pma_batch_tiled_f32_tile256"
@@ -338,23 +421,39 @@ impl CudaPma {
                 } else {
                     "pma_batch_f32"
                 };
+                let gx = n_combos as u32;
                 (
                     name,
                     BlockSize::xy(1, 1),
-                    GridSize::xyz(n_combos as u32, 1, 1),
+                    GridSize::xyz(gx, 1, 1),
                     Some(BatchKernelSelected::Tiled { tile }),
+                    gx,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
                 )
             }
             BatchKernelPolicy::Auto => {
                 // Default to simple 1D launch; computation is strictly sequential per combo.
+                let gx = n_combos as u32;
                 (
                     "pma_batch_f32",
                     BlockSize::xy(1, 1),
-                    GridSize::xyz(n_combos as u32, 1, 1),
+                    GridSize::xyz(gx, 1, 1),
                     Some(BatchKernelSelected::Plain { block_x: 1 }),
+                    gx,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
                 )
             }
         };
+
+        self.validate_launch(gx, gy, gz, bx, by, bz)?;
 
         if let Some(s) = sel {
             unsafe {
@@ -366,7 +465,7 @@ impl CudaPma {
         let func = self
             .module
             .get_function(fname)
-            .map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPmaError::MissingKernelSymbol { name: fname })?;
         let mut args: [*mut c_void; 6] = [
             &mut d_prices.as_device_ptr().as_raw() as *mut _ as *mut c_void,
             &mut (series_len as i32) as *mut _ as *mut c_void,
@@ -375,8 +474,8 @@ impl CudaPma {
             &mut d_predict.as_device_ptr().as_raw() as *mut _ as *mut c_void,
             &mut d_trigger.as_device_ptr().as_raw() as *mut _ as *mut c_void,
         ];
-        unsafe { self.stream.launch(&func, grid, block, 0, &mut args) }
-            .map_err(|e| CudaPmaError::Cuda(e.to_string()))
+        unsafe { self.stream.launch(&func, grid, block, 0, &mut args) }?;
+        Ok(())
     }
 
     pub fn pma_batch_dev(
@@ -396,7 +495,15 @@ impl CudaPma {
         out_trigger: &mut [f32],
     ) -> Result<(usize, usize), CudaPmaError> {
         let inputs = Self::prepare_batch_inputs(prices, sweep)?;
-        let expected = inputs.series_len * inputs.combos;
+        let expected = inputs
+            .series_len
+            .checked_mul(inputs.combos)
+            .ok_or_else(|| {
+                CudaPmaError::InvalidInput(format!(
+                    "series_len * combos overflow: series_len={} combos={}",
+                    inputs.series_len, inputs.combos
+                ))
+            })?;
         if out_predict.len() != expected || out_trigger.len() != expected {
             return Err(CudaPmaError::InvalidInput(format!(
                 "output slice wrong length: got p={}, t={}, expected={}",
@@ -406,14 +513,8 @@ impl CudaPma {
             )));
         }
         let pair = self.run_batch_kernel(prices, &inputs)?;
-        pair.predict
-            .buf
-            .copy_to(out_predict)
-            .map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
-        pair.trigger
-            .buf
-            .copy_to(out_trigger)
-            .map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
+        pair.predict.buf.copy_to(out_predict)?;
+        pair.trigger.buf.copy_to(out_trigger)?;
         Ok((pair.rows(), pair.cols()))
     }
 
@@ -428,11 +529,19 @@ impl CudaPma {
                 "num_series or series_len is zero".into(),
             ));
         }
-        if prices_tm.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| {
+                CudaPmaError::InvalidInput(format!(
+                    "cols * rows overflow: cols={} rows={}",
+                    cols, rows
+                ))
+            })?;
+        if prices_tm.len() != expected {
             return Err(CudaPmaError::InvalidInput(format!(
                 "data length {} != cols*rows {}",
                 prices_tm.len(),
-                cols * rows
+                expected
             )));
         }
         let mut first_valids = vec![0i32; cols];
@@ -469,26 +578,54 @@ impl CudaPma {
         d_predict_tm: &mut DeviceBuffer<f32>,
         d_trigger_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaPmaError> {
-        let (fname, block, grid, sel) = match self.policy.many_series {
-            ManySeriesKernelPolicy::Tiled2D { tx, ty } => (
-                match (tx, ty) {
-                    (1, 4) => "pma_ms1p_tiled_f32_tx1_ty4",
-                    (1, 2) => "pma_ms1p_tiled_f32_tx1_ty2",
-                    _ => "pma_many_series_one_param_f32",
-                },
-                BlockSize::xyz(tx.max(1), ty.max(1), 1),
-                {
-                    let gx = ((cols as u32) + ty - 1) / ty;
-                    GridSize::xyz(gx, 1, 1)
-                },
-                Some(ManySeriesKernelSelected::Tiled2D { tx, ty }),
-            ),
-            ManySeriesKernelPolicy::OneD { block_x } => (
-                "pma_many_series_one_param_f32",
-                BlockSize::xy(block_x.max(1), 1),
-                GridSize::xyz(cols as u32, 1, 1),
-                Some(ManySeriesKernelSelected::OneD { block_x }),
-            ),
+        let (fname, block, grid, sel, gx, gy, gz, bx, by, bz) = match self.policy.many_series {
+            ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
+                let (fname, gx) = {
+                    let base = if (tx, ty) == (1, 4) {
+                        "pma_ms1p_tiled_f32_tx1_ty4"
+                    } else if (tx, ty) == (1, 2) {
+                        "pma_ms1p_tiled_f32_tx1_ty2"
+                    } else {
+                        "pma_many_series_one_param_f32"
+                    };
+                    let gx_val = if base == "pma_many_series_one_param_f32" {
+                        cols as u32
+                    } else {
+                        ((cols as u32) + ty - 1) / ty
+                    };
+                    (base, gx_val)
+                };
+                let bx = tx.max(1);
+                let by = ty.max(1);
+                (
+                    fname,
+                    BlockSize::xyz(bx, by, 1),
+                    GridSize::xyz(gx, 1, 1),
+                    Some(ManySeriesKernelSelected::Tiled2D { tx, ty }),
+                    gx,
+                    1,
+                    1,
+                    bx,
+                    by,
+                    1,
+                )
+            }
+            ManySeriesKernelPolicy::OneD { block_x } => {
+                let bx = block_x.max(1);
+                let gx = cols as u32;
+                (
+                    "pma_many_series_one_param_f32",
+                    BlockSize::xy(bx, 1),
+                    GridSize::xyz(gx, 1, 1),
+                    Some(ManySeriesKernelSelected::OneD { block_x }),
+                    gx,
+                    1,
+                    1,
+                    bx,
+                    1,
+                    1,
+                )
+            }
             ManySeriesKernelPolicy::Auto => {
                 if cols >= 16
                     && self
@@ -502,6 +639,12 @@ impl CudaPma {
                         BlockSize::xyz(1, 4, 1),
                         GridSize::xyz(gx, 1, 1),
                         Some(ManySeriesKernelSelected::Tiled2D { tx: 1, ty: 4 }),
+                        gx,
+                        1,
+                        1,
+                        1,
+                        4,
+                        1,
                     )
                 } else if cols >= 8
                     && self
@@ -515,13 +658,26 @@ impl CudaPma {
                         BlockSize::xyz(1, 2, 1),
                         GridSize::xyz(gx, 1, 1),
                         Some(ManySeriesKernelSelected::Tiled2D { tx: 1, ty: 2 }),
+                        gx,
+                        1,
+                        1,
+                        1,
+                        2,
+                        1,
                     )
                 } else {
+                    let gx = cols as u32;
                     (
                         "pma_many_series_one_param_f32",
                         BlockSize::xy(1, 1),
-                        GridSize::xyz(cols as u32, 1, 1),
+                        GridSize::xyz(gx, 1, 1),
                         Some(ManySeriesKernelSelected::OneD { block_x: 1 }),
+                        gx,
+                        1,
+                        1,
+                        1,
+                        1,
+                        1,
                     )
                 }
             }
@@ -533,10 +689,12 @@ impl CudaPma {
         }
         self.maybe_log_many_debug();
 
+        self.validate_launch(gx, gy, gz, bx, by, bz)?;
+
         let func = self
             .module
             .get_function(fname)
-            .map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPmaError::MissingKernelSymbol { name: fname })?;
         let mut args: [*mut c_void; 6] = [
             &mut d_prices_tm.as_device_ptr().as_raw() as *mut _ as *mut c_void,
             &mut (cols as i32) as *mut _ as *mut c_void,
@@ -545,8 +703,8 @@ impl CudaPma {
             &mut d_predict_tm.as_device_ptr().as_raw() as *mut _ as *mut c_void,
             &mut d_trigger_tm.as_device_ptr().as_raw() as *mut _ as *mut c_void,
         ];
-        unsafe { self.stream.launch(&func, grid, block, 0, &mut args) }
-            .map_err(|e| CudaPmaError::Cuda(e.to_string()))
+        unsafe { self.stream.launch(&func, grid, block, 0, &mut args) }?;
+        Ok(())
     }
 
     pub fn pma_many_series_one_param_time_major_dev(
@@ -556,28 +714,53 @@ impl CudaPma {
         rows: usize,
     ) -> Result<DevicePmaPair, CudaPmaError> {
         let first_valids = Self::prepare_many_series_inputs(prices_tm, cols, rows)?;
-        let prices_bytes = cols * rows * core::mem::size_of::<f32>();
-        let first_bytes = cols * core::mem::size_of::<i32>();
-        let out_bytes = cols * rows * core::mem::size_of::<f32>();
-        let required = prices_bytes + first_bytes + 2 * out_bytes;
+        let elem_f32 = core::mem::size_of::<f32>();
+        let elem_i32 = core::mem::size_of::<i32>();
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| {
+                CudaPmaError::InvalidInput(format!(
+                    "cols * rows overflow when sizing device buffers: cols={} rows={}",
+                    cols, rows
+                ))
+            })?;
+        let prices_bytes = elems
+            .checked_mul(elem_f32)
+            .ok_or_else(|| {
+                CudaPmaError::InvalidInput("cols*rows*sizeof(f32) overflow".into())
+            })?;
+        let first_bytes = cols
+            .checked_mul(elem_i32)
+            .ok_or_else(|| {
+                CudaPmaError::InvalidInput("cols*sizeof(i32) overflow".into())
+            })?;
+        let out_bytes = elems
+            .checked_mul(elem_f32)
+            .ok_or_else(|| {
+                CudaPmaError::InvalidInput("output bytes overflow".into())
+            })?;
+        let two_out = out_bytes
+            .checked_mul(2)
+            .ok_or_else(|| CudaPmaError::InvalidInput("2*out_bytes overflow".into()))?;
+        let tmp = prices_bytes
+            .checked_add(first_bytes)
+            .ok_or_else(|| {
+                CudaPmaError::InvalidInput("prices_bytes + first_bytes overflow".into())
+            })?;
+        let required = tmp
+            .checked_add(two_out)
+            .ok_or_else(|| {
+                CudaPmaError::InvalidInput("total device bytes overflow".into())
+            })?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaPmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(required, headroom)?;
 
-        let mut d_prices_tm: DeviceBuffer<f32> =
-            DeviceBuffer::from_slice(prices_tm).map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
+        let mut d_prices_tm: DeviceBuffer<f32> = DeviceBuffer::from_slice(prices_tm)?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_predict_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(cols * rows) }
-                .map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(elems) }?;
         let mut d_trigger_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(cols * rows) }
-                .map_err(|e| CudaPmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         self.launch_many_series_kernel_select(
             &d_prices_tm,

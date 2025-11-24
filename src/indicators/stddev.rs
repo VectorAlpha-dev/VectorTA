@@ -18,6 +18,16 @@
 //! - **InvalidPeriod**: stddev: `period` is zero or exceeds the data length.
 //! - **NotEnoughValidData**: stddev: Not enough valid data points for requested `period`.
 //!
+//! ## Errors
+//! - **EmptyInputData**: stddev: Input data slice is empty.
+//! - **AllValuesNaN**: stddev: All input values are `NaN`.
+//! - **InvalidPeriod**: stddev: `period` is zero or exceeds the data length.
+//! - **NotEnoughValidData**: stddev: Not enough valid data points for requested `period`.
+//! - **InvalidNbdev**: stddev: `nbdev` is negative or non-finite.
+//! - **OutputLengthMismatch**: stddev: Output slice length does not match input length.
+//! - **InvalidRange**: stddev batch: Invalid sweep configuration (period/nbdev ranges).
+//! - **InvalidKernelForBatch**: stddev batch: Non-batch kernel passed to batch API.
+//!
 //! ## Returns
 //! - **Ok(StdDevOutput)** on success (output vector of length == input).
 //! - **Err(StdDevError)** otherwise.
@@ -25,6 +35,7 @@
 //! ## Developer Notes
 //! - Single-series SIMD: kept disabled (delegates to scalar). The rolling update is memory-bound and per-step dependent, and did not show consistent >5% wins at realistic sizes (10k/100k).
 //! - Batch SIMD: row-specific AVX2/AVX512 from prefix sums is enabled and faster than scalar by ~5–10% at 100k on a modern x86_64 CPU.
+//! - CUDA: PTX wrapper provides batch and many-series kernels with VRAM-checked launches; Python uses a DeviceArray handle with CAI v3 byte-strides and DLPack v1.x negotiation.
 //! - Streaming parity: scalar path computes variance with the same operation order as the stream (`mean = sum/den; var = sum2/den - mean*mean`) to ensure bitwise consistency in tests.
 //! - Allocation: follows alma.rs patterns (warmup prefix via `alloc_with_nan_prefix`; batch via `make_uninit_matrix`/`init_matrix_prefixes`).
 //! - Streaming kernel: O(1) modulo-free ring buffer; NaN-robust using a `nan_count` window tracker. Emits NaN only while a NaN is inside the window and recovers as soon as it slides out.
@@ -220,10 +231,19 @@ pub enum StdDevError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("stddev: Invalid nbdev: {nbdev}. Must be non-negative and finite.")]
     InvalidNbdev { nbdev: f64 },
+    #[error("stddev: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("stddev: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("stddev: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
+    // Kept for backward compatibility; new code should use `OutputLengthMismatch`.
     #[error("stddev: Output length mismatch: dst = {dst_len}, expected = {expected_len}")]
     MismatchedOutputLen { dst_len: usize, expected_len: usize },
     #[error("stddev: Invalid kernel type: {msg}")]
     InvalidKernel { msg: String },
+    #[error("stddev: Invalid input: {msg}")]
+    InvalidInput { msg: String },
 }
 
 #[inline]
@@ -331,9 +351,9 @@ pub fn stddev_into_slice(
         });
     }
     if dst.len() != len {
-        return Err(StdDevError::MismatchedOutputLen {
-            dst_len: dst.len(),
-            expected_len: len,
+        return Err(StdDevError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
         });
     }
 
@@ -667,11 +687,7 @@ pub fn stddev_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(StdDevError::InvalidKernel {
-                msg: "Expected batch kernel type".to_string(),
-            })
-        }
+        other => return Err(StdDevError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -698,37 +714,101 @@ impl StdDevBatchOutput {
         })
     }
     pub fn values_for(&self, p: &StdDevParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| {
-            let start = row * self.cols;
-            &self.values[start..start + self.cols]
+        self.row_for_params(p).and_then(|row| {
+            let start = row.checked_mul(self.cols)?;
+            let end = start.checked_add(self.cols)?;
+            self.values.get(start..end)
         })
     }
 }
 
 #[inline(always)]
-fn expand_grid(r: &StdDevBatchRange) -> Vec<StdDevParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid_checked(r: &StdDevBatchRange) -> Result<Vec<StdDevParams>, StdDevError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, StdDevError> {
         if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
-    }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                let next = cur.saturating_add(step);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+            }
+        } else {
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                let next = cur.saturating_sub(step);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+                if cur == 0 && end > 0 {
+                    break;
+                }
+            }
         }
-        v
+        if v.is_empty() {
+            return Err(StdDevError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let nbdevs = axis_f64(r.nbdev);
+    fn axis_f64(
+        (start, end, step): (f64, f64, f64),
+    ) -> Result<Vec<f64>, StdDevError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        let mut out = Vec::new();
+        if start < end {
+            let st = if step > 0.0 { step } else { -step };
+            let mut x = start;
+            while x <= end + 1e-12 {
+                out.push(x);
+                x += st;
+            }
+        } else {
+            let st = if step > 0.0 { -step } else { step };
+            if st.abs() < 1e-12 {
+                return Ok(vec![start]);
+            }
+            let mut x = start;
+            while x >= end - 1e-12 {
+                out.push(x);
+                x += st;
+            }
+        }
+        if out.is_empty() {
+            return Err(StdDevError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(out)
+    }
 
-    let mut out = Vec::with_capacity(periods.len() * nbdevs.len());
+    let periods = axis_usize(r.period)?;
+    let nbdevs = axis_f64(r.nbdev)?;
+    let cap = periods
+        .len()
+        .checked_mul(nbdevs.len())
+        .ok_or_else(|| StdDevError::InvalidInput {
+            msg: "stddev: parameter grid size overflow".to_string(),
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &n in &nbdevs {
             out.push(StdDevParams {
@@ -737,7 +817,14 @@ fn expand_grid(r: &StdDevBatchRange) -> Vec<StdDevParams> {
             });
         }
     }
-    out
+    if out.is_empty() {
+        return Err(StdDevError::InvalidRange {
+            start: r.period.0.to_string(),
+            end: r.period.1.to_string(),
+            step: r.period.2.to_string(),
+        });
+    }
+    Ok(out)
 }
 
 #[inline(always)]
@@ -765,13 +852,7 @@ fn stddev_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<StdDevBatchOutput, StdDevError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(StdDevError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_checked(sweep)?;
     let len = data.len();
     if len == 0 {
         return Err(StdDevError::EmptyInputData);
@@ -1108,13 +1189,7 @@ pub fn stddev_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<StdDevParams>, StdDevError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(StdDevError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_checked(sweep)?;
 
     let len = data.len();
     if len == 0 {
@@ -1135,7 +1210,17 @@ pub fn stddev_batch_inner_into(
 
     let rows = combos.len();
     let cols = len;
-    debug_assert_eq!(out.len(), rows * cols);
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| StdDevError::InvalidInput {
+            msg: "stddev: rows*cols overflow in batch_into".to_string(),
+        })?;
+    if out.len() != expected {
+        return Err(StdDevError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // warmup vector and helper init
     let warm: Vec<usize> = combos
@@ -1187,7 +1272,7 @@ pub fn stddev_batch_inner_into(
 
 #[inline(always)]
 pub fn expand_grid_stddev(r: &StdDevBatchRange) -> Vec<StdDevParams> {
-    expand_grid(r)
+    expand_grid_checked(r).unwrap_or_else(|_| Vec::new())
 }
 
 #[cfg(feature = "python")]
@@ -1264,7 +1349,7 @@ pub fn stddev_batch_py<'py>(
         nbdev: nbdev_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -1518,10 +1603,14 @@ pub fn stddev_batch_into(
             nbdev: (nbdev_start, nbdev_end, nbdev_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid_checked(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow in stddev_batch_into"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         stddev_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1551,14 +1640,17 @@ pub fn stddev_batch_into_cfg(
         nbdev: config.nbdev_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_checked(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     if combos.is_empty() {
         return Err(JsValue::from_str("No parameter combinations generated"));
     }
 
     let rows = combos.len();
     let cols = len;
-    let total = rows * cols;
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows*cols overflow in stddev_batch_into_cfg"))?;
 
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
@@ -1605,11 +1697,11 @@ mod tests {
 
         // Try using a non-batch kernel
         let res = stddev_batch_with_kernel(&data, &sweep, Kernel::Scalar);
-        assert!(matches!(res, Err(StdDevError::InvalidKernel { .. })));
+        assert!(matches!(res, Err(StdDevError::InvalidKernelForBatch(_))));
 
         // Also test with other non-batch kernels
         let res2 = stddev_batch_with_kernel(&data, &sweep, Kernel::Avx2);
-        assert!(matches!(res2, Err(StdDevError::InvalidKernel { .. })));
+        assert!(matches!(res2, Err(StdDevError::InvalidKernelForBatch(_))));
         Ok(())
     }
 
@@ -1625,12 +1717,12 @@ mod tests {
         // Create a mismatched output buffer
         let mut wrong_size_output = vec![0.0; 10]; // Wrong size: data is 5, output is 10
         let res = stddev_into_slice(&mut wrong_size_output, &input, kernel);
-        assert!(matches!(res, Err(StdDevError::MismatchedOutputLen { .. })));
+        assert!(matches!(res, Err(StdDevError::OutputLengthMismatch { .. })));
 
         // Also test with smaller buffer
         let mut small_output = vec![0.0; 3]; // Too small
         let res2 = stddev_into_slice(&mut small_output, &input, kernel);
-        assert!(matches!(res2, Err(StdDevError::MismatchedOutputLen { .. })));
+        assert!(matches!(res2, Err(StdDevError::OutputLengthMismatch { .. })));
         Ok(())
     }
 

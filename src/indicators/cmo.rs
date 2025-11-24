@@ -17,6 +17,7 @@
 //! - **Streaming**: Implemented (Wilder-style O(1) update; FMA-friendly)
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
+//! - **Decision log**: SIMD present but underperforms; Auto short-circuits to scalar. CUDA wrapper available; numerical outputs unchanged.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -187,8 +188,14 @@ pub enum CmoError {
     #[error("cmo: Not enough valid data: needed={needed}, valid={valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 
-    #[error("cmo: Invalid output length: expected={expected}, got={got}")]
-    InvalidOutputLen { expected: usize, got: usize },
+    #[error("cmo: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("cmo: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    #[error("cmo: Output length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
 }
 
 #[inline]
@@ -265,7 +272,7 @@ pub fn cmo_with_kernel(input: &CmoInput, kernel: Kernel) -> Result<CmoOutput, Cm
 pub fn cmo_into_slice(dst: &mut [f64], input: &CmoInput, kern: Kernel) -> Result<(), CmoError> {
     let (data, period, first, chosen) = cmo_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(CmoError::InvalidOutputLen {
+        return Err(CmoError::OutputLengthMismatch {
             expected: data.len(),
             got: dst.len(),
         });
@@ -288,7 +295,7 @@ pub fn cmo_into(input: &CmoInput, out: &mut [f64]) -> Result<(), CmoError> {
     let (data, period, first, chosen) = cmo_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(CmoError::InvalidOutputLen {
+        return Err(CmoError::OutputLengthMismatch {
             expected: data.len(),
             got: out.len(),
         });
@@ -629,12 +636,7 @@ pub fn cmo_batch_with_kernel(
         // SIMD batch underperforms/unused for CMO; default to scalar batch
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(CmoError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(CmoError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -727,7 +729,26 @@ fn expand_grid(r: &CmoBatchRange) -> Vec<CmoParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut vals = Vec::new();
+        if start < end {
+            let mut x = start;
+            while x <= end {
+                vals.push(x);
+                let next = x.saturating_add(step);
+                if next == x { break; }
+                x = next;
+            }
+        } else {
+            let mut x = start;
+            loop {
+                vals.push(x);
+                if x <= end { break; }
+                let next = x.saturating_sub(step);
+                if next >= x { break; }
+                x = next;
+            }
+        }
+        vals
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -764,9 +785,10 @@ fn cmo_batch_inner(
 ) -> Result<CmoBatchOutput, CmoError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(CmoError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(CmoError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
     let first = data
@@ -774,6 +796,11 @@ fn cmo_batch_inner(
         .position(|x| !x.is_nan())
         .ok_or(CmoError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let _ = combos.len().checked_mul(max_p).ok_or(CmoError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if data.len() - first <= max_p {
         return Err(CmoError::NotEnoughValidData {
             needed: max_p + 1,
@@ -782,6 +809,11 @@ fn cmo_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    let _expected = rows.checked_mul(cols).ok_or(CmoError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
     // Step 1: Allocate uninitialized matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -868,9 +900,10 @@ fn cmo_batch_inner_into(
 ) -> Result<Vec<CmoParams>, CmoError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(CmoError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(CmoError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
     let first = data
@@ -878,6 +911,11 @@ fn cmo_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(CmoError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let _ = combos.len().checked_mul(max_p).ok_or(CmoError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if data.len() - first <= max_p {
         return Err(CmoError::NotEnoughValidData {
             needed: max_p + 1,
@@ -885,6 +923,15 @@ fn cmo_batch_inner_into(
         });
     }
     let cols = data.len();
+    let rows = combos.len();
+    let expected = rows.checked_mul(cols).ok_or(CmoError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
+    if out.len() != expected {
+        return Err(CmoError::OutputLengthMismatch { expected, got: out.len() });
+    }
 
     // 2a) Treat caller buffer as MaybeUninit and initialize only warm prefixes.
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
@@ -952,12 +999,7 @@ pub fn cmo_batch_into_slice(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(CmoError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(CmoError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1218,8 +1260,16 @@ pub fn cmo_batch_py<'py>(
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "cmo_batch: size overflow for rows={} cols={}",
+                rows, cols
+            ))
+        })?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -1281,17 +1331,10 @@ pub fn cmo_cuda_batch_dev_py<'py>(
     })?;
 
     let dict = PyDict::new(py);
-    let (start, end, step) = period_range;
-    let mut periods: Vec<u64> = Vec::new();
-    if step == 0 {
-        periods.push(start as u64);
-    } else {
-        let mut p = start;
-        while p <= end {
-            periods.push(p as u64);
-            p = p.saturating_add(step);
-        }
-    }
+    let periods: Vec<u64> = expand_grid(&sweep)
+        .iter()
+        .map(|p| p.period.unwrap_or(14) as u64)
+        .collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
 
     Ok((DeviceArrayF32Py { inner }, dict))

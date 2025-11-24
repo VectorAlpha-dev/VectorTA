@@ -263,7 +263,11 @@ impl CudaAso {
         };
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let smem_bytes = (2 * max_period * std::mem::size_of::<f32>()) as u32;
+        let smem_bytes_usize = 2usize
+            .checked_mul(max_period)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or(CudaAsoError::InvalidInput("shared memory size overflow".into()))?;
+        let smem_bytes = smem_bytes_usize.min(u32::MAX as usize) as u32;
         // Opt-in to larger dynamic shared memory and set cache preference heuristics
         set_kernel_smem_prefs(&mut func, smem_bytes)?;
 
@@ -358,6 +362,23 @@ impl CudaAso {
             }
             first_valids[s] = fv;
         }
+        let elems = expected;
+        let in_bytes = 4usize
+            .checked_mul(elems)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
+        let first_bytes = elems
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
+        let out_bytes = 2usize
+            .checked_mul(elems)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(first_bytes)
+            .and_then(|a| a.checked_add(out_bytes))
+            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
         let d_open = DeviceBuffer::from_slice(open_tm_f32).map_err(CudaAsoError::Cuda)?;
         let d_high = DeviceBuffer::from_slice(high_tm_f32).map_err(CudaAsoError::Cuda)?;
@@ -417,8 +438,14 @@ impl CudaAso {
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         // shared: ring_b/e (2*period*f32) + dq_min_idx/dq_max_idx (2*period*i32)
-        let smem_bytes = (2 * period * std::mem::size_of::<f32>()
-            + 2 * period * std::mem::size_of::<i32>()) as u32;
+        let smem_bytes_usize = 2usize
+            .checked_mul(period)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .and_then(|x| x.checked_add(2usize.checked_mul(period)
+                .and_then(|y| y.checked_mul(std::mem::size_of::<i32>()))
+                .ok_or(CudaAsoError::InvalidInput("shared memory size overflow".into()))?))
+            .ok_or(CudaAsoError::InvalidInput("shared memory size overflow".into()))?;
+        let smem_bytes = smem_bytes_usize.min(u32::MAX as usize) as u32;
         set_kernel_smem_prefs(&mut func, smem_bytes)?;
         self.validate_launch((cols as u32, 1, 1), (block_x, 1, 1))?;
         unsafe {

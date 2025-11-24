@@ -20,6 +20,7 @@
 //! - Batch: Reuses precomputed stochastic per unique `fast_k` across rows to cut duplicate work.
 //! - Streaming: Implemented with monotonic deques (amortized O(1)); SMA/EMA smoothing matches scalar warmups
 //! - Memory: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
+//! - Decision log: SIMD delegated to scalar; CUDA wrapper enabled for FP32 batch and many-series paths with typed errors and Python CAI v3 + DLPack v1.x interop; numerical outputs match scalar paths.
 //!
 //! ## Binding Test Notes (2025-10-28)
 //! - WASM bindings: KDJ tests pass. Updated the KDJ WASM fast-API test to avoid aliasing outputs to input buffers; KDJ reads `high/low/close` across a rolling window, so aliasing outputs to inputs is not supported.
@@ -160,6 +161,8 @@ pub struct KdjOutput {
 
 #[derive(Debug, Error)]
 pub enum KdjError {
+    #[error("kdj: Input data slice is empty (empty data).")]
+    EmptyInputData,
     #[error("kdj: Empty data provided.")]
     EmptyData,
     #[error("kdj: Invalid period: period = {period}, data length = {data_len}")]
@@ -168,8 +171,14 @@ pub enum KdjError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("kdj: All values are NaN.")]
     AllValuesNaN,
+    #[error("kdj: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
     #[error("kdj: Buffer size mismatch: expected = {expected}, got = {got}")]
     BufferSizeMismatch { expected: usize, got: usize },
+    #[error("kdj: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("kdj: Invalid kernel type for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("kdj: Rolling error {0}")]
     RollingError(#[from] RollingError),
     #[error("kdj: MA error {0}")]
@@ -194,7 +203,7 @@ pub fn kdj_with_kernel(input: &KdjInput, kernel: Kernel) -> Result<KdjOutput, Kd
     };
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(KdjError::EmptyData);
+        return Err(KdjError::EmptyInputData);
     }
 
     let fast_k_period = input.get_fast_k_period();
@@ -291,7 +300,7 @@ pub fn kdj_with_kernel(input: &KdjInput, kernel: Kernel) -> Result<KdjOutput, Kd
 /// Writes K, D, J into caller-provided buffers without allocating.
 ///
 /// - Preserves NaN warmups exactly as the Vec-returning API.
-/// - Each output slice length must equal the input length; otherwise returns `BufferSizeMismatch`.
+/// - Each output slice length must equal the input length; otherwise returns `OutputLengthMismatch`.
 /// - Uses `Kernel::Auto` for runtime kernel selection (same as `kdj()`), and preserves all semantics.
 #[cfg(not(feature = "wasm"))]
 #[inline]
@@ -364,23 +373,23 @@ pub fn kdj_into_slices(
         KdjData::Slices { high, low, close } => (*high, *low, *close),
     };
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(KdjError::EmptyData);
+        return Err(KdjError::EmptyInputData);
     }
     let len = high.len();
     if k_out.len() != len {
-        return Err(KdjError::BufferSizeMismatch {
+        return Err(KdjError::OutputLengthMismatch {
             expected: len,
             got: k_out.len(),
         });
     }
     if d_out.len() != len {
-        return Err(KdjError::BufferSizeMismatch {
+        return Err(KdjError::OutputLengthMismatch {
             expected: len,
             got: d_out.len(),
         });
     }
     if j_out.len() != len {
-        return Err(KdjError::BufferSizeMismatch {
+        return Err(KdjError::OutputLengthMismatch {
             expected: len,
             got: j_out.len(),
         });
@@ -470,7 +479,7 @@ fn kdj_compute_into_scalar(
 
     let len = high.len();
     if len == 0 {
-        return Err(KdjError::EmptyData);
+        return Err(KdjError::EmptyInputData);
     }
 
     let stoch_warm = first + fast_k - 1;
@@ -1563,11 +1572,8 @@ pub fn kdj_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(KdjError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            });
+        other => {
+            return Err(KdjError::InvalidKernelForBatch(other));
         }
     };
 
@@ -1616,12 +1622,40 @@ impl KdjBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &KdjBatchRange) -> Vec<KdjParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &KdjBatchRange) -> Result<Vec<KdjParams>, KdjError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, KdjError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut v = Vec::new();
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                let next = cur.saturating_add(step);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+            }
+        } else {
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                let next = cur.saturating_sub(step);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+                if cur == 0 && end > 0 {
+                    break;
+                }
+            }
+        }
+        if v.is_empty() {
+            return Err(KdjError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
     fn axis_str((start, end, _): (String, String, String)) -> Vec<String> {
         if start == end {
@@ -1630,10 +1664,10 @@ fn expand_grid(r: &KdjBatchRange) -> Vec<KdjParams> {
             vec![start, end]
         }
     }
-    let fast_k_periods = axis_usize(r.fast_k_period);
-    let slow_k_periods = axis_usize(r.slow_k_period);
+    let fast_k_periods = axis_usize(r.fast_k_period)?;
+    let slow_k_periods = axis_usize(r.slow_k_period)?;
     let slow_k_ma_types = axis_str(r.slow_k_ma_type.clone());
-    let slow_d_periods = axis_usize(r.slow_d_period);
+    let slow_d_periods = axis_usize(r.slow_d_period)?;
     let slow_d_ma_types = axis_str(r.slow_d_ma_type.clone());
     let mut out = Vec::new();
     for &fkp in &fast_k_periods {
@@ -1653,7 +1687,7 @@ fn expand_grid(r: &KdjBatchRange) -> Vec<KdjParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1687,13 +1721,7 @@ fn kdj_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<KdjBatchOutput, KdjError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(KdjError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = high
         .iter()
         .zip(low.iter())
@@ -1714,6 +1742,13 @@ fn kdj_batch_inner(
     }
     let rows = combos.len();
     let cols = high.len();
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(KdjError::InvalidRange {
+            start: sweep.fast_k_period.0,
+            end: sweep.fast_k_period.1,
+            step: sweep.fast_k_period.2,
+        })?;
 
     // Use make_uninit_matrix instead of vec! for zero-copy
     let mut k_mu = make_uninit_matrix(rows, cols);
@@ -1727,10 +1762,18 @@ fn kdj_batch_inner(
             let fast_k = c.fast_k_period.unwrap();
             let slow_k = c.slow_k_period.unwrap();
             let slow_d = c.slow_d_period.unwrap();
-            // Warmup = first_valid + fast_k - 1 + slow_k - 1 + slow_d - 1
-            first + fast_k + slow_k + slow_d - 3
+            first
+                .checked_add(fast_k)
+                .and_then(|v| v.checked_add(slow_k))
+                .and_then(|v| v.checked_add(slow_d))
+                .and_then(|v| v.checked_sub(3))
+                .ok_or(KdjError::InvalidRange {
+                    start: sweep.fast_k_period.0,
+                    end: sweep.fast_k_period.1,
+                    step: sweep.fast_k_period.2,
+                })
         })
-        .collect();
+        .collect::<Result<Vec<usize>, KdjError>>()?;
 
     // Initialize prefixes with NaN
     init_matrix_prefixes(&mut k_mu, cols, &warmup_periods);

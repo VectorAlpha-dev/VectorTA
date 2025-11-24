@@ -20,8 +20,9 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -59,25 +60,31 @@ pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaTsfError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaTsfError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaTsfError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaTsfError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaTsfError {}
 
 pub struct CudaTsf {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaTsfPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -88,13 +95,10 @@ pub struct CudaTsf {
 
 impl CudaTsf {
     pub fn new(device_id: usize) -> Result<Self, CudaTsfError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/tsf_kernel.ptx"));
         let module = match Module::from_ptx(
@@ -107,18 +111,16 @@ impl CudaTsf {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaTsfError::Cuda(e.to_string()))?
-                }
+                Err(_) => Module::from_ptx(ptx, &[])?,
             },
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaTsfPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -135,9 +137,17 @@ impl CudaTsf {
     }
 
     pub fn synchronize(&self) -> Result<(), CudaTsfError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     #[inline]
@@ -204,10 +214,57 @@ impl CudaTsf {
     }
 
     #[inline]
-    fn grid_1d_for(&self, n: usize, block_x: u32) -> GridSize {
-        let bx = block_x.max(64).min(1024);
-        let grid_x = ((n as u32) + bx - 1) / bx;
-        (grid_x.max(self.sm_count as u32), 1, 1).into()
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaTsfError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaTsfError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
     }
 
     // --------------- Inputs (one-series × many-params) ---------------
@@ -238,8 +295,21 @@ impl CudaTsf {
 
         let combos = expand_grid_local(sweep);
         if combos.is_empty() {
+            let (start, end, step) = sweep.period;
+            return Err(CudaTsfError::InvalidInput(format!(
+                "invalid TSF batch range: start={}, end={}, step={}",
+                start, end, step
+            )));
+        }
+
+        let max_period = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        if combos.len().checked_mul(max_period).is_none() {
             return Err(CudaTsfError::InvalidInput(
-                "no parameter combinations".into(),
+                "combos * max_period overflow".into(),
             ));
         }
 
@@ -304,13 +374,17 @@ impl CudaTsf {
         let func = self
             .module
             .get_function("tsf_batch_f32")
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTsfError::MissingKernelSymbol { name: "tsf_batch_f32" })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
         };
-        let grid: GridSize = self.grid_1d_for(combos_len, block_x);
-        let block: BlockSize = (block_x, 1, 1).into();
+        let bx = block_x.max(64).min(1024);
+        let grid_x = ((combos_len as u32) + bx - 1) / bx;
+        let gx = grid_x.max(self.sm_count as u32);
+        self.validate_launch(gx, 1, 1, bx, 1, 1)?;
+        let grid: GridSize = (gx, 1, 1).into();
+        let block: BlockSize = (bx, 1, 1).into();
 
         unsafe {
             (*(self as *const _ as *mut CudaTsf)).last_batch =
@@ -339,9 +413,7 @@ impl CudaTsf {
                 &mut first_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -358,31 +430,40 @@ impl CudaTsf {
         inv_periods: &[f32],
     ) -> Result<DeviceArrayF32, CudaTsfError> {
         // VRAM estimate
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let params_bytes =
-            combos.len() * (std::mem::size_of::<i32>() + 3 * std::mem::size_of::<f32>());
-        let out_bytes = combos.len() * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaTsfError::InvalidInput("series_len * sizeof(f32) overflow".into()))?;
+        let per_combo_bytes = std::mem::size_of::<i32>() + 3 * std::mem::size_of::<f32>();
+        let params_bytes = combos
+            .len()
+            .checked_mul(per_combo_bytes)
+            .ok_or_else(|| CudaTsfError::InvalidInput("combos * param bytes overflow".into()))?;
+        let out_elems = combos
+            .len()
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaTsfError::InvalidInput("combos * series_len overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaTsfError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaTsfError::InvalidInput("required bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaTsfError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaTsfError::OutOfMemory { required, free, headroom });
+            } else {
+                return Err(CudaTsfError::InvalidInput("insufficient device memory".into()));
+            }
         }
 
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let d_periods =
-            DeviceBuffer::from_slice(periods_i32).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let d_x_sums =
-            DeviceBuffer::from_slice(x_sums).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let d_denoms =
-            DeviceBuffer::from_slice(denom_invs).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let d_inv_p =
-            DeviceBuffer::from_slice(inv_periods).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(combos.len() * series_len) }
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
+        let d_periods = DeviceBuffer::from_slice(periods_i32)?;
+        let d_x_sums = DeviceBuffer::from_slice(x_sums)?;
+        let d_denoms = DeviceBuffer::from_slice(denom_invs)?;
+        let d_inv_p = DeviceBuffer::from_slice(inv_periods)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems)? };
 
         self.launch_batch_kernel(
             &d_prices,
@@ -419,9 +500,7 @@ impl CudaTsf {
             &denom_invs,
             &inv_periods,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok((arr, combos))
     }
 
@@ -433,11 +512,15 @@ impl CudaTsf {
     ) -> Result<(usize, usize, Vec<TsfParams>), CudaTsfError> {
         let (combos, first_valid, len, periods_i32, x_sums, denom_invs, inv_periods) =
             Self::prepare_batch_inputs(data_f32, sweep)?;
-        if out.len() != combos.len() * len {
+        let expected = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaTsfError::InvalidInput("combos * len overflow".into()))?;
+        if out.len() != expected {
             return Err(CudaTsfError::InvalidInput(format!(
                 "out slice wrong length: got {}, expected {}",
                 out.len(),
-                combos.len() * len
+                expected
             )));
         }
         let dev = self.run_batch_kernel(
@@ -450,12 +533,8 @@ impl CudaTsf {
             &denom_invs,
             &inv_periods,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        dev.buf
-            .copy_to(out)
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
+        dev.buf.copy_to(out)?;
         Ok((dev.rows, dev.cols, combos))
     }
 
@@ -467,7 +546,10 @@ impl CudaTsf {
         rows: usize,
         params: &TsfParams,
     ) -> Result<(Vec<i32>, usize, f32, f32, f32), CudaTsfError> {
-        if data_tm_f32.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaTsfError::InvalidInput("cols * rows overflow".into()))?;
+        if data_tm_f32.len() != expected {
             return Err(CudaTsfError::InvalidInput("data_tm size mismatch".into()));
         }
         let period = params.period.unwrap_or(0);
@@ -526,13 +608,17 @@ impl CudaTsf {
         let func = self
             .module
             .get_function("tsf_many_series_one_param_f32")
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTsfError::MissingKernelSymbol { name: "tsf_many_series_one_param_f32" })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64).min(1024),
         };
-        let grid: GridSize = self.grid_1d_for(cols, block_x);
-        let block: BlockSize = (block_x, 1, 1).into();
+        let bx = block_x.max(64).min(1024);
+        let grid_x = ((cols as u32) + bx - 1) / bx;
+        let gx = grid_x.max(self.sm_count as u32);
+        self.validate_launch(gx, 1, 1, bx, 1, 1)?;
+        let grid: GridSize = (gx, 1, 1).into();
+        let block: BlockSize = (bx, 1, 1).into();
         unsafe {
             (*(self as *const _ as *mut CudaTsf)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -560,9 +646,7 @@ impl CudaTsf {
                 &mut inv_period_f as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -578,24 +662,33 @@ impl CudaTsf {
         denom_inv: f32,
         inv_period: f32,
     ) -> Result<DeviceArrayF32, CudaTsfError> {
-        let elems = cols * rows;
-        let prices_bytes = elems * std::mem::size_of::<f32>();
-        let first_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = elems * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_bytes + out_bytes;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaTsfError::InvalidInput("cols * rows overflow".into()))?;
+        let prices_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaTsfError::InvalidInput("prices bytes overflow".into()))?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaTsfError::InvalidInput("first_valid bytes overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaTsfError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(first_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaTsfError::InvalidInput("required bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaTsfError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaTsfError::OutOfMemory { required, free, headroom });
+            } else {
+                return Err(CudaTsfError::InvalidInput("insufficient device memory".into()));
+            }
         }
-        let d_prices =
-            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(first_valids)
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first = DeviceBuffer::from_slice(first_valids)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems)? };
 
         self.launch_many_series_kernel(
             &d_prices, &d_first, cols, rows, period, x_sum, denom_inv, inv_period, &mut d_out,
@@ -626,9 +719,7 @@ impl CudaTsf {
             denom_inv,
             inv_period,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(dev)
     }
 
@@ -640,10 +731,13 @@ impl CudaTsf {
         params: &TsfParams,
         out_tm: &mut [f32],
     ) -> Result<(), CudaTsfError> {
-        if out_tm.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaTsfError::InvalidInput("cols * rows overflow".into()))?;
+        if out_tm.len() != expected {
             return Err(CudaTsfError::InvalidInput(format!(
                 "output length mismatch: expected {}, got {}",
-                cols * rows,
+                expected,
                 out_tm.len()
             )));
         }
@@ -659,12 +753,9 @@ impl CudaTsf {
             denom_inv,
             inv_period,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        dev.buf
-            .copy_to(out_tm)
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        dev.buf.copy_to(out_tm)?;
+        Ok(())
     }
 }
 
@@ -694,21 +785,36 @@ pub mod benches {
 #[inline]
 fn expand_grid_local(r: &TsfBatchRange) -> Vec<TsfParams> {
     let (start, end, step) = r.period;
-    if step == 0 {
-        return vec![TsfParams {
-            period: Some(start),
-        }];
-    }
-    if start > end {
-        return Vec::new();
+    if step == 0 || start == end {
+        return vec![TsfParams { period: Some(start) }];
     }
     let mut v = Vec::new();
-    let mut p = start;
-    while p <= end {
-        v.push(TsfParams { period: Some(p) });
-        match p.checked_add(step) {
-            Some(nxt) => p = nxt,
-            None => break,
+    if start <= end {
+        let mut p = start;
+        loop {
+            if p > end {
+                break;
+            }
+            v.push(TsfParams { period: Some(p) });
+            match p.checked_add(step) {
+                Some(nxt) => p = nxt,
+                None => break,
+            }
+        }
+    } else {
+        let mut p = start;
+        loop {
+            if p < end {
+                break;
+            }
+            v.push(TsfParams { period: Some(p) });
+            if p == end {
+                break;
+            }
+            match p.checked_sub(step) {
+                Some(nxt) => p = nxt,
+                None => break,
+            }
         }
     }
     v

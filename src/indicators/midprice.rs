@@ -17,6 +17,7 @@
 //! - **Streaming**: O(1) amortized per update via two monotonic deques (max of highs, min of lows);
 //!   warmup matches batch semantics (first_valid_idx + period - 1). Accuracy unchanged.
 //! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **Decision log**: SIMD implemented but currently stubbed; no dedicated CUDA path; Python bindings are CPU-only and preserve numerical outputs.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -184,17 +185,23 @@ impl MidpriceBuilder {
 #[derive(Debug, Error)]
 pub enum MidpriceError {
     #[error("midprice: Empty data provided.")]
-    EmptyData,
+    EmptyInputData,
+    #[error("midprice: All values are NaN.")]
+    AllValuesNaN,
     #[error("midprice: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("midprice: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("midprice: All values are NaN.")]
-    AllValuesNaN,
+    #[error("midprice: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("midprice: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("midprice: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("midprice: Mismatched data length: high_len = {high_len}, low_len = {low_len}")]
     MismatchedDataLength { high_len: usize, low_len: usize },
-    #[error("midprice: Invalid output length: expected = {expected}, actual = {actual}")]
-    InvalidLength { expected: usize, actual: usize },
+    #[error("midprice: invalid input: {0}")]
+    InvalidInput(&'static str),
 }
 
 // --- Kernel/Dispatch API ---
@@ -221,7 +228,7 @@ pub fn midprice_with_kernel(
     };
 
     if high.is_empty() || low.is_empty() {
-        return Err(MidpriceError::EmptyData);
+        return Err(MidpriceError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MidpriceError::MismatchedDataLength {
@@ -294,9 +301,9 @@ pub fn midprice_into(input: &MidpriceInput, out: &mut [f64]) -> Result<(), Midpr
     };
 
     if out.len() != high.len() || high.len() != low.len() {
-        return Err(MidpriceError::InvalidLength {
+        return Err(MidpriceError::OutputLengthMismatch {
             expected: high.len(),
-            actual: out.len(),
+            got: out.len(),
         });
     }
 
@@ -567,12 +574,7 @@ pub fn midprice_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(MidpriceError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(MidpriceError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -597,27 +599,59 @@ impl MidpriceBatchOutput {
             .position(|c| c.period.unwrap_or(14) == p.period.unwrap_or(14))
     }
     pub fn values_for(&self, p: &MidpriceParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| {
-            let start = row * self.cols;
-            &self.values[start..start + self.cols]
+        self.row_for_params(p).and_then(|row| {
+            row.checked_mul(self.cols)
+                .map(|start| &self.values[start..start + self.cols])
         })
     }
 }
 
 #[inline(always)]
-fn expand_grid(r: &MidpriceBatchRange) -> Vec<MidpriceParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &MidpriceBatchRange) -> Result<Vec<MidpriceParams>, MidpriceError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, MidpriceError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut v = Vec::new();
+        let s = step.max(1);
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                let next = cur.saturating_add(s);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+            }
+        } else {
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                let next = cur.saturating_sub(s);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+                if cur == 0 && end > 0 {
+                    break;
+                }
+            }
+            v.retain(|&x| x >= end);
+        }
+        if v.is_empty() {
+            return Err(MidpriceError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(MidpriceParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -649,18 +683,15 @@ fn midprice_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<MidpriceParams>, MidpriceError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(MidpriceError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     if high.is_empty() || low.is_empty() {
-        return Err(MidpriceError::EmptyData);
+        return Err(MidpriceError::EmptyInputData);
     }
     if high.len() != low.len() {
-        return Err(MidpriceError::EmptyData);
+        return Err(MidpriceError::MismatchedDataLength {
+            high_len: high.len(),
+            low_len: low.len(),
+        });
     }
     let first = (0..high.len())
         .find(|&i| !high[i].is_nan() && !low[i].is_nan())
@@ -674,6 +705,15 @@ fn midprice_batch_inner_into(
     }
     let rows = combos.len();
     let cols = high.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(MidpriceError::InvalidInput("rows*cols overflow"))?;
+    if out.len() != expected {
+        return Err(MidpriceError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Note: output is already initialized with proper NaN prefixes by the caller
 
@@ -730,15 +770,9 @@ fn midprice_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<MidpriceBatchOutput, MidpriceError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(MidpriceError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     if high.is_empty() || low.is_empty() {
-        return Err(MidpriceError::EmptyData);
+        return Err(MidpriceError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MidpriceError::MismatchedDataLength {
@@ -760,6 +794,9 @@ fn midprice_batch_inner(
 
     let rows = combos.len();
     let cols = high.len();
+    let total_cells = rows
+        .checked_mul(cols)
+        .ok_or(MidpriceError::InvalidInput("rows*cols overflow"))?;
 
     // 1) allocate uninit
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -780,7 +817,7 @@ fn midprice_batch_inner(
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
-            guard.len(),
+            total_cells,
             guard.capacity(),
         )
     };
@@ -927,10 +964,13 @@ pub fn midprice_batch_py<'py>(
         .find(|&i| !high_slice[i].is_nan() && !low_slice[i].is_nan())
         .ok_or_else(|| PyValueError::new_err("midprice: All values are NaN"))?;
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("midprice: rows*cols overflow"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // warm NaN prefixes in-place (no extra buffer)
@@ -941,7 +981,7 @@ pub fn midprice_batch_py<'py>(
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(
             slice_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
-            rows * cols,
+            total,
         )
     };
     init_matrix_prefixes(out_mu, cols, &warm);
@@ -1012,7 +1052,7 @@ pub fn midprice_into_slice(
 ) -> Result<(), MidpriceError> {
     // Validate inputs
     if high.is_empty() || low.is_empty() {
-        return Err(MidpriceError::EmptyData);
+        return Err(MidpriceError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MidpriceError::MismatchedDataLength {
@@ -1021,9 +1061,9 @@ pub fn midprice_into_slice(
         });
     }
     if dst.len() != high.len() {
-        return Err(MidpriceError::InvalidLength {
+        return Err(MidpriceError::OutputLengthMismatch {
             expected: high.len(),
-            actual: dst.len(),
+            got: dst.len(),
         });
     }
 
@@ -1180,18 +1220,12 @@ pub fn midprice_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<J
     let output = midprice_batch_inner(high, low, &range, Kernel::Auto, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Convert output to flat array with period values
-    let mut periods = Vec::new();
-    let (start, end, step) = config.period_range;
-    if step == 0 || start == end {
-        periods.push(start);
-    } else {
-        let mut current = start;
-        while current <= end {
-            periods.push(current);
-            current += step;
-        }
-    }
+    // Convert output to flat array with period values based on resolved combos
+    let periods: Vec<usize> = output
+        .combos
+        .iter()
+        .map(|p| p.period.unwrap_or(14))
+        .collect();
 
     let js_output = MidpriceBatchJsOutput {
         values: output.values,
@@ -1221,9 +1255,12 @@ pub fn midprice_batch_into(
         let range = MidpriceBatchRange {
             period: (period_start, period_end, period_step),
         };
-        let combos = expand_grid(&range);
+        let combos = expand_grid(&range)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
-        let total = rows * len;
+        let total = rows
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("rows*len overflow"))?;
 
         let first = (0..len)
             .find(|&i| !high[i].is_nan() && !low[i].is_nan())

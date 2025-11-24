@@ -32,26 +32,35 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaOttError {
+    #[error("CUDA error: {0}")]
     Cuda(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
-    Unsupported(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
 
-impl fmt::Display for CudaOttError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaOttError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaOttError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-            CudaOttError::Unsupported(e) => write!(f, "Unsupported: {}", e),
-        }
+impl From<cust::error::CudaError> for CudaOttError {
+    fn from(e: cust::error::CudaError) -> Self {
+        CudaOttError::Cuda(e.to_string())
     }
 }
-impl std::error::Error for CudaOttError {}
 
 #[derive(Clone, Copy, Debug)]
 pub struct CudaOttPolicy {
@@ -81,7 +90,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaOtt {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaOttPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -92,10 +101,9 @@ pub struct CudaOtt {
 
 impl CudaOtt {
     pub fn new(device_id: usize) -> Result<Self, CudaOttError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaOttError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaOttError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ott_kernel.ptx"));
         let jit_opts = &[
@@ -104,16 +112,14 @@ impl CudaOtt {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaOttPolicy::default(),
             last_batch: None,
@@ -124,9 +130,18 @@ impl CudaOtt {
     }
 
     pub fn synchronize(&self) -> Result<(), CudaOttError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     #[inline]
@@ -143,15 +158,24 @@ impl CudaOtt {
     }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaOttError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
+            let required = required_bytes
+                .checked_add(headroom_bytes)
+                .ok_or_else(|| CudaOttError::InvalidInput("byte size overflow".into()))?;
+            if required > free {
+                return Err(CudaOttError::OutOfMemory {
+                    required,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
+            return Ok(());
         }
+        Ok(())
     }
 
     #[inline]
@@ -231,45 +255,49 @@ impl CudaOtt {
             return Err(CudaOttError::InvalidInput("all values are NaN".into()));
         }
 
-        let combos = expand_combos(sweep);
-        if combos.is_empty() {
-            return Err(CudaOttError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
-
-        // VRAM est.
+        let combos = expand_combos(sweep)?;
         let rows = combos.len();
-        let bytes = cols * std::mem::size_of::<f32>() + rows * cols * std::mem::size_of::<f32>();
+        let sz_f32 = std::mem::size_of::<f32>();
+        let out_elems = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaOttError::InvalidInput("rows * cols overflow".into()))?;
+        let prices_bytes = cols
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaOttError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaOttError::InvalidInput("byte size overflow".into()))?;
+        let bytes = prices_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaOttError::InvalidInput("byte size overflow".into()))?;
         let headroom = env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(64 * 1024 * 1024);
-        if !Self::will_fit(bytes, headroom) {
+        Self::will_fit(bytes, headroom)?;
+
+        if cols > i32::MAX as usize {
             return Err(CudaOttError::InvalidInput(
-                "insufficient free VRAM for OTT batch".into(),
+                "series length exceeds kernel limits".into(),
             ));
         }
 
         // Stage prices once
-        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized(cols) }
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
-        unsafe { d_prices.async_copy_from(prices_f32, &self.stream) }
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized(cols) }?;
+        unsafe { d_prices.async_copy_from(prices_f32, &self.stream) }?;
 
         // Allocate output and prefill qNaN
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(rows * cols) }
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
-        self.memset_nan32_async(d_out.as_device_ptr().as_raw() as u64, rows * cols)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
+        self.memset_nan32_async(d_out.as_device_ptr().as_raw() as u64, out_elems)?;
 
         // Get kernel functions
         let mut f_var: Option<Function> = self.module.get_function("ott_from_var_batch_f32").ok();
-        let mut f_apply: Option<Function> = self.module.get_function("ott_apply_single_f32").ok();
-        if f_apply.is_none() {
-            return Err(CudaOttError::Cuda(
-                "missing ott_apply_single_f32 symbol".into(),
-            ));
-        }
+        let mut f_apply = self
+            .module
+            .get_function("ott_apply_single_f32")
+            .map_err(|_| CudaOttError::MissingKernelSymbol {
+                name: "ott_apply_single_f32",
+            })?;
 
         // Reusable 1-element device buffers for var path
         let mut d_period = unsafe { DeviceBuffer::<i32>::uninitialized(1) }
@@ -284,7 +312,11 @@ impl CudaOtt {
             let period = p.period.unwrap_or(2);
             let percent = p.percent.unwrap_or(1.4) as f32;
             let ma_type = p.ma_type.as_deref().unwrap_or("VAR");
-            let out_row_ptr = unsafe { d_out.as_device_ptr().offset((row_idx * cols) as isize) };
+            let row_offset = row_idx
+                .checked_mul(cols)
+                .ok_or_else(|| CudaOttError::InvalidInput("row offset overflow".into()))?;
+            let out_row_ptr =
+                unsafe { d_out.as_device_ptr().offset(row_offset as isize) };
 
             if ma_type.eq_ignore_ascii_case("VAR") {
                 // Prefer integrated VAR path if available
@@ -322,16 +354,14 @@ impl CudaOtt {
                         .ma_to_device("VAR", CudaMaData::SliceF32(prices_f32), period)
                         .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
                     self.launch_apply_single(
-                        &mut f_apply.as_mut().unwrap(),
+                        &mut f_apply,
                         &dev.buf,
                         cols,
                         percent,
                         out_row_ptr.as_raw(),
                     )?;
                     // Ensure kernel completion before dropping dev buffer
-                    self.stream
-                        .synchronize()
-                        .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                    self.stream.synchronize()?;
                 }
             } else {
                 // Generic path: compute MA then apply OTT
@@ -339,21 +369,17 @@ impl CudaOtt {
                     .ma_to_device(ma_type, CudaMaData::SliceF32(prices_f32), period)
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
                 self.launch_apply_single(
-                    &mut f_apply.as_mut().unwrap(),
+                    &mut f_apply,
                     &dev.buf,
                     cols,
                     percent,
                     out_row_ptr.as_raw(),
                 )?;
-                self.stream
-                    .synchronize()
-                    .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                self.stream.synchronize()?;
             }
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -382,9 +408,7 @@ impl CudaOtt {
             ];
             let grid: GridSize = (1, 1, 1).into();
             let block: BlockSize = (1, 1, 1).into();
-            self.stream
-                .launch(func, grid, block, 0, args)
-                .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+            self.stream.launch(func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -399,28 +423,37 @@ impl CudaOtt {
         if cols == 0 || rows == 0 {
             return Err(CudaOttError::InvalidInput("empty input".into()));
         }
-        if data_tm_f32.len() != cols * rows {
+        let expected_elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaOttError::InvalidInput("rows * cols overflow".into()))?;
+        if data_tm_f32.len() != expected_elems {
             return Err(CudaOttError::InvalidInput("shape mismatch".into()));
+        }
+        if cols > i32::MAX as usize || rows > i32::MAX as usize {
+            return Err(CudaOttError::InvalidInput(
+                "rows/cols exceed kernel launch limits".into(),
+            ));
         }
         let period = params.period.unwrap_or(2);
         let percent = params.percent.unwrap_or(1.4) as f32;
         let ma_type = params.ma_type.as_deref().unwrap_or("VAR");
 
         // Output buffer
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
-        self.memset_nan32_async(d_out.as_device_ptr().as_raw() as u64, cols * rows)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(expected_elems) }?;
+        self
+            .memset_nan32_async(d_out.as_device_ptr().as_raw() as u64, expected_elems)?;
 
         if ma_type.eq_ignore_ascii_case("VAR") {
             // VAR-integrated path
-            let mut d_in = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
-                .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
-            unsafe { d_in.async_copy_from(data_tm_f32, &self.stream) }
-                .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+            let mut d_in =
+                unsafe { DeviceBuffer::<f32>::uninitialized(expected_elems) }?;
+            unsafe { d_in.async_copy_from(data_tm_f32, &self.stream) }?;
             let mut func = self
                 .module
                 .get_function("ott_from_var_many_series_one_param_f32")
-                .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaOttError::MissingKernelSymbol {
+                    name: "ott_from_var_many_series_one_param_f32",
+                })?;
             unsafe {
                 let mut in_ptr = d_in.as_device_ptr().as_raw();
                 let mut cols_i = cols as i32;
@@ -438,9 +471,7 @@ impl CudaOtt {
                 ];
                 let grid: GridSize = ((rows as u32).max(1), 1, 1).into();
                 let block: BlockSize = (1, 1, 1).into();
-                self.stream
-                    .launch(&mut func, grid, block, 0, args)
-                    .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                self.stream.launch(&mut func, grid, block, 0, args)?;
             }
         } else {
             // Compute MA on device with the appropriate wrapper, many-series time-major
@@ -490,7 +521,7 @@ impl CudaOtt {
                     .map(|h| super::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
             } else if ma_type.eq_ignore_ascii_case("VWMA") {
-                return Err(CudaOttError::Unsupported(
+                return Err(CudaOttError::InvalidInput(
                     "vwma requires candles+volume; not supported in this path".into(),
                 ));
             } else if ma_type.eq_ignore_ascii_case("VPWMA") {
@@ -514,11 +545,11 @@ impl CudaOtt {
                     .nama_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, &p)
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
             } else if ma_type.eq_ignore_ascii_case("VWMA") || ma_type.eq_ignore_ascii_case("VWAP") {
-                return Err(CudaOttError::Unsupported(
+                return Err(CudaOttError::InvalidInput(
                     "volume/anchor-based MA not supported in ott_many_series path".into(),
                 ));
             } else {
-                return Err(CudaOttError::Unsupported(format!(
+                return Err(CudaOttError::InvalidInput(format!(
                     "unsupported ma_type '{}' for OTT CUDA many-series",
                     ma_type
                 )));
@@ -528,7 +559,9 @@ impl CudaOtt {
             let mut func = self
                 .module
                 .get_function("ott_many_series_one_param_f32")
-                .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaOttError::MissingKernelSymbol {
+                    name: "ott_many_series_one_param_f32",
+                })?;
             unsafe {
                 let mut in_ptr = ma_dev.buf.as_device_ptr().as_raw();
                 let mut cols_i = cols as i32;
@@ -544,15 +577,11 @@ impl CudaOtt {
                 ];
                 let grid: GridSize = ((rows as u32).max(1), 1, 1).into();
                 let block: BlockSize = (1, 1, 1).into();
-                self.stream
-                    .launch(&mut func, grid, block, 0, args)
-                    .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                self.stream.launch(&mut func, grid, block, 0, args)?;
             }
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -589,41 +618,81 @@ pub mod benches {
     pub use ott_benches::bench_profiles;
 }
 
-fn expand_combos(range: &OttBatchRange) -> Vec<OttParams> {
-    fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
+fn expand_combos(range: &OttBatchRange) -> Result<Vec<OttParams>, CudaOttError> {
+    fn axis_usize(axis: (usize, usize, usize)) -> Result<Vec<usize>, CudaOttError> {
         let (start, end, step) = axis;
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
+        }
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
         }
         let mut out = Vec::new();
-        let mut v = start;
-        while v <= end {
-            out.push(v);
-            v = v.saturating_add(step);
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            out.push(x as usize);
+            x -= st;
         }
-        out
+        if out.is_empty() {
+            return Err(CudaOttError::InvalidInput(format!(
+                "Invalid range: start={}, end={}, step={}",
+                start, end, step
+            )));
+        }
+        Ok(out)
     }
-    fn axis_f64(axis: (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64(axis: (f64, f64, f64)) -> Result<Vec<f64>, CudaOttError> {
         let (start, end, step) = axis;
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let mut out = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                out.push(x);
+                x += st;
+            }
+            if out.is_empty() {
+                return Err(CudaOttError::InvalidInput(format!(
+                    "Invalid range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            return Ok(out);
         }
         let mut out = Vec::new();
-        let mut v = start;
-        while v <= end + 1e-12 {
-            out.push(v);
-            v += step;
+        let mut x = start;
+        let st = step.abs();
+        while x + 1e-12 >= end {
+            out.push(x);
+            x -= st;
         }
-        out
+        if out.is_empty() {
+            return Err(CudaOttError::InvalidInput(format!(
+                "Invalid range: start={}, end={}, step={}",
+                start, end, step
+            )));
+        }
+        Ok(out)
     }
-    let periods = axis_usize(range.period);
-    let percents = axis_f64(range.percent);
+
+    let periods = axis_usize(range.period)?;
+    let percents = axis_f64(range.percent)?;
     let types = if range.ma_types.is_empty() {
         vec!["VAR".to_string()]
     } else {
         range.ma_types.clone()
     };
-    let mut combos = Vec::with_capacity(periods.len() * percents.len() * types.len());
+    let cap = periods
+        .len()
+        .checked_mul(percents.len())
+        .and_then(|x| x.checked_mul(types.len()))
+        .ok_or_else(|| CudaOttError::InvalidInput("range size overflow".into()))?;
+    let mut combos = Vec::with_capacity(cap);
     for &p in &periods {
         for &q in &percents {
             for t in &types {
@@ -635,5 +704,10 @@ fn expand_combos(range: &OttBatchRange) -> Vec<OttParams> {
             }
         }
     }
-    combos
+    if combos.is_empty() {
+        return Err(CudaOttError::InvalidInput(
+            "no parameter combinations".into(),
+        ));
+    }
+    Ok(combos)
 }

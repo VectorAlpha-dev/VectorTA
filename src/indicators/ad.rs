@@ -12,10 +12,11 @@
 //! ## Developer Notes
 //! - **SIMD status**: AVX2/AVX512 single-series kernels implemented; row dispatch in batch wired to SIMD.
 //!   Preserves streaming accumulation order (no FMA) for tight numeric parity.
-//! - **Streaming update**: O(1) - simple cumulative sum calculation
-//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
-//! - **Decision note**: SIMD shows >5% speedup at 100k on x86_64 when enabled; scalar remains the
-//!   reference path and is fully safe. Runtime selection short-circuits to scalar where SIMD is unavailable.
+//! - **CUDA status**: Single-series and many-series time-major kernels implemented; Python exposes
+//!   CUDA Array Interface v3 and DLPack v1.x handles with primary-context-safe VRAM lifetimes.
+//! - **Streaming update**: O(1) cumulative sum; no warmup NaNs and scalar path is the reference.
+//! - **Memory posture**: Uses zero-copy helpers (alloc_with_nan_prefix/make_uninit_matrix); CUDA wrappers
+//!   apply checked arithmetic and VRAM preflight (mem_get_info) without changing numerical outputs.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaAd;
@@ -147,7 +148,7 @@ pub enum AdError {
     #[error("ad: candle field error: {0}")]
     CandleFieldError(String),
     #[error(
-        "ad: input slice length mismatch: high={high_len}, low={low_len}, close={close_len}, volume={volume_len}"
+        "ad: Data length mismatch: high={high_len}, low={low_len}, close={close_len}, volume={volume_len}"
     )]
     DataLengthMismatch {
         high_len: usize,
@@ -155,6 +156,8 @@ pub enum AdError {
         close_len: usize,
         volume_len: usize,
     },
+    #[error("ad: invalid period: period={period}, data_len={data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
     #[error("ad: output length mismatch: expected={expected}, got={got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("ad: not enough valid data: needed={needed}, valid={valid}")]
@@ -571,19 +574,22 @@ fn ad_batch_inner(
 ) -> Result<AdBatchOutput, AdError> {
     let rows = data.highs.len();
     let cols = if rows > 0 { data.highs[0].len() } else { 0 };
+    let len = rows
+        .checked_mul(cols)
+        .ok_or_else(|| AdError::InvalidInput("rows*cols overflow".into()))?;
 
     // Use make_uninit_matrix for better poison detection during debugging
     // AD has no warmup period, so we don't need init_matrix_prefixes
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let values = unsafe {
         let ptr = buf_mu.as_mut_ptr() as *mut f64;
-        let slice = std::slice::from_raw_parts_mut(ptr, rows * cols);
+        let slice = std::slice::from_raw_parts_mut(ptr, len);
 
         // Compute into the buffer
         ad_batch_inner_into(data, kern, parallel, slice)?;
 
         // Convert to Vec for output
-        Vec::from_raw_parts(ptr, rows * cols, rows * cols)
+        Vec::from_raw_parts(ptr, len, len)
     };
     std::mem::forget(buf_mu);
 
@@ -837,14 +843,24 @@ impl AdDeviceArrayF32Py {
         (2, self.device_id as i32) // 2 == kDLCUDA
     }
 
-    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<&pyo3::types::PyAny>,
+        _dl_device: Option<&pyo3::types::PyAny>,
+        _copy: Option<&pyo3::types::PyAny>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+
         // Move ownership of the device buffer into the DLManagedTensor capsule
         let buf = self
             .buf
             .take()
             .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
 
-        // Minimal DLPack FFI structs
+        // Minimal DLPack FFI structs (v1.x + legacy)
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
         #[repr(C)]
@@ -863,81 +879,235 @@ impl AdDeviceArrayF32Py {
         struct DLManagedTensor {
             dl_tensor: DLTensor,
             manager_ctx: *mut std::ffi::c_void,
-            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLVersion {
+            major: i32,
+            minor: i32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            dl_managed_tensor: DLManagedTensor,
+            version: DLVersion,
         }
 
-        // Keep buffer/context and shape/strides alive until consumer calls deleter.
+        // RAII manager to keep context + buffer alive
         struct Manager {
             _ctx: Arc<Context>,
             _buf: DeviceBuffer<f32>,
-            _shape: Box<[i64; 2]>,
-            _strides: Box<[i64; 2]>,
+        }
+        struct HolderLegacy {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            mgr: Manager,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            mgr: Manager,
         }
 
-        // Deleter to reclaim Manager + managed tensor
-        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
-            if p.is_null() { return; }
-            // Reclaim allocation of the managed tensor and its manager
-            let mt: Box<DLManagedTensor> = Box::from_raw(p);
-            let mgr_ptr = mt.manager_ctx as *mut Manager;
-            if !mgr_ptr.is_null() {
-                let _mgr: Box<Manager> = Box::from_raw(mgr_ptr);
-                drop(_mgr);
+        unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
             }
-            drop(mt);
+            let holder = (*p).manager_ctx as *mut HolderLegacy;
+            if !holder.is_null() {
+                drop(Box::from_raw(holder));
+            }
+            drop(Box::from_raw(p));
         }
 
-        // Capsule destructor calls the deleter if consumer didn't rename to used_dltensor
-        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
+        unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).dl_managed_tensor.manager_ctx as *mut HolderV1;
+            if !holder.is_null() {
+                drop(Box::from_raw(holder));
+            }
+            drop(Box::from_raw(p));
+        }
+
+        // Capsule destructor: call deleter only for still-active capsules and rename to used_*.
+        unsafe extern "C" fn cap_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensor;
             if !ptr.is_null() {
-                let mt = ptr as *mut DLManagedTensor;
-                if let Some(del) = (*mt).deleter { del(mt) }
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyo3::ffi::PyCapsule_SetName(
+                    capsule,
+                    used.as_ptr() as *const c_char,
+                );
+            }
+        }
+
+        unsafe extern "C" fn cap_destructor_v1(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                let mt = &mut (*ptr).dl_managed_tensor;
+                if let Some(del) = mt.deleter {
+                    del(mt);
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_SetName(
+                    capsule,
+                    used.as_ptr() as *const c_char,
+                );
             }
         }
 
         let rows = self.rows as i64;
         let cols = self.cols as i64;
-        let shape = Box::new([rows, cols]);
-        let strides = Box::new([cols, 1]); // element strides (row-major)
+        let data_ptr = if self.rows == 0 || self.cols == 0 {
+            std::ptr::null_mut()
+        } else {
+            buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+        };
 
-        let data_ptr = buf.as_device_ptr().as_raw() as *mut std::ffi::c_void;
-        let mgr = Box::new(Manager {
+        // Decide between legacy and v1.x based on max_version (None → legacy).
+        let want_v1 = if let Some(v) = max_version {
+            v.getattr("__iter")
+                .ok()
+                .and_then(|_| v.extract::<(i32, i32)>().ok())
+                .map(|(maj, _)| maj >= 1)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let mgr = Manager {
             _ctx: self._ctx.clone(),
             _buf: buf,
-            _shape: shape,
-            _strides: strides,
-        });
-
-        // Pointers that live until deleter runs
-        let mgr_ptr = Box::into_raw(mgr);
-        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
-        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
-
-        let mt = Box::new(DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
-                ndim: 2,
-                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                shape: shape_ptr,
-                strides: strides_ptr,
-                byte_offset: 0,
-            },
-            manager_ctx: mgr_ptr as *mut std::ffi::c_void,
-            deleter: Some(dlpack_deleter),
-        });
-
-        // Wrap in a PyCapsule named "dltensor"
-        let raw_capsule = unsafe {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut std::ffi::c_void, name.as_ptr(), Some(capsule_destructor))
         };
-        if raw_capsule.is_null() {
-            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    dl_managed_tensor: DLManagedTensor {
+                        dl_tensor: DLTensor {
+                            data: data_ptr,
+                            device: DLDevice {
+                                device_type: 2,
+                                device_id: self.device_id as i32,
+                            },
+                            ndim: 2,
+                            dtype: DLDataType {
+                                code: 2,
+                                bits: 32,
+                                lanes: 1,
+                            },
+                            shape: std::ptr::null_mut(),
+                            strides: std::ptr::null_mut(),
+                            byte_offset: 0,
+                        },
+                        manager_ctx: std::ptr::null_mut(),
+                        deleter: Some(|mt| {
+                            if !mt.is_null() {
+                                // Reconstruct outer DLManagedTensorVersioned pointer
+                                let outer = (mt as *mut u8).offset(
+                                    -(std::mem::size_of::<DLVersion>() as isize),
+                                ) as *mut DLManagedTensorVersioned;
+                                deleter_v1(outer);
+                            }
+                        }),
+                    },
+                    version: DLVersion { major: 1, minor: 0 },
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                mgr,
+            });
+            holder
+                .managed
+                .dl_managed_tensor
+                .dl_tensor
+                .shape = holder.shape.as_mut_ptr();
+            holder
+                .managed
+                .dl_managed_tensor
+                .dl_tensor
+                .strides = holder.strides.as_mut_ptr();
+            holder
+                .managed
+                .dl_managed_tensor
+                .manager_ctx = &mut *holder as *mut HolderV1 as *mut std::ffi::c_void;
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_v1),
+                )
+            };
+            if cap.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        } else {
+            let mut holder = Box::new(HolderLegacy {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: self.device_id as i32,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_legacy),
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                mgr,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder
+                .managed
+                .dl_tensor
+                .strides = holder.strides.as_mut_ptr();
+            holder
+                .managed
+                .manager_ctx = &mut *holder as *mut HolderLegacy as *mut std::ffi::c_void;
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_legacy),
+                )
+            };
+            if cap.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
     }
 }
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1216,7 +1386,10 @@ pub fn ad_batch_py<'py>(
         .collect();
 
     let cols = if rows > 0 { high_slices[0].len() } else { 0 };
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow in ad_batch"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let kern = crate::utilities::kernel_validation::validate_kernel(kernel, true)?;
@@ -1275,10 +1448,13 @@ pub fn ad_batch_js(
     }
 
     let cols = highs_flat.len() / rows;
-    if highs_flat.len() != rows * cols
-        || lows_flat.len() != rows * cols
-        || closes_flat.len() != rows * cols
-        || volumes_flat.len() != rows * cols
+    let check = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+    if highs_flat.len() != check
+        || lows_flat.len() != check
+        || closes_flat.len() != check
+        || volumes_flat.len() != check
     {
         return Err(JsValue::from_str(
             "Input arrays must have rows*cols elements",
@@ -1415,7 +1591,9 @@ pub fn ad_batch_unified_js(
         return Err(JsValue::from_str("empty inputs"));
     }
     let cols = highs_flat.len() / rows;
-    let check = rows * cols;
+    let check = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
     if lows_flat.len() != check || closes_flat.len() != check || volumes_flat.len() != check {
         return Err(JsValue::from_str(
             "Input arrays must have rows*cols elements",

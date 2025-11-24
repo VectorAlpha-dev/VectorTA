@@ -577,7 +577,10 @@ impl CudaSqwma {
                 "matrix dimensions must be positive".into(),
             ));
         }
-        if prices_tm_f32.len() != cols * rows {
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("cols * rows overflow".into()))?;
+        if prices_tm_f32.len() != elems {
             return Err(CudaSqwmaError::InvalidInput("matrix shape mismatch".into()));
         }
         if period <= 1 {

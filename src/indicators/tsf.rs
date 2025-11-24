@@ -3,6 +3,9 @@
 //! TSF calculates linear regression over a rolling window and projects the next value,
 //! providing a smoothed forecast of price direction based on recent trend.
 //!
+//! ## Decision Log
+//! - SIMD implemented (AVX2/AVX512) but `Auto` short-circuits to scalar due to underwhelming gains; CUDA wrapper enabled for batch and many-series paths and returns VRAM handles with CAI v3 + DLPack v1.x interop; scalar outputs remain the reference and are unchanged.
+//!
 //! ## Parameters
 //! - **period**: Linear regression window size. Defaults to 14.
 //!
@@ -193,10 +196,14 @@ pub enum TsfError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("tsf: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("tsf: Mismatched output length: expected = {expected}, actual = {actual}")]
-    MismatchedOutputLen { expected: usize, actual: usize },
+    #[error("tsf: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
     #[error("tsf: Period must be at least 2 for linear regression, got {period}")]
     PeriodTooSmall { period: usize },
+    #[error("tsf: Invalid batch range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("tsf: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -245,9 +252,9 @@ pub fn tsf_into(input: &TsfInput, out: &mut [f64]) -> Result<(), TsfError> {
         });
     }
     if out.len() != len {
-        return Err(TsfError::MismatchedOutputLen {
+        return Err(TsfError::OutputLengthMismatch {
             expected: len,
-            actual: out.len(),
+            got: out.len(),
         });
     }
 
@@ -366,9 +373,9 @@ pub fn tsf_into_slice(dst: &mut [f64], input: &TsfInput, kern: Kernel) -> Result
         });
     }
     if dst.len() != data.len() {
-        return Err(TsfError::MismatchedOutputLen {
+        return Err(TsfError::OutputLengthMismatch {
             expected: data.len(),
-            actual: dst.len(),
+            got: dst.len(),
         });
     }
 
@@ -1027,12 +1034,7 @@ pub fn tsf_batch_with_kernel(
         // Short-circuit to ScalarBatch for TSF: SIMD underperforms for the sequential recurrence.
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(TsfError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(TsfError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -1072,7 +1074,33 @@ fn expand_grid(r: &TsfBatchRange) -> Vec<TsfParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut out = Vec::new();
+        if start <= end {
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(next) => v = next,
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            loop {
+                if v < end {
+                    break;
+                }
+                out.push(v);
+                if v == end {
+                    break;
+                }
+                match v.checked_sub(step) {
+                    Some(next) => v = next,
+                    None => break,
+                }
+            }
+        }
+        out
     }
 
     let periods = axis_usize(r.period);
@@ -1112,10 +1140,8 @@ fn tsf_batch_inner(
     // Build the list of TsfParams to run over
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(TsfError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (start, end, step) = sweep.period;
+        return Err(TsfError::InvalidRange { start, end, step });
     }
 
     // Find first non‐NaN index
@@ -1125,6 +1151,10 @@ fn tsf_batch_inner(
         .ok_or(TsfError::AllValuesNaN)?;
     // Compute the maximum period required by any combo
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if combos.len().checked_mul(max_p).is_none() {
+        let (start, end, step) = sweep.period;
+        return Err(TsfError::InvalidRange { start, end, step });
+    }
     if data.len() - first < max_p {
         return Err(TsfError::NotEnoughValidData {
             needed: max_p,
@@ -1134,6 +1164,10 @@ fn tsf_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    if rows.checked_mul(cols).is_none() {
+        let (start, end, step) = sweep.period;
+        return Err(TsfError::InvalidRange { start, end, step });
+    }
     let mut sum_xs = vec![0.0; rows];
     let mut divisors = vec![0.0; rows];
 
@@ -1232,10 +1266,8 @@ fn tsf_batch_inner_into(
     // Build combos
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(TsfError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (start, end, step) = sweep.period;
+        return Err(TsfError::InvalidRange { start, end, step });
     }
 
     // First valid index and max window
@@ -1244,6 +1276,10 @@ fn tsf_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(TsfError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if combos.len().checked_mul(max_p).is_none() {
+        let (start, end, step) = sweep.period;
+        return Err(TsfError::InvalidRange { start, end, step });
+    }
     if data.len() - first < max_p {
         return Err(TsfError::NotEnoughValidData {
             needed: max_p,
@@ -1253,6 +1289,16 @@ fn tsf_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    let total = rows.checked_mul(cols).ok_or_else(|| {
+        let (start, end, step) = sweep.period;
+        TsfError::InvalidRange { start, end, step }
+    })?;
+    if output.len() != total {
+        return Err(TsfError::OutputLengthMismatch {
+            expected: total,
+            got: output.len(),
+        });
+    }
 
     // Precompute ∑x and divisor per row
     let mut sum_xs = vec![0.0; rows];
@@ -1771,7 +1817,10 @@ pub fn tsf_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("tsf_batch_py: rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -2024,7 +2073,11 @@ pub fn tsf_batch_into(
             return Err(JsValue::from_str("No valid parameter combinations"));
         }
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("tsf_batch_into: rows*cols overflow"))?;
+
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         let kernel = detect_best_batch_kernel();
         let simd = match kernel {
@@ -2156,9 +2209,9 @@ mod tests {
         if let Err(e) = res {
             assert!(matches!(
                 e,
-                TsfError::MismatchedOutputLen {
+                TsfError::OutputLengthMismatch {
                     expected: 5,
-                    actual: 10
+                    got: 10
                 }
             ));
         }

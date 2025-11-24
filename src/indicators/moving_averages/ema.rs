@@ -99,18 +99,22 @@ impl EmaDeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        d.set_item("version", 3)?; // producer stream synchronized in wrapper
+        d.set_item("version", 3)?; // producer sync in wrapper; omit 'stream'
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
-    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
-        // Move DeviceBuffer into DLManagedTensor so consumer owns it
-        let buf = self
-            .buf
-            .take()
-            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<&pyo3::types::PyAny>,
+        _dl_device: Option<&pyo3::types::PyAny>,
+        _copy: Option<&pyo3::types::PyAny>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
 
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
@@ -127,67 +131,170 @@ impl EmaDeviceArrayF32Py {
             byte_offset: u64,
         }
         #[repr(C)]
-        struct DLManagedTensor {
-            dl_tensor: DLTensor,
-            manager_ctx: *mut c_void,
-            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        struct DLManagedTensor { dl_tensor: DLTensor, manager_ctx: *mut c_void, deleter: Option<extern "C" fn(*mut DLManagedTensor)> }
+        #[repr(C)]
+        struct DLVersion { major: i32, minor: i32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned { dl_managed_tensor: DLManagedTensor, version: DLVersion }
+
+        struct HolderLegacy {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            buf: DeviceBuffer<f32>,
+            retained: cust::sys::CUcontext,
+            device_id: i32,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            buf: DeviceBuffer<f32>,
+            retained: cust::sys::CUcontext,
+            device_id: i32,
         }
 
-        struct Manager {
-            _ctx: Arc<Context>,
-            _buf: DeviceBuffer<f32>,
-            _shape: Box<[i64; 2]>,
-            _strides: Box<[i64; 2]>,
-        }
-
-        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+        unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
             if p.is_null() { return; }
-            let mt = Box::from_raw(p);
-            let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
-            drop(mt);
+            let holder = (*p).manager_ctx as *mut HolderLegacy;
+            if !holder.is_null() {
+                let ctx = (*holder).retained;
+                if !ctx.is_null() {
+                    let _ = cust::sys::cuCtxPushCurrent(ctx);
+                    let dev = (*holder).device_id;
+                    drop(Box::from_raw(holder));
+                    let mut _out: cust::sys::CUcontext = std::ptr::null_mut();
+                    let _ = cust::sys::cuCtxPopCurrent(&mut _out);
+                    let _ = cust::sys::cuDevicePrimaryCtxRelease(dev);
+                }
+            }
+            drop(Box::from_raw(p));
         }
 
-        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
+        unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() { return; }
+            let holder = (*p).dl_managed_tensor.manager_ctx as *mut HolderV1;
+            if !holder.is_null() {
+                let ctx = (*holder).retained;
+                if !ctx.is_null() {
+                    let _ = cust::sys::cuCtxPushCurrent(ctx);
+                    let dev = (*holder).device_id;
+                    drop(Box::from_raw(holder));
+                    let mut _out: cust::sys::CUcontext = std::ptr::null_mut();
+                    let _ = cust::sys::cuCtxPopCurrent(&mut _out);
+                    let _ = cust::sys::cuDevicePrimaryCtxRelease(dev);
+                }
+            }
+            drop(Box::from_raw(p));
+        }
+
+        unsafe extern "C" fn cap_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char) as *mut DLManagedTensor;
             if !ptr.is_null() {
-                let mt = ptr as *mut DLManagedTensor;
-                if let Some(del) = (*mt).deleter { del(mt) }
+                if let Some(del) = (*ptr).deleter { del(ptr); }
+                let used = b"used_dltensor\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+        unsafe extern "C" fn cap_destructor_v1(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char) as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                let mt = &mut (*ptr).dl_managed_tensor;
+                if let Some(del) = mt.deleter { del(mt); }
+                let used = b"used_dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
             }
         }
 
+        // Move buffer into capsule-managed holder
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        let alloc_dev = self.device_id as i32;
+        let mut retained: cust::sys::CUcontext = std::ptr::null_mut();
+        unsafe { let _ = cust::sys::cuDevicePrimaryCtxRetain(&mut retained, alloc_dev); }
+
         let rows = self.rows as i64;
         let cols = self.cols as i64;
-        let shape = Box::new([rows, cols]);
-        let strides = Box::new([cols, 1]); // element strides, row-major
-        let data_ptr = buf.as_device_ptr().as_raw() as *mut c_void;
-        let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
-        let mgr_ptr = Box::into_raw(mgr);
-        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
-        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
+        let data_ptr: *mut c_void = if self.rows == 0 || self.cols == 0 { std::ptr::null_mut() } else { buf.as_device_ptr().as_raw() as *mut c_void };
 
-        let mt = Box::new(DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
-                ndim: 2,
-                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                shape: shape_ptr,
-                strides: strides_ptr,
-                byte_offset: 0,
-            },
-            manager_ctx: mgr_ptr as *mut c_void,
-            deleter: Some(dlpack_deleter),
-        });
+        let want_v1 = if let Some(v) = max_version {
+            v.getattr("__iter").ok().and_then(|_| v.extract::<(i32,i32)>().ok()).map(|(maj, _)| maj >= 1).unwrap_or(false)
+        } else { false };
 
-        let raw_capsule = unsafe {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
-        };
-        if raw_capsule.is_null() {
-            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    dl_managed_tensor: DLManagedTensor {
+                        dl_tensor: DLTensor {
+                            data: data_ptr,
+                            device: DLDevice { device_type: 2, device_id: alloc_dev },
+                            ndim: 2,
+                            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                            shape: std::ptr::null_mut(),
+                            strides: std::ptr::null_mut(),
+                            byte_offset: 0,
+                        },
+                        manager_ctx: std::ptr::null_mut(),
+                        deleter: Some(|mt| {
+                            if !mt.is_null() {
+                                let outer = (mt as *mut u8).offset(-(std::mem::size_of::<DLVersion>() as isize)) as *mut DLManagedTensorVersioned;
+                                deleter_v1(outer);
+                            }
+                        }),
+                    },
+                    version: DLVersion { major: 1, minor: 0 },
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                buf,
+                retained,
+                device_id: alloc_dev,
+            });
+            holder.managed.dl_managed_tensor.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_managed_tensor.dl_tensor.strides = holder.strides.as_mut_ptr();
+            holder.managed.dl_managed_tensor.manager_ctx = &mut *holder as *mut HolderV1 as *mut c_void;
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let cap = unsafe { pyo3::ffi::PyCapsule_New(mt_ptr as *mut c_void, name.as_ptr() as *const c_char, Some(cap_destructor_v1)) };
+            if cap.is_null() { return Err(PyValueError::new_err("failed to create DLPack capsule")); }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        } else {
+            let mut holder = Box::new(HolderLegacy {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice { device_type: 2, device_id: alloc_dev },
+                        ndim: 2,
+                        dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_legacy),
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                buf,
+                retained,
+                device_id: alloc_dev,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            holder.managed.manager_ctx = &mut *holder as *mut HolderLegacy as *mut c_void;
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let cap = unsafe { pyo3::ffi::PyCapsule_New(mt_ptr as *mut c_void, name.as_ptr() as *const c_char, Some(cap_destructor_legacy)) };
+            if cap.is_null() { return Err(PyValueError::new_err("failed to create DLPack capsule")); }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
     }
 }
 impl<'a> AsRef<[f64]> for EmaInput<'a> {
@@ -778,7 +885,7 @@ impl EmaBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &EmaBatchRange) -> Vec<EmaParams> {
+fn expand_grid(r: &EmaBatchRange) -> Result<Vec<EmaParams>, EmaError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         // Zero step or equal bounds => singleton (stable semantics for existing tests)
         if step == 0 || start == end {
@@ -789,12 +896,14 @@ fn expand_grid(r: &EmaBatchRange) -> Vec<EmaParams> {
     }
 
     let periods = axis_usize(r.period);
-
+    if periods.is_empty() {
+        return Err(EmaError::InvalidRange { start: r.period.0, end: r.period.1, step: r.period.2 });
+    }
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(EmaParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -822,7 +931,7 @@ fn ema_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<EmaBatchOutput, EmaError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let rows = combos.len();
     let cols = data.len();
 
@@ -876,13 +985,7 @@ fn ema_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<EmaParams>, EmaError> {
     // ------------ boiler-plate unchanged -----------------------------------
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(EmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     if data.is_empty() {
         return Err(EmaError::EmptyInputData);
@@ -1923,7 +2026,7 @@ pub fn ema_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2139,7 +2242,8 @@ pub fn ema_batch_metadata_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let mut metadata = Vec::with_capacity(combos.len());
 
     for combo in combos {
@@ -2242,7 +2346,8 @@ pub fn ema_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = len;
         let elems = rows

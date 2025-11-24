@@ -14,12 +14,9 @@
 //! - **`Err(DevStopError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **Decision**: Single-series SIMD offers little gain due to strong recurrences; we route AVX2/AVX512 to the fused scalar classic path when applicable (devtype=stddev + SMA/EMA), otherwise fall back to the generic path.
-//! - **AVX2/AVX512 kernels**: Route to fused scalar for classic SMA/EMA; otherwise delegate to `devstop_into_slice`.
-//! - **Streaming**: Enabled with O(1) per-tick updates for stddev+SMA/EMA; devtype 1/2 use σ-based O(1) approximations in streaming.
-//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
-//! - **Batch operations**: ✅ Implemented with parallel processing support
-//! - **Row-specific batch**: Implemented for classic stddev + SMA/EMA using shared precompute of r and prefix sums; other devtypes fall back to generic path.
+//! - **Decision**: Single-series SIMD shows limited benefit; AVX2/AVX512 dispatch to the fused scalar classic path for stddev+SMA/EMA and otherwise use the generic scalar path for correctness and simplicity.
+//! - **CUDA**: FP32 batch/many-series kernels are enabled for classic stddev+SMA/EMA with stream-synchronized launches; host wrappers enforce VRAM checks and typed errors without changing numerical outputs.
+//! - **Streaming / batch**: Streaming uses O(1) per-tick updates; batch paths share precomputed range statistics across parameter rows and reuse scalar semantics (warmup, NaN handling) exactly.
 
 use crate::indicators::deviation::{deviation, DevInput, DevParams};
 use crate::indicators::moving_averages::ma::{ma, MaData};
@@ -249,12 +246,22 @@ impl DevStopBuilder {
 
 #[derive(Debug, Error)]
 pub enum DevStopError {
+    #[error("devstop: empty input data")] 
+    EmptyInputData,
     #[error("devstop: All values are NaN for high or low.")]
     AllValuesNaN,
     #[error("devstop: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("devstop: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("devstop: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("devstop: Invalid devtype: {devtype}")]
+    InvalidDevtype { devtype: usize },
+    #[error("devstop: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("devstop: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
     #[error("devstop: Calculation error: {0}")]
     DevStopCalculation(String),
 }
@@ -313,7 +320,7 @@ fn devstop_prepare<'a>(
     };
     let len = high.len();
     if len == 0 || low.len() == 0 {
-        return Err(DevStopError::AllValuesNaN);
+        return Err(DevStopError::EmptyInputData);
     }
     let fh = high.iter().position(|x| !x.is_nan());
     let fl = low.iter().position(|x| !x.is_nan());
@@ -339,10 +346,7 @@ fn devstop_prepare<'a>(
     let mult = input.get_mult();
     let devtype = input.get_devtype();
     if devtype > 2 {
-        return Err(DevStopError::DevStopCalculation(format!(
-            "invalid devtype {}",
-            devtype
-        )));
+        return Err(DevStopError::InvalidDevtype { devtype });
     }
     let is_long = input.get_direction().eq_ignore_ascii_case("long");
     let ma_type = input.get_ma_type();
@@ -378,10 +382,7 @@ pub fn devstop_into_slice(
 
     // Quick validation of dst length
     if dst.len() != len {
-        return Err(DevStopError::InvalidPeriod {
-            period: dst.len(),
-            data_len: len,
-        });
+        return Err(DevStopError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
     // Find first valid index
@@ -542,7 +543,7 @@ pub fn devstop_with_kernel(
     };
     let len = high.len();
     if len == 0 || low.len() == 0 {
-        return Err(DevStopError::AllValuesNaN);
+        return Err(DevStopError::EmptyInputData);
     }
     let fh = high.iter().position(|x| !x.is_nan());
     let fl = low.iter().position(|x| !x.is_nan());
@@ -705,10 +706,7 @@ pub fn devstop_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(DevStopError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(DevStopError::InvalidKernelForBatch(kernel));
         }
     };
     let simd = match chosen {
@@ -823,30 +821,84 @@ impl DevStopBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid_devstop(r: &DevStopBatchRange) -> Vec<DevStopParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid_devstop(r: &DevStopBatchRange) -> Result<Vec<DevStopParams>, DevStopError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, DevStopError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
+        }
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(DevStopError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, DevStopError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(DevStopError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
         }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
+        let st = step.abs();
+        while x + 1e-12 >= end {
             v.push(x);
-            x += step;
+            x -= st;
         }
-        v
+        if v.is_empty() {
+            return Err(DevStopError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let mults = axis_f64(r.mult);
-    let devtypes = axis_usize(r.devtype);
 
-    let mut out = Vec::with_capacity(periods.len() * mults.len() * devtypes.len());
+    let periods = axis_usize(r.period)?;
+    let mults = axis_f64(r.mult)?;
+    let devtypes = axis_usize(r.devtype)?;
+
+    let cap = periods
+        .len()
+        .checked_mul(mults.len())
+        .and_then(|x| x.checked_mul(devtypes.len()))
+        .ok_or_else(|| DevStopError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &m in &mults {
             for &d in &devtypes {
@@ -860,7 +912,7 @@ fn expand_grid_devstop(r: &DevStopBatchRange) -> Vec<DevStopParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -890,11 +942,12 @@ fn devstop_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<DevStopBatchOutput, DevStopError> {
-    let combos = expand_grid_devstop(sweep);
+    let combos = expand_grid_devstop(sweep)?;
     if combos.is_empty() {
-        return Err(DevStopError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(DevStopError::InvalidRange {
+            start: format!("period={:?}", sweep.period),
+            end: format!("mult={:?}", sweep.mult),
+            step: format!("devtype={:?}", sweep.devtype),
         });
     }
 
@@ -911,15 +964,29 @@ fn devstop_batch_inner(
     // Check we have enough data for the largest period's warmup
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     let max_warmup = devstop_warmup(first, max_p);
+    let needed = max_warmup
+        .checked_add(1)
+        .ok_or_else(|| DevStopError::InvalidRange {
+            start: "warmup".into(),
+            end: "overflow".into(),
+            step: "+1".into(),
+        })?;
     if high.len() <= max_warmup || low.len() <= max_warmup {
         return Err(DevStopError::NotEnoughValidData {
-            needed: max_warmup + 1,
+            needed,
             valid: high.len().min(low.len()),
         });
     }
 
     let rows = combos.len();
     let cols = high.len();
+    if rows.checked_mul(cols).is_none() { 
+        return Err(DevStopError::InvalidRange { 
+            start: format!("period={:?}", sweep.period), 
+            end: format!("mult={:?}", sweep.mult), 
+            step: format!("devtype={:?}", sweep.devtype), 
+        }); 
+    }
 
     // Uninitialized matrix, then warm prefixes per row
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1697,11 +1764,15 @@ pub fn devstop_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    let combos = expand_grid_devstop(&sweep);
+    let combos = expand_grid_devstop(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = h.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     py.allow_threads(|| {
