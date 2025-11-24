@@ -16,6 +16,7 @@
 //! - Streaming: O(1) with direct calculation `(high - low) / volume`.
 //! - Memory: Uses zero-copy helpers (`alloc_with_nan_prefix`, `make_uninit_matrix`, `init_matrix_prefixes`).
 //! - Row-specific batch: not attempted (no reusable cross-row precompute for `(high - low) / volume`).
+//! - CUDA: wrapper enabled; VRAM handles carry primary-context guards and device_id, and Python interop exposes CUDA Array Interface v3 + DLPack v1.x capsules.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -47,7 +48,11 @@ use wasm_bindgen::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaMarketefi};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum MarketefiData<'a> {
@@ -160,14 +165,22 @@ impl MarketefiBuilder {
 
 #[derive(Debug, Error)]
 pub enum MarketefiError {
-    #[error("marketefi: Empty data provided.")]
-    EmptyData,
-    #[error("marketefi: Mismatched data length among high, low, and volume.")]
-    MismatchedDataLength,
+    #[error("marketefi: Input data slice is empty.")]
+    EmptyInputData,
     #[error("marketefi: All values are NaN.")]
     AllValuesNaN,
-    #[error("marketefi: Not enough valid data to calculate.")]
-    NotEnoughValidData,
+    #[error("marketefi: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("marketefi: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("marketefi: Mismatched data length among high, low, and volume.")]
+    MismatchedDataLength,
+    #[error("marketefi: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("marketefi: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("marketefi: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("marketefi: Zero or NaN volume at a valid index.")]
     ZeroOrNaNVolume,
 }
@@ -204,7 +217,7 @@ fn marketefi_prepare<'a>(
     };
 
     if high.is_empty() || low.is_empty() || volume.is_empty() {
-        return Err(MarketefiError::EmptyData);
+        return Err(MarketefiError::EmptyInputData);
     }
     if high.len() != low.len() || low.len() != volume.len() {
         return Err(MarketefiError::MismatchedDataLength);
@@ -256,7 +269,10 @@ pub fn marketefi_into_slice(
 ) -> Result<(), MarketefiError> {
     let (h, l, v, first, chosen) = marketefi_prepare(input, kern)?;
     if dst.len() != h.len() {
-        return Err(MarketefiError::MismatchedDataLength);
+        return Err(MarketefiError::OutputLengthMismatch {
+            expected: h.len(),
+            got: dst.len(),
+        });
     }
 
     marketefi_compute_into(h, l, v, first, chosen, dst);
@@ -266,7 +282,10 @@ pub fn marketefi_into_slice(
 
     let valid = dst[first..].iter().any(|x| !x.is_nan());
     if !valid {
-        return Err(MarketefiError::NotEnoughValidData);
+        return Err(MarketefiError::NotEnoughValidData {
+            needed: 1,
+            valid: 0,
+        });
     }
     if dst[first..].iter().all(|&x| x.is_nan()) {
         return Err(MarketefiError::ZeroOrNaNVolume);
@@ -285,7 +304,10 @@ pub fn marketefi_with_kernel(
     // Validation identical to your current checks
     let valid = out[first..].iter().any(|x| !x.is_nan());
     if !valid {
-        return Err(MarketefiError::NotEnoughValidData);
+        return Err(MarketefiError::NotEnoughValidData {
+            needed: 1,
+            valid: 0,
+        });
     }
     if out[first..].iter().all(|&x| x.is_nan()) {
         return Err(MarketefiError::ZeroOrNaNVolume);
@@ -297,14 +319,17 @@ pub fn marketefi_with_kernel(
 /// Writes Market Facilitation Index (marketefi) values into a caller-provided buffer without allocations.
 ///
 /// - Preserves NaN warmups exactly as the Vec-returning API (`marketefi` / `marketefi_with_kernel`).
-/// - Output slice length must equal the input length; returns `MismatchedDataLength` on mismatch.
+/// - Output slice length must equal the input length; returns `OutputLengthMismatch` on mismatch.
 /// - Uses `Kernel::Auto` for runtime kernel selection.
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn marketefi_into(input: &MarketefiInput, out: &mut [f64]) -> Result<(), MarketefiError> {
     let (h, l, v, first, chosen) = marketefi_prepare(input, Kernel::Auto)?;
     if out.len() != h.len() {
-        return Err(MarketefiError::MismatchedDataLength);
+        return Err(MarketefiError::OutputLengthMismatch {
+            expected: h.len(),
+            got: out.len(),
+        });
     }
 
     // Prefill warmup prefix with the same quiet-NaN pattern used by `alloc_with_nan_prefix`.
@@ -317,7 +342,10 @@ pub fn marketefi_into(input: &MarketefiInput, out: &mut [f64]) -> Result<(), Mar
     // Keep validation semantics identical to the Vec API.
     let valid = out[first..].iter().any(|x| !x.is_nan());
     if !valid {
-        return Err(MarketefiError::NotEnoughValidData);
+        return Err(MarketefiError::NotEnoughValidData {
+            needed: 1,
+            valid: 0,
+        });
     }
     if out[first..].iter().all(|&x| x.is_nan()) {
         return Err(MarketefiError::ZeroOrNaNVolume);
@@ -610,7 +638,7 @@ pub fn marketefi_batch_with_kernel(
     let k = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         x if x.is_batch() => x,
-        _ => Kernel::ScalarBatch,
+        other => return Err(MarketefiError::InvalidKernelForBatch(other)),
     };
     marketefi_batch_par_slice(high, low, volume, k)
 }
@@ -653,7 +681,7 @@ fn marketefi_batch_inner_into(
     out: &mut [f64],
 ) -> Result<(), MarketefiError> {
     if high.is_empty() || low.is_empty() || volume.is_empty() {
-        return Err(MarketefiError::EmptyData);
+        return Err(MarketefiError::EmptyInputData);
     }
     if high.len() != low.len() || low.len() != volume.len() {
         return Err(MarketefiError::MismatchedDataLength);
@@ -706,6 +734,13 @@ fn marketefi_batch_inner(
     // one configuration (no params)
     let combos = expand_grid(&MarketefiBatchRange::default());
     let rows = combos.len(); // == 1
+
+    // Guard against overflow in rows * cols even though rows == 1 today.
+    rows.checked_mul(cols).ok_or_else(|| MarketefiError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols overflow".to_string(),
+    })?;
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
@@ -861,6 +896,273 @@ impl MarketefiStreamPy {
     }
 }
 
+// ====== PYTHON CUDA VRAM HANDLE (CAI v3 + DLPack v1.x) ======
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "MarketefiDeviceArrayF32", unsendable)]
+pub struct MarketefiDeviceArrayF32Py {
+    pub(crate) inner: Option<DeviceArrayF32>,
+    _ctx_guard: Arc<Context>,
+    device_id: u32,
+    producer_stream: usize,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl MarketefiDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let itemsize = std::mem::size_of::<f32>();
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (inner.cols * itemsize, itemsize))?;
+        let ptr_val = inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
+        d.set_item("version", 3)?;
+        // Stream key omitted: kernels synchronize before returning the handle.
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CStr, CString};
+
+        // Interpret producer stream per Array API semantics but we fully
+        // synchronize before returning, so this is currently a no-op.
+        let _ = stream;
+        // Validate device request and copy semantics.
+        if let Some((dt, did)) = dl_device {
+            if dt != 2 || did != self.device_id as i32 {
+                return Err(PyValueError::new_err("dlpack device mismatch for marketefi buffer"));
+            }
+        }
+        if copy.unwrap_or(false) {
+            return Err(PyValueError::new_err(
+                "copy=True not implemented for marketefi __dlpack__",
+            ));
+        }
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _arr: DeviceArrayF32,
+            _ctx_guard: Arc<Context>,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ = Box::from_raw(ctx_ptr);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            if capsule.is_null() {
+                return;
+            }
+            let name_ptr = pyffi::PyCapsule_GetName(capsule);
+            if name_ptr.is_null() {
+                return;
+            }
+            let name = CStr::from_ptr(name_ptr);
+            if let Ok(s) = name.to_str() {
+                if s == "dltensor" {
+                    let ptr = pyffi::PyCapsule_GetPointer(capsule, name_ptr);
+                    if ptr.is_null() {
+                        return;
+                    }
+                    let mt = ptr as *mut DLManagedTensor;
+                    if let Some(del) = unsafe { (*mt).deleter } {
+                        unsafe { del(mt) };
+                    }
+                } else if s == "dltensor_versioned" {
+                    let ptr = pyffi::PyCapsule_GetPointer(capsule, name_ptr);
+                    if ptr.is_null() {
+                        return;
+                    }
+                    let ver = ptr as *mut DLManagedTensorVersioned;
+                    let manager = unsafe { (*ver).manager };
+                    if !manager.is_null() {
+                        if let Some(del) = unsafe { (*manager).deleter } {
+                            unsafe { del(manager) };
+                        }
+                    }
+                    unsafe {
+                        let _ = Box::from_raw(ver);
+                    }
+                }
+            }
+        }
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let total = (rows as i128) * (cols as i128);
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _ctx_guard: self._ctx_guard.clone(),
+            _arr: inner,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr = if total == 0 {
+            std::ptr::null_mut()
+        } else {
+            unsafe {
+                (*(mgr_ptr as *mut ManagerCtx))
+                    ._arr
+                    .buf
+                    .as_device_ptr()
+                    .as_raw() as *mut c_void
+            }
+        };
+
+        let dl = DLTensor {
+            data: data_ptr,
+            device: DLDevice {
+                device_type: 2,
+                device_id: self.device_id as i32,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2, // kDLFloat
+                bits: 32,
+                lanes: 1,
+            },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: dl,
+            manager_ctx: mgr_ptr,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(
+                    ptr,
+                    name.as_ptr(),
+                    Some(capsule_destructor),
+                );
+                if cap.is_null() {
+                    let ver = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    if !ver.manager.is_null() {
+                        let mt = Box::from_raw(ver.manager);
+                        if !mt.manager_ctx.is_null() {
+                            let _ = Box::from_raw(mt.manager_ctx as *mut ManagerCtx);
+                        }
+                    }
+                    return Err(PyValueError::new_err("failed to create DLPack capsule"));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let mt = Box::from_raw(ptr as *mut DLManagedTensor);
+                    if !mt.manager_ctx.is_null() {
+                        let _ = Box::from_raw(mt.manager_ctx as *mut ManagerCtx);
+                    }
+                    return Err(PyValueError::new_err("failed to create DLPack capsule"));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl MarketefiDeviceArrayF32Py {
+    fn new_from_rust(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self {
+            inner: Some(inner),
+            _ctx_guard: ctx_guard,
+            device_id,
+            producer_stream: 0,
+        }
+    }
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "marketefi_batch")]
 #[pyo3(signature = (high, low, volume, kernel=None))]
@@ -906,7 +1208,7 @@ pub fn marketefi_cuda_batch_dev_py(
     low_f32: numpy::PyReadonlyArray1<'_, f32>,
     volume_f32: numpy::PyReadonlyArray1<'_, f32>,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<MarketefiDeviceArrayF32Py> {
     use numpy::PyArrayMethods;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -919,13 +1221,19 @@ pub fn marketefi_cuda_batch_dev_py(
             "high, low, volume must have same length",
         ));
     }
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_guard, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaMarketefi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.marketefi_batch_dev(h, l, v)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
+        let inner = cuda
+            .marketefi_batch_dev(h, l, v)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((inner, ctx, dev))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(MarketefiDeviceArrayF32Py::new_from_rust(
+        inner, ctx_guard, dev_id,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -937,7 +1245,7 @@ pub fn marketefi_cuda_many_series_one_param_dev_py(
     low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     volume_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<MarketefiDeviceArrayF32Py> {
     use numpy::{PyArrayMethods, PyUntypedArrayMethods};
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -955,13 +1263,19 @@ pub fn marketefi_cuda_many_series_one_param_dev_py(
     }
     let rows = shp_h[0];
     let cols = shp_h[1];
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_guard, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaMarketefi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.marketefi_many_series_one_param_time_major_dev(h, l, v, cols, rows)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
+        let inner = cuda
+            .marketefi_many_series_one_param_time_major_dev(h, l, v, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((inner, ctx, dev))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(MarketefiDeviceArrayF32Py::new_from_rust(
+        inner, ctx_guard, dev_id,
+    ))
 }
 
 // Unit tests

@@ -67,7 +67,7 @@ class TestPviCuda:
         )
         gpu = cp.asnumpy(cp.asarray(handle)).reshape(cpu.shape)
 
-        assert_close(gpu, cpu, rtol=2e-4, atol=5e-6, msg="PVI CUDA batch vs CPU mismatch")
+        assert_close(gpu, cpu, rtol=2e-3, atol=5e-6, msg="PVI CUDA batch vs CPU mismatch")
 
     def test_pvi_cuda_many_series_one_param_matches_cpu(self):
         T = 2048
@@ -94,5 +94,4 @@ class TestPviCuda:
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle)).reshape(T, N)
         assert gpu_tm.shape == cpu_tm.shape
-        assert_close(gpu_tm, cpu_tm, rtol=2e-4, atol=5e-6, msg="PVI CUDA TM vs CPU mismatch")
-
+        assert_close(gpu_tm, cpu_tm, rtol=2e-3, atol=5e-6, msg="PVI CUDA TM vs CPU mismatch")

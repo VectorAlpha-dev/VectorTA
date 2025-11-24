@@ -246,6 +246,18 @@ pub enum CoraWaveError {
 
     #[error("cora_wave: Invalid r_multi: {value}")]
     InvalidRMulti { value: f64 },
+
+    #[error("cora_wave: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("cora_wave: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
+
+    #[error("cora_wave: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    #[error("cora_wave: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -286,10 +298,7 @@ pub fn cora_wave_into(input: &CoraWaveInput, out: &mut [f64]) -> Result<(), Cora
         cora_wave_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(CoraWaveError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
-        });
+        return Err(CoraWaveError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
 
     // Prefill warmup prefix with quiet-NaNs to match alloc_with_nan_prefix behavior
@@ -323,10 +332,7 @@ pub fn cora_wave_into_slice(
 ) -> Result<(), CoraWaveError> {
     let (data, weights, inv_wsum, smooth_period, first, chosen) = cora_wave_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(CoraWaveError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
-        });
+        return Err(CoraWaveError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
     cora_wave_compute_into(data, &weights, inv_wsum, smooth_period, first, chosen, dst);
 
@@ -1060,42 +1066,81 @@ impl CoraWaveBatchOutput {
 }
 
 #[inline(always)]
-fn axis_usize((s, e, t): (usize, usize, usize)) -> Vec<usize> {
+fn axis_usize((s, e, t): (usize, usize, usize)) -> Result<Vec<usize>, CoraWaveError> {
     if t == 0 || s == e {
-        vec![s]
-    } else {
-        (s..=e).step_by(t).collect()
+        return Ok(vec![s]);
     }
+    let mut v = Vec::new();
+    if s < e {
+        v = (s..=e).step_by(t).collect();
+    } else if s > e {
+        // reversed bounds: descend by t
+        let mut x = s;
+        loop {
+            v.push(x);
+            if x <= e { break; }
+            if x < t { break; }
+            let next = x - t;
+            if next < e { break; }
+            x = next;
+        }
+        // ensure last element is within bounds
+        if *v.last().unwrap_or(&s) != e && s >= e {
+            // if we didn't land exactly on e, it's still a valid expansion as long as >= e
+        }
+    }
+    if v.is_empty() {
+        return Err(CoraWaveError::InvalidRange { start: s as f64, end: e as f64, step: t as f64 });
+    }
+    Ok(v)
 }
 #[inline(always)]
-fn axis_f64((s, e, t): (f64, f64, f64)) -> Vec<f64> {
+fn axis_f64((s, e, t): (f64, f64, f64)) -> Result<Vec<f64>, CoraWaveError> {
     if t.abs() < 1e-12 || (s - e).abs() < 1e-12 {
-        vec![s]
-    } else {
-        let mut v = Vec::new();
+        return Ok(vec![s]);
+    }
+    let step = t.abs();
+    let mut v = Vec::new();
+    if s <= e {
         let mut x = s;
         while x <= e + 1e-12 {
             v.push(x);
-            x += t;
+            x += step;
         }
-        v
+    } else {
+        let mut x = s;
+        while x >= e - 1e-12 {
+            v.push(x);
+            x -= step;
+        }
     }
+    if v.is_empty() {
+        return Err(CoraWaveError::InvalidRange { start: s, end: e, step: t });
+    }
+    Ok(v)
 }
 #[inline(always)]
-fn expand_grid_cw(r: &CoraWaveBatchRange) -> Vec<CoraWaveParams> {
-    let periods = axis_usize(r.period);
-    let mults = axis_f64(r.r_multi);
-    let mut out = Vec::with_capacity(periods.len() * mults.len());
+fn expand_grid_cw(r: &CoraWaveBatchRange) -> Result<Vec<CoraWaveParams>, CoraWaveError> {
+    let periods = axis_usize(r.period)?;
+    let mults = axis_f64(r.r_multi)?;
+    if periods.is_empty() || mults.is_empty() {
+        return Err(CoraWaveError::InvalidRange {
+            start: r.period.0 as f64,
+            end: r.period.1 as f64,
+            step: r.period.2 as f64,
+        });
+    }
+    let cap = periods
+        .len()
+        .checked_mul(mults.len())
+        .ok_or_else(|| CoraWaveError::InvalidInput("periods*mults overflow".into()))?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &m in &mults {
-            out.push(CoraWaveParams {
-                period: Some(p),
-                r_multi: Some(m),
-                smooth: Some(r.smooth),
-            });
+            out.push(CoraWaveParams { period: Some(p), r_multi: Some(m), smooth: Some(r.smooth) });
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1125,10 +1170,7 @@ pub fn cora_wave_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(CoraWaveError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(CoraWaveError::InvalidKernelForBatch(k))
         }
     };
     let simd = match kernel {
@@ -1147,12 +1189,9 @@ fn cora_wave_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<CoraWaveBatchOutput, CoraWaveError> {
-    let combos = expand_grid_cw(sweep);
+    let combos = expand_grid_cw(sweep)?;
     if combos.is_empty() {
-        return Err(CoraWaveError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(CoraWaveError::InvalidRange { start: sweep.period.0 as f64, end: sweep.period.1 as f64, step: sweep.period.2 as f64 });
     }
 
     let cols = data.len();
@@ -1175,6 +1214,9 @@ fn cora_wave_batch_inner(
 
     // Allocate rows×cols uninit and prefill warm prefixes with NaN
     let rows = combos.len();
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| CoraWaveError::InvalidInput("rows*cols overflow".into()))?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     let warms: Vec<usize> = combos
@@ -1192,7 +1234,10 @@ fn cora_wave_batch_inner(
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
     // Prepare flattened per-row weights and inv_sums
-    let mut flat_w = vec![0.0f64; rows * max_p];
+    let flat_len = rows
+        .checked_mul(max_p)
+        .ok_or_else(|| CoraWaveError::InvalidInput("rows*max_period overflow".into()))?;
+    let mut flat_w = vec![0.0f64; flat_len];
     let mut inv_sums = vec![0.0f64; rows];
 
     for (row, prm) in combos.iter().enumerate() {
@@ -1300,12 +1345,9 @@ pub fn cora_wave_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<CoraWaveParams>, CoraWaveError> {
-    let combos = expand_grid_cw(sweep);
+    let combos = expand_grid_cw(sweep)?;
     if combos.is_empty() {
-        return Err(CoraWaveError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(CoraWaveError::InvalidRange { start: sweep.period.0 as f64, end: sweep.period.1 as f64, step: sweep.period.2 as f64 });
     }
 
     let cols = data.len();
@@ -1313,11 +1355,11 @@ pub fn cora_wave_batch_inner_into(
     if cols == 0 {
         return Err(CoraWaveError::AllValuesNaN);
     }
-    if out.len() != rows * cols {
-        return Err(CoraWaveError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| CoraWaveError::InvalidInput("rows*cols overflow".into()))?;
+    if out.len() != expected {
+        return Err(CoraWaveError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     let first = data
@@ -1353,7 +1395,10 @@ pub fn cora_wave_batch_inner_into(
     init_matrix_prefixes(out_mu, cols, &warms);
 
     // Precompute row weights and inv sums
-    let mut flat_w = vec![0.0f64; rows * max_p];
+    let flat_len = rows
+        .checked_mul(max_p)
+        .ok_or_else(|| CoraWaveError::InvalidInput("rows*max_period overflow".into()))?;
+    let mut flat_w = vec![0.0f64; flat_len];
     let mut inv_sums = vec![0.0f64; rows];
     for (row, prm) in combos.iter().enumerate() {
         let p = prm.period.unwrap();
@@ -1823,7 +1868,7 @@ pub fn cora_wave_batch_py<'py>(
         smooth,
     };
 
-    let combos = expand_grid_cw(&sweep);
+    let combos = expand_grid_cw(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -1894,43 +1939,62 @@ pub fn cora_wave_cuda_batch_dev_py<'py>(
 
     // Mirror expand_grid for returning combo metadata
     fn combos_for_py(sweep: &CoraWaveBatchRange) -> Vec<CoraWaveParams> {
+        // Mirror robust expand_grid rules (zero step => static; support reversed)
         let (ps, pe, pt) = sweep.period;
         let periods: Vec<usize> = if pt == 0 || ps == pe {
             vec![ps]
-        } else {
+        } else if ps <= pe {
             (ps..=pe).step_by(pt).collect()
+        } else {
+            let mut v = Vec::new();
+            let mut x = ps;
+            loop {
+                v.push(x);
+                if x <= pe { break; }
+                if x < pt { break; }
+                let next = x - pt;
+                if next < pe { break; }
+                x = next;
+            }
+            v
         };
         let (ms, me, mt) = sweep.r_multi;
         let mut mults: Vec<f64> = vec![];
         if mt.abs() < 1e-12 || (ms - me).abs() < 1e-12 {
             mults.push(ms);
-        } else {
+        } else if ms <= me {
             let mut x = ms;
+            let step = mt.abs();
             while x <= me + 1e-12 {
                 mults.push(x);
-                x += mt;
+                x += step;
+            }
+        } else {
+            let mut x = ms;
+            let step = mt.abs();
+            while x >= me - 1e-12 {
+                mults.push(x);
+                x -= step;
             }
         }
-        let mut out = Vec::with_capacity(periods.len() * mults.len());
+        let mut out = Vec::with_capacity(periods.len().saturating_mul(mults.len()));
         for &p in &periods {
             for &m in &mults {
-                out.push(CoraWaveParams {
-                    period: Some(p),
-                    r_multi: Some(m),
-                    smooth: Some(sweep.smooth),
-                });
+                out.push(CoraWaveParams { period: Some(p), r_multi: Some(m), smooth: Some(sweep.smooth) });
             }
         }
         out
     }
 
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id, combos) = py.allow_threads(|| {
         let cuda =
             CudaCoraWave::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
         let out = cuda
             .cora_wave_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<(DeviceArrayF32, Vec<CoraWaveParams>), PyErr>((out, combos_for_py(&sweep)))
+        Ok::<(DeviceArrayF32, std::sync::Arc<cust::context::Context>, u32, Vec<CoraWaveParams>), PyErr>((out, ctx, dev, combos_for_py(&sweep)))
     })?;
 
     let dict = PyDict::new(py);
@@ -1940,7 +2004,7 @@ pub fn cora_wave_cuda_batch_dev_py<'py>(
     dict.set_item("periods", periods.into_pyarray(py))?;
     dict.set_item("r_multis", r_multis.into_pyarray(py))?;
     dict.set_item("smooth", smooth)?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((DeviceArrayF32Py { inner, _ctx: Some(ctx_arc), device_id: Some(dev_id) }, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1965,13 +2029,17 @@ pub fn cora_wave_cuda_many_series_one_param_dev_py<'py>(
         r_multi: Some(r_multi),
         smooth: Some(smooth),
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaCoraWave::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.cora_wave_multi_series_one_param_time_major_dev(slice, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
+        let out = cuda
+            .cora_wave_multi_series_one_param_time_major_dev(slice, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<(DeviceArrayF32, std::sync::Arc<cust::context::Context>, u32), PyErr>((out, ctx, dev))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx_arc), device_id: Some(dev_id) })
 }
 
 #[cfg(feature = "wasm")]
@@ -2122,7 +2190,8 @@ pub fn cora_wave_batch_into(
             r_multi: (rmulti_start, rmulti_end, rmulti_step),
             smooth,
         };
-        let combos = expand_grid_cw(&sweep);
+        let combos = expand_grid_cw(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);

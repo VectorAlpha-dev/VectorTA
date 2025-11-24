@@ -1,4 +1,5 @@
 use std::env;
+use std::process::Command;
 use std::path::PathBuf;
 
 fn main() {
@@ -10,6 +11,24 @@ fn main() {
         // Keep a single, quiet note for clarity in verbose logs.
         println!("cargo:warning=feature `cuda` not enabled; skipping PTX build");
     }
+
+    // Detect whether we're running on a nightly toolchain and expose a cfg flag.
+    // This lets the library enable nightly-only features (AVX512, portable_simd)
+    // only when the compiler actually supports them.
+    if is_nightly() {
+        println!("cargo:rustc-cfg=rustc_is_nightly");
+    }
+}
+
+fn is_nightly() -> bool {
+    let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let output = Command::new(rustc).arg("--version").output();
+    if let Ok(output) = output {
+        if let Ok(stdout) = String::from_utf8(output.stdout) {
+            return stdout.contains("nightly");
+        }
+    }
+    false
 }
 
 fn compile_cuda_kernels() {

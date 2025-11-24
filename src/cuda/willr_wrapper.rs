@@ -13,35 +13,39 @@ use crate::indicators::willr::{
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
+use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaWillrError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaWillrError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaWillrError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaWillrError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for CudaWillrError {}
 
 pub struct CudaWillr {
     module: Module,
     stream: Stream,
-    _context: Context,
+    ctx: Arc<Context>,
+    device_id: u32,
 }
 
 /// Device-resident sparse-table buffers for WILLR, reusable across runs.
@@ -65,10 +69,9 @@ struct PreparedWillrBatch {
 
 impl CudaWillr {
     pub fn new(device_id: usize) -> Result<Self, CudaWillrError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/willr_kernel.ptx"));
         let jit_opts = &[
@@ -78,18 +81,27 @@ impl CudaWillr {
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
-            Err(_) => {
-                Module::from_ptx(ptx, &[]).map_err(|e| CudaWillrError::Cuda(e.to_string()))?
-            }
+            Err(_) => Module::from_ptx(ptx, &[])?,
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            ctx: context,
+            device_id: device_id as u32,
         })
+    }
+
+    /// Expose context/device for Python interop and tests.
+    #[inline]
+    pub fn context(&self) -> Arc<Context> {
+        self.ctx.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     fn mem_check_enabled() -> bool {
@@ -99,28 +111,20 @@ impl CudaWillr {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaWillrError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Ok((free, _total)) = mem_get_info() {
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaWillrError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
             }
         }
-    }
-
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
-        }
+        Ok(())
     }
 
     pub fn willr_batch_dev(
@@ -138,24 +142,57 @@ impl CudaWillr {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        let d_close =
-            DeviceBuffer::from_slice(close_f32).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_periods =
-            DeviceBuffer::from_slice(&periods).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_log2 = DeviceBuffer::from_slice(&prepared.tables.log2)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_offsets = DeviceBuffer::from_slice(&prepared.tables.level_offsets)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_st_max = DeviceBuffer::from_slice(&prepared.tables.st_max)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_st_min = DeviceBuffer::from_slice(&prepared.tables.st_min)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_nan_psum = DeviceBuffer::from_slice(&prepared.tables.nan_psum)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(prepared.series_len * n_combos)
-                .map_err(|e| CudaWillrError::Cuda(e.to_string()))?
-        };
+        // VRAM estimate: close + tables + periods + output
+        let n = prepared.series_len;
+        let elems = n
+            .checked_mul(n_combos)
+            .ok_or_else(|| CudaWillrError::InvalidInput("series_len*n_combos overflow".into()))?;
+        let f32_bytes = core::mem::size_of::<f32>();
+        let i32_bytes = core::mem::size_of::<i32>();
+        let bytes_close = n
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_periods = n_combos
+            .checked_mul(i32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_log2 = prepared.tables.log2.len()
+            .checked_mul(i32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_offsets = prepared.tables.level_offsets.len()
+            .checked_mul(i32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_st_max = prepared.tables.st_max.len()
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_st_min = prepared.tables.st_min.len()
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_nan_psum = prepared.tables.nan_psum.len()
+            .checked_mul(i32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_out = elems
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let required = bytes_close
+            .checked_add(bytes_periods)
+            .and_then(|v| v.checked_add(bytes_log2))
+            .and_then(|v| v.checked_add(bytes_offsets))
+            .and_then(|v| v.checked_add(bytes_st_max))
+            .and_then(|v| v.checked_add(bytes_st_min))
+            .and_then(|v| v.checked_add(bytes_nan_psum))
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let d_close = DeviceBuffer::from_slice(close_f32)?;
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let d_log2 = DeviceBuffer::from_slice(&prepared.tables.log2)?;
+        let d_offsets = DeviceBuffer::from_slice(&prepared.tables.level_offsets)?;
+        let d_st_max = DeviceBuffer::from_slice(&prepared.tables.st_max)?;
+        let d_st_min = DeviceBuffer::from_slice(&prepared.tables.st_min)?;
+        let d_nan_psum = DeviceBuffer::from_slice(&prepared.tables.nan_psum)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems)? };
 
         self.launch_batch_kernel(
             &d_close,
@@ -171,6 +208,7 @@ impl CudaWillr {
             n_combos,
             &mut d_out,
         )?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -240,12 +278,7 @@ impl CudaWillr {
             ));
         }
 
-        let combos = expand_periods(sweep);
-        if combos.is_empty() {
-            return Err(CudaWillrError::InvalidInput(
-                "no period combinations".into(),
-            ));
-        }
+        let combos = expand_periods(sweep)?;
 
         let first_valid = (0..len)
             .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
@@ -335,16 +368,36 @@ impl CudaWillr {
         let tables = build_willr_gpu_tables(high, low);
 
         // Upload once; keep device buffers around for reuse.
-        let d_log2 = DeviceBuffer::from_slice(&tables.log2)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_level_offsets = DeviceBuffer::from_slice(&tables.level_offsets)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_st_max = DeviceBuffer::from_slice(&tables.st_max)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_st_min = DeviceBuffer::from_slice(&tables.st_min)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_nan_psum = DeviceBuffer::from_slice(&tables.nan_psum)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let f32_bytes = core::mem::size_of::<f32>();
+        let i32_bytes = core::mem::size_of::<i32>();
+        let bytes_log2 = tables.log2.len()
+            .checked_mul(i32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_offsets = tables.level_offsets.len()
+            .checked_mul(i32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_st_max = tables.st_max.len()
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_st_min = tables.st_min.len()
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_nan_psum = tables.nan_psum.len()
+            .checked_mul(i32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let required = bytes_log2
+            .checked_add(bytes_offsets)
+            .and_then(|v| v.checked_add(bytes_st_max))
+            .and_then(|v| v.checked_add(bytes_st_min))
+            .and_then(|v| v.checked_add(bytes_nan_psum))
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let d_log2 = DeviceBuffer::from_slice(&tables.log2)?;
+        let d_level_offsets = DeviceBuffer::from_slice(&tables.level_offsets)?;
+        let d_st_max = DeviceBuffer::from_slice(&tables.st_max)?;
+        let d_st_min = DeviceBuffer::from_slice(&tables.st_min)?;
+        let d_nan_psum = DeviceBuffer::from_slice(&tables.nan_psum)?;
 
         let level_count = tables
             .level_offsets
@@ -381,24 +434,39 @@ impl CudaWillr {
         }
 
         // Expand period sweep → device vector
-        let combos = expand_periods(sweep);
-        if combos.is_empty() {
-            return Err(CudaWillrError::InvalidInput("no period combinations".into()));
-        }
+        let combos = expand_periods(sweep)?;
         let periods: Vec<i32> = combos
             .iter()
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
         let n_combos = periods.len();
 
-        let d_close =
-            DeviceBuffer::from_slice(close_f32).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(dev_tables.series_len * n_combos)
-                .map_err(|e| CudaWillrError::Cuda(e.to_string()))?
-        };
+        // VRAM estimate: close + periods + output (tables already resident)
+        let n = dev_tables.series_len;
+        let elems = n
+            .checked_mul(n_combos)
+            .ok_or_else(|| CudaWillrError::InvalidInput("series_len*n_combos overflow".into()))?;
+        let f32_bytes = core::mem::size_of::<f32>();
+        let i32_bytes = core::mem::size_of::<i32>();
+        let bytes_close = n
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_periods = n_combos
+            .checked_mul(i32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let bytes_out = elems
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let required = bytes_close
+            .checked_add(bytes_periods)
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let d_close = DeviceBuffer::from_slice(close_f32)?;
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems)? };
 
         // Launch using the reusable tables.
         self.launch_batch_kernel_raw(
@@ -456,7 +524,7 @@ impl CudaWillr {
         let func = self
             .module
             .get_function("willr_batch_f32")
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaWillrError::MissingKernelSymbol { name: "willr_batch_f32" })?;
 
         let block_x: u32 = Self::block_for_time_parallel(series_len);
         let grid: GridSize = (n_combos as u32, 1, 1).into();
@@ -491,9 +559,7 @@ impl CudaWillr {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -517,27 +583,30 @@ impl CudaWillr {
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaWillrError::InvalidInput("cols*rows overflow".into()))?;
-        let in_bytes = 3 * elems * std::mem::size_of::<f32>();
-        let first_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = elems * std::mem::size_of::<f32>();
-        let required = in_bytes + first_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaWillrError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                required as f64 / (1024.0 * 1024.0)
-            )));
-        }
+        let f32_bytes = core::mem::size_of::<f32>();
+        let i32_bytes = core::mem::size_of::<i32>();
+        let in_bytes = 3usize
+            .checked_mul(elems)
+            .and_then(|v| v.checked_mul(f32_bytes))
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let first_bytes = cols
+            .checked_mul(i32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(first_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        let d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high_tm)?;
+        let d_low = DeviceBuffer::from_slice(low_tm)?;
+        let d_close = DeviceBuffer::from_slice(close_tm)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems)? };
 
         self.willr_many_series_one_param_device(
             &d_high,
@@ -550,9 +619,7 @@ impl CudaWillr {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -656,7 +723,9 @@ impl CudaWillr {
         let func = self
             .module
             .get_function("willr_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaWillrError::MissingKernelSymbol {
+                name: "willr_many_series_one_param_time_major_f32",
+            })?;
 
         unsafe {
             let mut high_ptr = d_high_tm.as_device_ptr().as_raw();
@@ -677,9 +746,7 @@ impl CudaWillr {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -763,20 +830,61 @@ pub mod benches {
     }
 }
 
-fn expand_periods(range: &WillrBatchRange) -> Vec<WillrParams> {
-    let (start, end, step) = range.period;
-    if step == 0 || start == end {
-        return vec![WillrParams {
-            period: Some(start),
-        }];
+fn expand_periods(range: &WillrBatchRange) -> Result<Vec<WillrParams>, CudaWillrError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, CudaWillrError> {
+        // Treat zero step as static; allow reversed bounds; error on empty.
+        if step == 0 {
+            return Ok(vec![start]);
+        }
+        if start == end {
+            return Ok(vec![start]);
+        }
+        let mut vals = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                vals.push(v);
+                match v.checked_add(step) {
+                    Some(next) => {
+                        if next == v {
+                            break;
+                        }
+                        v = next;
+                    }
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            while v >= end {
+                vals.push(v);
+                if v == 0 {
+                    break;
+                }
+                let next = v.saturating_sub(step);
+                if next == v {
+                    break;
+                }
+                v = next;
+                if v < end {
+                    break;
+                }
+            }
+        }
+        if vals.is_empty() {
+            return Err(CudaWillrError::InvalidInput(format!(
+                "invalid range: start={}, end={}, step={}",
+                start, end, step
+            )));
+        }
+        Ok(vals)
     }
-    let mut periods = Vec::new();
-    let mut value = start;
-    while value <= end {
-        periods.push(WillrParams {
-            period: Some(value),
-        });
-        value = value.saturating_add(step);
-    }
-    periods
+
+    let periods = axis_usize(range.period)?;
+    Ok(periods
+        .into_iter()
+        .map(|p| WillrParams { period: Some(p) })
+        .collect())
 }

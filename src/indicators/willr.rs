@@ -21,11 +21,12 @@
 //! - **Memory Optimization**: ✓ Uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batching
 //! - **Batch Support**: ✓ Row-specific optimized batch via sparse tables (shared across rows)
 //! - **TODO**: Only enable SIMD selection once kernels beat scalar by >5% at 10k/100k.
+//! - **Decision log**: AVX2 scalar/SIMD enabled; AVX512 delegates to AVX2; CUDA wrapper returns VRAM handles with CAI v3 + DLPack v1.x; scalar path remains the reference for correctness.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::CudaWillr;
+use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::oscillators::CudaWillr;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -40,6 +41,8 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 use thiserror::Error;
 
 // --- Data types ---
@@ -167,16 +170,20 @@ impl WillrBuilder {
 
 #[derive(Debug, Error)]
 pub enum WillrError {
+    #[error("willr: Empty input data or mismatched slices.")]
+    EmptyInputData,
     #[error("willr: All input values are NaN.")]
     AllValuesNaN,
     #[error("willr: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("willr: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("willr: Data slices are empty or mismatched.")]
-    EmptyOrMismatched,
-    #[error("willr: Output length mismatch: dst = {dst}, data_len = {data_len}")]
-    OutputLenMismatch { dst: usize, data_len: usize },
+    #[error("willr: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("willr: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("willr: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // --- Main entrypoints ---
@@ -239,7 +246,7 @@ pub fn willr_with_kernel(input: &WillrInput, kernel: Kernel) -> Result<WillrOutp
 
     let len = high.len();
     if low.len() != len || close.len() != len || len == 0 {
-        return Err(WillrError::EmptyOrMismatched);
+        return Err(WillrError::EmptyInputData);
     }
     let period = input.get_period();
     if period == 0 || period > len {
@@ -275,7 +282,7 @@ pub fn willr_with_kernel(input: &WillrInput, kernel: Kernel) -> Result<WillrOutp
 /// - Preserves NaN warmups exactly as the Vec-returning API: all indices prior to
 ///   `first_valid + period - 1` are set to NaN.
 /// - The output slice length must equal the input length; otherwise, returns
-///   `WillrError::OutputLenMismatch` (or other existing errors from validation).
+///   `WillrError::OutputLengthMismatch` (or other existing errors from validation).
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn willr_into(dst: &mut [f64], input: &WillrInput) -> Result<(), WillrError> {
@@ -299,13 +306,13 @@ pub fn willr_into_slice(
 
     let len = high.len();
     if low.len() != len || close.len() != len || len == 0 {
-        return Err(WillrError::EmptyOrMismatched);
+        return Err(WillrError::EmptyInputData);
     }
 
     if dst.len() != len {
-        return Err(WillrError::OutputLenMismatch {
-            dst: dst.len(),
-            data_len: len,
+        return Err(WillrError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
         });
     }
 
@@ -1186,7 +1193,7 @@ pub fn willr_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => Kernel::ScalarBatch,
+        other => return Err(WillrError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1220,18 +1227,61 @@ impl WillrBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &WillrBatchRange) -> Vec<WillrParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
+fn expand_grid(r: &WillrBatchRange) -> Result<Vec<WillrParams>, WillrError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, WillrError> {
+        // Treat zero step as static; allow reversed bounds; error on empty.
+        if step == 0 {
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start == end {
+            return Ok(vec![start]);
+        }
+        let mut vals = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                vals.push(v);
+                match v.checked_add(step) {
+                    Some(next) => {
+                        if next == v {
+                            break;
+                        }
+                        v = next;
+                    }
+                    None => break,
+                }
+            }
+        } else {
+            // reversed bounds: count down by step
+            let mut v = start;
+            while v >= end {
+                vals.push(v);
+                if v == 0 {
+                    break;
+                }
+                let next = v.saturating_sub(step);
+                if next == v {
+                    break;
+                }
+                v = next;
+                if v < end {
+                    break;
+                }
+            }
+        }
+        if vals.is_empty() {
+            return Err(WillrError::InvalidRange { start, end, step });
+        }
+        Ok(vals)
     }
-    let periods = axis_usize(r.period);
-    periods
+
+    let periods = axis_usize(r.period)?;
+    Ok(periods
         .into_iter()
         .map(|p| WillrParams { period: Some(p) })
-        .collect()
+        .collect())
 }
 
 #[derive(Debug)]
@@ -1512,13 +1562,7 @@ fn willr_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<WillrBatchOutput, WillrError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(WillrError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let len = high.len();
     if combos.iter().any(|c| c.period == Some(0)) {
         return Err(WillrError::InvalidPeriod {
@@ -1527,7 +1571,7 @@ fn willr_batch_inner(
         });
     }
     if low.len() != len || close.len() != len || len == 0 {
-        return Err(WillrError::EmptyOrMismatched);
+        return Err(WillrError::EmptyInputData);
     }
 
     let first_valid = (0..len)
@@ -1542,6 +1586,14 @@ fn willr_batch_inner(
     }
     let rows = combos.len();
     let cols = len;
+
+    rows
+        .checked_mul(cols)
+        .ok_or(WillrError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
     // Create uninitialized matrix and set up warmup periods
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1883,13 +1935,7 @@ fn willr_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<WillrParams>, WillrError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(WillrError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let len = high.len();
     if combos.iter().any(|c| c.period == Some(0)) {
@@ -1899,17 +1945,25 @@ fn willr_batch_inner_into(
         });
     }
     if low.len() != len || close.len() != len || len == 0 {
-        return Err(WillrError::EmptyOrMismatched);
+        return Err(WillrError::EmptyInputData);
     }
 
     let rows = combos.len();
     let cols = len;
 
     // Ensure output buffer has correct size
-    if out.len() != rows * cols {
-        return Err(WillrError::OutputLenMismatch {
-            dst: out.len(),
-            data_len: rows * cols,
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(WillrError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+
+    if out.len() != expected {
+        return Err(WillrError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
         });
     }
 
@@ -2601,6 +2655,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "willr")]
@@ -2654,6 +2710,223 @@ impl WillrStreamPy {
     }
 }
 
+// Python CUDA handle for WILLR: CAI v3 + DLPack v1.x with version negotiation.
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "WillrDeviceArrayF32", unsendable)]
+pub struct WillrDeviceArrayF32Py {
+    // One-shot export via __dlpack__: move out of this Option
+    pub(crate) inner: Option<DeviceArrayF32>,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl WillrDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // Producer synchronizes before returning, so no stream key is required per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    // DLPack producer with v1.x negotiation and legacy fallback.
+    // Array API stream semantics are accepted but ignored here since the stream is synchronized.
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        mut slf: pyo3::PyRefMut<'py, Self>,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<pyo3::PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        let _ = (stream, dl_device, copy);
+
+        let inner = slf
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        struct Manager {
+            _ctx: Arc<Context>,
+            _buf: cust::memory::DeviceBuffer<f32>,
+            shape: Box<[i64; 2]>,
+            strides: Box<[i64; 2]>,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt: Box<DLManagedTensor> = Box::from_raw(p);
+            let mgr_ptr = mt.manager_ctx as *mut Manager;
+            if !mgr_ptr.is_null() {
+                let _ = Box::from_raw(mgr_ptr);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_legacy(cap: *mut pyffi::PyObject) {
+            let name = CString::new("dltensor").unwrap();
+            let ptr = pyffi::PyCapsule_GetPointer(cap, name.as_ptr());
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(d) = (*mt).deleter {
+                    d(mt)
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_versioned(cap: *mut pyffi::PyObject) {
+            let name = CString::new("dltensor_versioned").unwrap();
+            let ptr = pyffi::PyCapsule_GetPointer(cap, name.as_ptr());
+            if !ptr.is_null() {
+                let wrap = ptr as *mut DLManagedTensorVersioned;
+                let mt = (*wrap).manager;
+                if !mt.is_null() {
+                    if let Some(d) = (*mt).deleter {
+                        d(mt)
+                    }
+                }
+            }
+        }
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let total: i128 = (rows as i128) * (cols as i128);
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1]);
+        let data_ptr: *mut c_void = if total == 0 {
+            core::ptr::null_mut()
+        } else {
+            inner.device_ptr() as usize as *mut c_void
+        };
+
+        let mgr = Box::new(Manager {
+            _ctx: slf._ctx.clone(),
+            _buf: inner.buf,
+            shape,
+            strides,
+        });
+        let mgr_ptr = Box::into_raw(mgr);
+        let shape_ptr = unsafe { (*mgr_ptr).shape.as_ptr() as *mut i64 };
+        let strides_ptr = unsafe { (*mgr_ptr).strides.as_ptr() as *mut i64 };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice {
+                    device_type: 2,
+                    device_id: slf.device_id as i32,
+                },
+                ndim: 2,
+                dtype: DLDataType {
+                    code: 2,
+                    bits: 32,
+                    lanes: 1,
+                },
+                shape: shape_ptr,
+                strides: strides_ptr,
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr as *mut c_void,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(
+                    ptr,
+                    name.as_ptr(),
+                    Some(capsule_destructor_versioned),
+                );
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create versioned DLPack capsule",
+                    ));
+                }
+                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(
+                    ptr,
+                    name.as_ptr(),
+                    Some(capsule_destructor_legacy),
+                );
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err("failed to create DLPack capsule"));
+                }
+                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "willr_batch")]
 #[pyo3(signature = (high, low, close, period_range, kernel=None))]
@@ -2673,11 +2946,21 @@ pub fn willr_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
-    let rows = combos.len();
+    let combos_host =
+        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let rows = combos_host.len();
     let cols = high_slice.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "willr: rows*cols overflow: rows={}, cols={}",
+                rows, cols
+            ))
+        })?;
+
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -2733,7 +3016,7 @@ pub fn willr_cuda_batch_dev_py(
     close: PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<WillrDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
 
     if !cuda_available() {
@@ -2752,13 +3035,22 @@ pub fn willr_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaWillr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.willr_batch_dev(high_slice, low_slice, close_slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id_u32) = py.allow_threads::<_, PyResult<(DeviceArrayF32, Arc<Context>, u32)>>(|| {
+        let cuda = CudaWillr::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context();
+        let dev_id_u32 = cuda.device_id();
+        let inner = cuda
+            .willr_batch_dev(high_slice, low_slice, close_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((inner, ctx, dev_id_u32))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(WillrDeviceArrayF32Py {
+        inner: Some(inner),
+        _ctx: ctx,
+        device_id: dev_id_u32,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2773,7 +3065,7 @@ pub fn willr_cuda_many_series_one_param_dev_py(
     rows: usize,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<WillrDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
 
     if !cuda_available() {
@@ -2784,20 +3076,29 @@ pub fn willr_cuda_many_series_one_param_dev_py(
     let low_slice = low_tm.as_slice()?;
     let close_slice = close_tm.as_slice()?;
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaWillr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.willr_many_series_one_param_time_major_dev(
-            high_slice,
-            low_slice,
-            close_slice,
-            cols,
-            rows,
-            period,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id_u32) = py.allow_threads::<_, PyResult<(DeviceArrayF32, Arc<Context>, u32)>>(|| {
+        let cuda = CudaWillr::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context();
+        let dev_id_u32 = cuda.device_id();
+        let inner = cuda
+            .willr_many_series_one_param_time_major_dev(
+                high_slice,
+                low_slice,
+                close_slice,
+                cols,
+                rows,
+                period,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((inner, ctx, dev_id_u32))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(WillrDeviceArrayF32Py {
+        inner: Some(inner),
+        _ctx: ctx,
+        device_id: dev_id_u32,
+    })
 }
 
 // --- WASM bindings ---
@@ -2939,11 +3240,19 @@ pub fn willr_batch_into_js(
         let sweep = WillrBatchRange {
             period: (period_start, period_end, period_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
-        let out = core::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows.checked_mul(cols).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "willr: rows*cols overflow: rows={}, cols={}",
+                rows, cols
+            ))
+        })?;
+
+        let out = core::slice::from_raw_parts_mut(out_ptr, total);
         willr_batch_inner_into(high, low, close, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)

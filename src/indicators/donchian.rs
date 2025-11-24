@@ -24,6 +24,7 @@
 //!   Reusing a global validity prefix across rows is a possible future tweak; omitted to keep scope minimal.
 //! - **Memory Optimization**: Uses `alloc_with_nan_prefix` and uninitialized matrix helpers for outputs;
 //!   scalar kernel avoids per-window scans and performs two linear passes with small, cache-friendly temporaries.
+//! - **Decision log**: SIMD remains stubbed with scalar as the reference path; CUDA wrappers return VRAM-backed handles with CAI v3 + DLPack v1.x; numerical outputs are identical between CPU and GPU paths.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -158,7 +159,7 @@ impl DonchianBuilder {
 #[derive(Debug, Error)]
 pub enum DonchianError {
     #[error("donchian: Empty data provided.")]
-    EmptyData,
+    EmptyInputData,
     #[error("donchian: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("donchian: Not enough valid data: needed = {needed}, valid = {valid}")]
@@ -167,10 +168,14 @@ pub enum DonchianError {
     AllValuesNaN,
     #[error("donchian: High/Low data slices have different lengths.")]
     MismatchedLength,
-    #[error("donchian: Output slice length doesn't match input length.")]
-    MismatchedOutputLength,
-    #[error("donchian: Invalid kernel - batch kernel required.")]
-    InvalidKernel,
+    #[error("donchian: Output length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("donchian: invalid range expansion: start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("donchian: invalid input: {0}")]
+    InvalidInput(String),
+    #[error("donchian: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -192,7 +197,7 @@ pub fn donchian_with_kernel(
     };
 
     if high.is_empty() || low.is_empty() {
-        return Err(DonchianError::EmptyData);
+        return Err(DonchianError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(DonchianError::MismatchedLength);
@@ -596,7 +601,7 @@ pub fn donchian_into_slice(
     };
 
     if high.is_empty() || low.is_empty() {
-        return Err(DonchianError::EmptyData);
+        return Err(DonchianError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(DonchianError::MismatchedLength);
@@ -605,7 +610,7 @@ pub fn donchian_into_slice(
         || middle_dst.len() != high.len()
         || lower_dst.len() != high.len()
     {
-        return Err(DonchianError::MismatchedOutputLength);
+        return Err(DonchianError::OutputLengthMismatch { expected: high.len(), got: upper_dst.len().max(middle_dst.len()).max(lower_dst.len()) });
     }
 
     let first_valid_high = high.iter().position(|&x| !x.is_nan());
@@ -730,7 +735,7 @@ pub fn donchian_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(DonchianError::InvalidKernel),
+        other => return Err(DonchianError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -835,18 +840,31 @@ impl DonchianBatchOutput {
 }
 
 #[inline(always)]
-pub fn expand_grid(r: &DonchianBatchRange) -> Vec<DonchianParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+pub fn expand_grid(r: &DonchianBatchRange) -> Result<Vec<DonchianParams>, DonchianError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, DonchianError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            Ok((start..=end).step_by(step).collect())
+        } else {
+            // reversed bounds supported
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                if let Some(next) = cur.checked_sub(step) { cur = next; } else { break; }
+                if cur == usize::MAX { break; }
+            }
+            if v.is_empty() { return Err(DonchianError::InvalidRange { start, end, step }); }
+            Ok(v)
+        }
     }
-    let periods = axis_usize(r.period);
-    periods
+    let periods = axis_usize(r.period)?;
+    Ok(periods
         .into_iter()
         .map(|p| DonchianParams { period: Some(p) })
-        .collect()
+        .collect())
 }
 
 #[inline(always)]
@@ -877,12 +895,9 @@ fn donchian_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<DonchianBatchOutput, DonchianError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(DonchianError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(DonchianError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
     }
     if high.len() != low.len() {
         return Err(DonchianError::MismatchedLength);
@@ -905,6 +920,9 @@ fn donchian_batch_inner(
     }
     let rows = combos.len();
     let cols = high.len();
+    let _size = rows
+        .checked_mul(cols)
+        .ok_or_else(|| DonchianError::InvalidInput("rows*cols overflow".into()))?;
 
     // Calculate warmup periods for each parameter combination
     let warmup_periods: Vec<usize> = combos
@@ -2263,11 +2281,12 @@ fn donchian_batch_inner_into(
     out_middle: &mut [f64],
     out_lower: &mut [f64],
 ) -> Result<Vec<DonchianParams>, DonchianError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(DonchianError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(DonchianError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
     if high.len() != low.len() {
@@ -2384,7 +2403,7 @@ pub fn donchian_batch_py<'py>(
     };
 
     // Calculate dimensions
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
 
@@ -2636,7 +2655,7 @@ pub fn donchian_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<J
     };
 
     // Get dimensions
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = high.len();
 
@@ -2702,7 +2721,7 @@ pub fn donchian_batch_into(
         };
 
         // Calculate dimensions
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
@@ -2732,7 +2751,262 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::donchian_wrapper::CudaDonchian;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::donchian_wrapper::DeviceArrayF32 as DeviceArrayF32Donch;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32DonchPy {
+    pub(crate) inner: Option<DeviceArrayF32Donch>,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32DonchPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        let itemsize = std::mem::size_of::<f32>();
+        let row_stride = inner
+            .cols
+            .checked_mul(itemsize)
+            .ok_or_else(|| PyValueError::new_err("byte stride overflow"))?;
+        d.set_item("strides", (row_stride, itemsize))?;
+        let itemsize = std::mem::size_of::<f32>();
+        let row_stride = inner
+            .cols
+            .checked_mul(itemsize)
+            .ok_or_else(|| PyValueError::new_err("byte stride overflow"))?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        Ok((2, inner.device_id as i32))
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CStr, CString};
+
+        let _ = stream;
+        if let Some(true) = copy {
+            return Err(PyValueError::new_err(
+                "copy=True is not supported for donchian CUDA buffers",
+            ));
+        }
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        if let Some((dev_type, dev_id)) = dl_device {
+            if dev_type != 2 || dev_id != inner.device_id as i32 {
+                return Err(PyValueError::new_err(
+                    "dl_device mismatch for donchian CUDA buffer",
+                ));
+            }
+        }
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _arr: DeviceArrayF32Donch,
+        }
+
+        unsafe extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ = Box::from_raw(ctx_ptr);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            if capsule.is_null() {
+                return;
+            }
+            let name_ptr = pyffi::PyCapsule_GetName(capsule);
+            if name_ptr.is_null() {
+                return;
+            }
+            let name = CStr::from_ptr(name_ptr);
+            let Ok(name_str) = name.to_str() else {
+                return;
+            };
+            if name_str == "dltensor" {
+                let ptr =
+                    pyffi::PyCapsule_GetPointer(capsule, name_ptr) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = unsafe { (*ptr).deleter } {
+                        unsafe { del(ptr) };
+                    }
+                    let used = CString::new("used_dltensor").unwrap();
+                    let _ = unsafe { pyffi::PyCapsule_SetName(capsule, used.as_ptr()) };
+                }
+            } else if name_str == "dltensor_versioned" {
+                let ptr = pyffi::PyCapsule_GetPointer(capsule, name_ptr)
+                    as *mut DLManagedTensorVersioned;
+                if !ptr.is_null() {
+                    let manager = unsafe { (*ptr).manager };
+                    if !manager.is_null() {
+                        if let Some(del) = unsafe { (*manager).deleter } {
+                            unsafe { del(manager) };
+                        }
+                    }
+                    unsafe {
+                        drop(Box::from_raw(ptr));
+                    }
+                    let used = CString::new("used_dltensor_versioned").unwrap();
+                    let _ = unsafe { pyffi::PyCapsule_SetName(capsule, used.as_ptr()) };
+                }
+            }
+        }
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let total: i128 = (rows as i128) * (cols as i128);
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _arr: inner,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let manager_ref = unsafe { &*(mgr_ptr as *const ManagerCtx) };
+        let data_ptr = if total == 0 {
+            std::ptr::null_mut()
+        } else {
+            manager_ref
+                ._arr
+                .buf
+                .as_device_ptr()
+                .as_raw() as *mut c_void
+        };
+
+        let dl = DLTensor {
+            data: data_ptr,
+            device: DLDevice {
+                device_type: 2,
+                device_id: manager_ref._arr.device_id as i32,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: manager_ref.shape,
+            strides: manager_ref.strides,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: dl,
+            manager_ctx: mgr_ptr,
+            deleter: Some(managed_deleter),
+        });
+
+        let want_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "donchian_cuda_batch_dev")]
@@ -2761,23 +3035,9 @@ pub fn donchian_cuda_batch_dev_py<'py>(
     })?;
 
     let d = PyDict::new(py);
-    d.set_item(
-        "upper",
-        Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?,
-    )?;
-    d.set_item(
-        "middle",
-        Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?,
-    )?;
-    d.set_item(
-        "lower",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: triplet.hist,
-            },
-        )?,
-    )?;
+    d.set_item("upper", Py::new(py, DeviceArrayF32DonchPy { inner: Some(triplet.wt1) })?)?;
+    d.set_item("middle", Py::new(py, DeviceArrayF32DonchPy { inner: Some(triplet.wt2) })?)?;
+    d.set_item("lower", Py::new(py, DeviceArrayF32DonchPy { inner: Some(triplet.hist) })?)?;
     d.set_item(
         "periods",
         combos
@@ -2827,23 +3087,9 @@ pub fn donchian_cuda_many_series_one_param_dev_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let d = PyDict::new(py);
-    d.set_item(
-        "upper",
-        Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?,
-    )?;
-    d.set_item(
-        "middle",
-        Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?,
-    )?;
-    d.set_item(
-        "lower",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: triplet.hist,
-            },
-        )?,
-    )?;
+    d.set_item("upper", Py::new(py, DeviceArrayF32DonchPy { inner: Some(triplet.wt1) })?)?;
+    d.set_item("middle", Py::new(py, DeviceArrayF32DonchPy { inner: Some(triplet.wt2) })?)?;
+    d.set_item("lower", Py::new(py, DeviceArrayF32DonchPy { inner: Some(triplet.hist) })?)?;
     d.set_item("rows", rows)?;
     d.set_item("cols", cols)?;
     d.set_item("period", period)?;

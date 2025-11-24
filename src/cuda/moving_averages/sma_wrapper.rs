@@ -14,7 +14,7 @@
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::sma::{expand_grid_sma, SmaBatchRange, SmaParams};
 use cust::context::{CacheConfig, Context};
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, Function, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -229,6 +229,17 @@ impl CudaSma {
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        // Optional validation against device limits
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        if block_x > max_threads {
+            return Err(CudaSmaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
+        let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        if grid_x > max_grid_x {
+            return Err(CudaSmaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();

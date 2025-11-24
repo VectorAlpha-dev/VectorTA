@@ -23,6 +23,7 @@
 //! - Batch status: Row-specific kernels not implemented; revisit when sweeps share lz/lsd to exploit shared precompute.
 //! - Streaming: O(1) with modulo-free ring and strict signal SMA (no per-tick scans); matches batch warmup and NaN rules.
 //! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes).
+//! - CUDA: FP32 kernels with FP64 accumulators; wrapper returns VRAM handles with CAI v3 + DLPack interop; numerical outputs match scalar MAC-Z.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -416,6 +417,15 @@ pub enum MaczError {
 
     #[error("macz: {msg}")]
     InvalidParameter { msg: String },
+
+    #[error("macz: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("macz: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+
+    #[error("macz: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 // ==================== HELPER FUNCTIONS ====================
@@ -926,9 +936,9 @@ pub fn macz_into_slice(dst: &mut [f64], input: &MaczInput, kern: Kernel) -> Resu
     let (data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, warm_hist, chosen) =
         macz_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(MaczError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(MaczError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
     // set NaN warmup like alma.rs
@@ -1467,36 +1477,91 @@ impl MaczBatchBuilder {
     }
 }
 
-fn expand_grid_macz(r: &MaczBatchRange) -> Vec<MaczParams> {
-    fn axis_usize((s, e, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || s == e {
-            return vec![s];
+fn expand_grid_macz(r: &MaczBatchRange) -> Result<Vec<MaczParams>, MaczError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, MaczError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
         }
-        (s..=e).step_by(step).collect()
-    }
-    fn axis_f64((s, e, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (s - e).abs() < 1e-12 {
-            return vec![s];
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
         }
         let mut v = Vec::new();
-        let mut x = s;
-        while x <= e + 1e-12 {
-            v.push(x);
-            x += step;
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
         }
-        v
+        if v.is_empty() {
+            return Err(MaczError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let fs = axis_usize(r.fast_length);
-    let ss = axis_usize(r.slow_length);
-    let gs = axis_usize(r.signal_length);
-    let zs = axis_usize(r.lengthz);
-    let ds = axis_usize(r.length_stdev);
-    let as_ = axis_f64(r.a);
-    let bs = axis_f64(r.b);
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, MaczError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(MaczError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
+        let mut x = start;
+        let st = step.abs();
+        while x + 1e-12 >= end {
+            v.push(x);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(MaczError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
+    }
+    let fs = axis_usize(r.fast_length)?;
+    let ss = axis_usize(r.slow_length)?;
+    let gs = axis_usize(r.signal_length)?;
+    let zs = axis_usize(r.lengthz)?;
+    let ds = axis_usize(r.length_stdev)?;
+    let as_ = axis_f64(r.a)?;
+    let bs = axis_f64(r.b)?;
 
-    let mut out = Vec::with_capacity(
-        fs.len() * ss.len() * gs.len() * zs.len() * ds.len() * as_.len() * bs.len(),
-    );
+    let cap = fs
+        .len()
+        .checked_mul(ss.len())
+        .and_then(|v| v.checked_mul(gs.len()))
+        .and_then(|v| v.checked_mul(zs.len()))
+        .and_then(|v| v.checked_mul(ds.len()))
+        .and_then(|v| v.checked_mul(as_.len()))
+        .and_then(|v| v.checked_mul(bs.len()))
+        .ok_or_else(|| MaczError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &f in &fs {
         for &s in &ss {
             for &g in &gs {
@@ -1522,7 +1587,7 @@ fn expand_grid_macz(r: &MaczBatchRange) -> Vec<MaczParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn macz_batch_with_kernel(
@@ -1543,9 +1608,7 @@ pub fn macz_batch_with_kernel_vol(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(MaczError::InvalidParameter {
-                msg: "Invalid batch kernel".into(),
-            })
+            return Err(MaczError::InvalidKernelForBatch(k));
         }
     };
     macz_batch_par_slice_vol(data, volume, sweep, kernel)
@@ -1593,7 +1656,7 @@ fn macz_batch_inner_vol(
     kern: Kernel,
     parallel: bool,
 ) -> Result<MaczBatchOutput, MaczError> {
-    let combos = expand_grid_macz(sweep);
+    let combos = expand_grid_macz(sweep)?;
     let rows = combos.len();
     let cols = data.len();
     if cols == 0 {
@@ -1607,6 +1670,13 @@ fn macz_batch_inner_vol(
             });
         }
     }
+
+    // Guard rows*cols overflow before matrix allocation
+    let _ = rows.checked_mul(cols).ok_or_else(|| MaczError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
 
     // Allocate rows×cols with warm prefixes preset per row
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1713,12 +1783,20 @@ fn macz_batch_inner_into_vol(
     parallel: bool,
     out_flat: &mut [f64],
 ) -> Result<Vec<MaczParams>, MaczError> {
-    let combos = expand_grid_macz(sweep);
+    let combos = expand_grid_macz(sweep)?;
     let rows = combos.len();
     let cols = data.len();
-    if out_flat.len() != rows * cols {
-        return Err(MaczError::InvalidParameter {
-            msg: "bad out size".into(),
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| MaczError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
+    if out_flat.len() != expected {
+        return Err(MaczError::OutputLengthMismatch {
+            expected,
+            got: out_flat.len(),
         });
     }
     if let Some(v) = volume {
@@ -2270,9 +2348,12 @@ pub fn macz_cuda_batch_dev_py<'py>(
         b: b_range,
     };
 
-    let (inner, combos) = py.allow_threads(|| {
+    let ((inner, inner_ctx, inner_dev_id), combos) = py.allow_threads(|| {
         let cuda = CudaMacz::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.macz_batch_dev(price, volume_opt, &sweep)
+            .map(|(inner, combos)| ((inner, ctx, dev_id), combos))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
@@ -2334,7 +2415,7 @@ pub fn macz_cuda_batch_dev_py<'py>(
             .into_pyarray(py),
     )?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((DeviceArrayF32Py { inner, _ctx: Some(inner_ctx), device_id: Some(inner_dev_id) }, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2374,12 +2455,15 @@ pub fn macz_cuda_many_series_one_param_dev_py<'py>(
         use_lag: Some(use_lag),
         gamma: Some(gamma),
     };
-    let inner = py.allow_threads(|| {
+    let (inner, inner_ctx, inner_dev_id) = py.allow_threads(|| {
         let cuda = CudaMacz::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.macz_many_series_one_param_time_major_dev(price_tm, vol_tm_opt, cols, rows, &params)
+            .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(inner_ctx), device_id: Some(inner_dev_id) })
 }
 
 #[cfg(feature = "python")]
@@ -2454,11 +2538,15 @@ pub fn macz_batch_py<'py>(
         b: b_range,
     };
     let kern = validate_kernel(kernel, true)?;
-    let combos = expand_grid_macz(&sweep);
+    let combos = expand_grid_macz(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total_len = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow in macz_batch_py"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total_len], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
@@ -2608,10 +2696,14 @@ pub fn macz_batch_into(
             a: (a_start, a_end, a_step),
             b: (b_start, b_end, b_step),
         };
-        let combos = expand_grid_macz(&sweep);
+        let combos = expand_grid_macz(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow in macz_batch_into"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         macz_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2665,10 +2757,14 @@ pub fn macz_batch_into_with_volume(
             a: (a_start, a_end, a_step),
             b: (b_start, b_end, b_step),
         };
-        let combos = expand_grid_macz(&sweep);
+        let combos = expand_grid_macz(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow in macz_batch_into_with_volume"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         macz_batch_inner_into_vol(data, Some(volume), &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

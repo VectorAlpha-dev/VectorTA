@@ -14,6 +14,7 @@
 //! - Output length matches input data length with NaN padding for warmup period
 //!
 //! ## Developer Notes
+//! - Decision log: SIMD kernels are stubbed to the scalar path; CUDA wrapper is present with typed errors + VRAM checks and Python exposes CAI v3 + DLPack v1.x via shared `DeviceArrayF32Py`. Numerical outputs are unchanged.
 //! - Scalar optimized: O(N) rolling accumulators for Sy and Sxy with Kahan-compensated updates and periodic exact recompute to bound drift. Matches tests and avoids O(N·P).
 //! - SIMD status: AVX2/AVX512 kernels are currently short-circuited to the scalar path. Vectorizing the initial window introduced tiny numeric deltas beyond the module’s tight tolerance; with O(1) rolling updates dominating, SIMD did not yield consistent wins. Revisit if tolerance/patterns change.
 //! - Streaming: O(1) updates with Kahan compensation + periodic exact recompute; matches scalar outputs.
@@ -179,22 +180,19 @@ impl LinearRegSlopeBuilder {
 #[derive(Debug, Error)]
 pub enum LinearRegSlopeError {
     #[error("linearreg_slope: Empty data provided.")]
-    EmptyData,
+    EmptyInputData,
+    #[error("linearreg_slope: All values are NaN.")]
+    AllValuesNaN,
     #[error("linearreg_slope: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("linearreg_slope: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("linearreg_slope: All values are NaN.")]
-    AllValuesNaN,
-    #[error("linearreg_slope: Kernel mismatch - expected batch kernel for batch operation")]
-    KernelMismatch,
-    #[error(
-        "linearreg_slope: Invalid output length: output = {output_len}, expected = {expected_len}"
-    )]
-    InvalidOutputLength {
-        output_len: usize,
-        expected_len: usize,
-    },
+    #[error("linearreg_slope: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("linearreg_slope: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("linearreg_slope: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -210,7 +208,7 @@ pub fn linearreg_slope_with_kernel(
 ) -> Result<LinearRegSlopeOutput, LinearRegSlopeError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
-        return Err(LinearRegSlopeError::EmptyData);
+        return Err(LinearRegSlopeError::EmptyInputData);
     }
     let period = input.get_period();
     // Linear regression requires at least 2 points to define a slope
@@ -432,7 +430,7 @@ pub fn linearreg_slope_batch_with_kernel(
     let k = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(LinearRegSlopeError::KernelMismatch),
+        _ => return Err(LinearRegSlopeError::InvalidKernelForBatch(kernel)),
     };
     let simd = match k {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -534,15 +532,45 @@ impl LinearRegSlopeBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &LinearRegSlopeBatchRange) -> Vec<LinearRegSlopeParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, LinearRegSlopeError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let mut v = Vec::new();
+            let st = step.max(1);
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                match x.checked_add(st) {
+                    Some(next) => x = next,
+                    None => break,
+                }
+            }
+            if v.is_empty() {
+                return Err(LinearRegSlopeError::InvalidRange { start, end, step });
+            }
+            return Ok(v);
+        }
+        // reversed bounds
+        let mut v = Vec::new();
+        let st = step.max(1) as isize;
+        let mut x = start as isize;
+        let end_i = end as isize;
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(LinearRegSlopeError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period).unwrap_or_else(|_| Vec::new());
     let mut out = Vec::with_capacity(periods.len());
-    for &p in &periods {
+    for p in periods {
         out.push(LinearRegSlopeParams { period: Some(p) });
     }
     out
@@ -575,9 +603,10 @@ fn linearreg_slope_batch_inner(
 ) -> Result<LinearRegSlopeBatchOutput, LinearRegSlopeError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(LinearRegSlopeError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(LinearRegSlopeError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -605,6 +634,13 @@ fn linearreg_slope_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+
+    // Guard rows * cols overflow before allocation
+    let _total = rows.checked_mul(cols).ok_or(LinearRegSlopeError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
     // Use uninitialized memory with proper warmup periods
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -647,9 +683,10 @@ fn linearreg_slope_batch_inner_into(
 ) -> Result<Vec<LinearRegSlopeParams>, LinearRegSlopeError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(LinearRegSlopeError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(LinearRegSlopeError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -678,6 +715,13 @@ fn linearreg_slope_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+
+    // Guard rows * cols overflow when interpreting out buffer
+    let _total = rows.checked_mul(cols).ok_or(LinearRegSlopeError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
     // Initialize NaN prefixes for each row based on warmup period
     for (row, combo) in combos.iter().enumerate() {
@@ -1096,10 +1140,18 @@ pub fn linearreg_slope_batch_py<'py>(
 
     let combos = expand_grid(&sweep);
     let rows = combos.len();
+    if rows == 0 {
+        return Err(PyValueError::new_err(
+            "linearreg_slope: invalid period range (empty expansion)",
+        ));
+    }
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("linearreg_slope: rows*cols overflow"))?;
 
     // 1) Allocate NumPy buffer (uninitialized)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // 2) Warmup prefixes: identical to alma.rs pattern
@@ -1178,10 +1230,13 @@ pub fn linearreg_slope_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaLinearregSlope::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
         cuda.linearreg_slope_batch_dev(slice_in, &sweep)
+            .map(|(inner, combos)| (inner, combos, ctx, dev))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
@@ -1189,7 +1244,7 @@ pub fn linearreg_slope_cuda_batch_dev_py<'py>(
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) }, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1215,14 +1270,17 @@ pub fn linearreg_slope_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaLinearregSlope::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
         cuda.linearreg_slope_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map(|inner| (inner, ctx, dev))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 #[cfg(feature = "python")]
@@ -1257,7 +1315,7 @@ pub fn linearreg_slope_into_slice(
 ) -> Result<(), LinearRegSlopeError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
-        return Err(LinearRegSlopeError::EmptyData);
+        return Err(LinearRegSlopeError::EmptyInputData);
     }
     let period = input.get_period();
     // Linear regression requires at least 2 points to define a slope
@@ -1268,9 +1326,9 @@ pub fn linearreg_slope_into_slice(
         });
     }
     if dst.len() != data.len() {
-        return Err(LinearRegSlopeError::InvalidOutputLength {
-            output_len: dst.len(),
-            expected_len: data.len(),
+        return Err(LinearRegSlopeError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -1461,9 +1519,17 @@ pub fn linearreg_slope_batch_into(
         };
         let combos = expand_grid(&sweep);
         let rows = combos.len();
+        if rows == 0 {
+            return Err(JsValue::from_str(
+                "linearreg_slope: invalid period range (empty expansion)",
+            ));
+        }
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("linearreg_slope: rows*cols overflow"))?;
 
-        let out = core::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let out = core::slice::from_raw_parts_mut(out_ptr, total);
 
         // Warmup prefixes on the JS-provided buffer
         let first = data

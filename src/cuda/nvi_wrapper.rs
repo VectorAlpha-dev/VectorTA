@@ -4,70 +4,94 @@
 //!
 //! Parity with ALMA wrapper policy:
 //! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/nvi_kernel.ptx"))
-//!   using DetermineTargetFromContext + OptLevel O4, with simpler fallbacks.
-//! - NON_BLOCKING stream, simple VRAM guard.
+//!   using DetermineTargetFromContext + OptLevel O2, with simpler fallbacks.
+//! - NON_BLOCKING stream, simple VRAM guard with typed errors and launch checks.
 //! - Public device entry points for:
 //!   - Batch (one series × many params): here a single 1×N row (NVI has no params).
 //!   - Many-series × one-param (time-major layout).
+//! - Decision: CUDA enabled for single-row and many-series paths; kernels keep strict
+//!   sequential dependency to match CPU/streaming NVI, and VRAM handles integrate with
+//!   Python via CAI v3 + DLPack v1.x.
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::launch;
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use std::error::Error;
 use std::ffi::c_void;
-use std::fmt;
+use std::env;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaNviError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required}B free={free}B headroom={headroom}B")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaNviError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Cuda(e) => write!(f, "CUDA error: {}", e),
-            Self::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl Error for CudaNviError {}
 
 pub struct CudaNvi {
     module: Module,
     stream: Stream,
-    _ctx: Context,
+    context: Arc<Context>,
+    device_id: u32,
 }
 
 impl CudaNvi {
     pub fn new(device_id: usize) -> Result<Self, CudaNviError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let ctx = Context::new(device).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let ctx = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/nvi_kernel.ptx"));
-        // Prefer arch from current context + O4 (driver's most optimized level).
+        // Prefer arch from current context + O2 with fallbacks for brittle drivers.
         let primary_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O4),
+            ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, primary_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        let module = match Module::from_ptx(ptx, primary_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) =
+                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
+            }
+        };
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _ctx: ctx,
+            context: ctx,
+            device_id: device_id as u32,
         })
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaNviError> {
+        self.stream.synchronize().map_err(Into::into)
     }
 
     #[inline]
@@ -95,11 +119,48 @@ impl CudaNvi {
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Ok((free, _)) = mem_get_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
         } else {
             true
         }
+    }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+
+    #[inline]
+    fn validate_launch_dims(&self, grid: (u32, u32, u32), block: (u32, u32, u32)) -> Result<(), CudaNviError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        let (gx, gy, gz) = grid;
+        let (bx, by, bz) = block;
+        if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 {
+            return Err(CudaNviError::InvalidInput("zero-sized grid or block".into()));
+        }
+        if gx > max_gx || gy > max_gy || gz > max_gz || bx > max_bx || by > max_by || bz > max_bz
+        {
+            return Err(CudaNviError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
     }
 
     pub fn nvi_batch_dev(
@@ -111,25 +172,37 @@ impl CudaNvi {
         let len = close.len();
 
         // VRAM estimate: 2 inputs + 1 output
-        let bytes = (2 * len + len) * std::mem::size_of::<f32>();
-        if !Self::will_fit(bytes, 64 << 20) {
-            return Err(CudaNviError::Cuda("insufficient free VRAM".into()));
+        let elem = std::mem::size_of::<f32>();
+        let elems = 3usize
+            .checked_mul(len)
+            .ok_or_else(|| CudaNviError::InvalidInput("len overflow in VRAM estimate".into()))?;
+        let bytes = elems
+            .checked_mul(elem)
+            .ok_or_else(|| CudaNviError::InvalidInput("len*elem_size overflow".into()))?;
+        let headroom = 64usize << 20;
+        if !Self::will_fit(bytes, headroom) {
+            let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
+            return Err(CudaNviError::OutOfMemory {
+                required: bytes,
+                free,
+                headroom,
+            });
         }
 
-        let d_close =
-            DeviceBuffer::from_slice(close).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let d_volume =
-            DeviceBuffer::from_slice(volume).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close)?;
+        let d_volume = DeviceBuffer::from_slice(volume)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
         // Launch single-thread kernel (sequential scan)
         let func = self
             .module
             .get_function("nvi_batch_f32")
-            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let grid: GridSize = (1, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+            .map_err(|_| CudaNviError::MissingKernelSymbol { name: "nvi_batch_f32" })?;
+        let grid_dims = (1u32, 1u32, 1u32);
+        let block_dims = (1u32, 1u32, 1u32);
+        self.validate_launch_dims(grid_dims, block_dims)?;
+        let grid: GridSize = grid_dims.into();
+        let block: BlockSize = block_dims.into();
         unsafe {
             let mut close_ptr = d_close.as_device_ptr().as_raw();
             let mut vol_ptr = d_volume.as_device_ptr().as_raw();
@@ -144,12 +217,9 @@ impl CudaNvi {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+                .launch(&func, grid, block, 0, args)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -210,30 +280,58 @@ impl CudaNvi {
         }
 
         // VRAM estimate: 2 inputs + 1 output + first_valids
-        let bytes = (3 * expected) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>();
-        if !Self::will_fit(bytes, 64 << 20) {
-            return Err(CudaNviError::Cuda("insufficient free VRAM".into()));
+        let elem_f32 = std::mem::size_of::<f32>();
+        let elem_i32 = std::mem::size_of::<i32>();
+        let elems_main = 3usize
+            .checked_mul(expected)
+            .ok_or_else(|| {
+                CudaNviError::InvalidInput("expected overflow in VRAM estimate".into())
+            })?;
+        let bytes_main = elems_main
+            .checked_mul(elem_f32)
+            .ok_or_else(|| {
+                CudaNviError::InvalidInput("expected*elem_f32 overflow in VRAM estimate".into())
+            })?;
+        let bytes_first = cols
+            .checked_mul(elem_i32)
+            .ok_or_else(|| {
+                CudaNviError::InvalidInput("cols*elem_i32 overflow in VRAM estimate".into())
+            })?;
+        let bytes = bytes_main
+            .checked_add(bytes_first)
+            .ok_or_else(|| {
+                CudaNviError::InvalidInput("total VRAM bytes overflow".into())
+            })?;
+        let headroom = 64usize << 20;
+        if !Self::will_fit(bytes, headroom) {
+            let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
+            return Err(CudaNviError::OutOfMemory {
+                required: bytes,
+                free,
+                headroom,
+            });
         }
 
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let d_volume =
-            DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
-            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close_tm)?;
+        let d_volume = DeviceBuffer::from_slice(volume_tm)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }?;
 
         let func = self
             .module
             .get_function("nvi_many_series_one_param_f32")
-            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaNviError::MissingKernelSymbol {
+                name: "nvi_many_series_one_param_f32",
+            })?;
 
         // One thread per series
         let block_x: u32 = 256;
         let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        let grid_dims = (grid_x.max(1), 1u32, 1u32);
+        let block_dims = (block_x, 1u32, 1u32);
+        self.validate_launch_dims(grid_dims, block_dims)?;
+        let grid: GridSize = grid_dims.into();
+        let block: BlockSize = block_dims.into();
         unsafe {
             let mut close_ptr = d_close.as_device_ptr().as_raw();
             let mut vol_ptr = d_volume.as_device_ptr().as_raw();
@@ -249,13 +347,9 @@ impl CudaNvi {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -285,9 +379,12 @@ impl CudaNvi {
         let func = self
             .module
             .get_function("nvi_batch_f32")
-            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let grid: GridSize = (1, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+            .map_err(|_| CudaNviError::MissingKernelSymbol { name: "nvi_batch_f32" })?;
+        let grid_dims = (1u32, 1u32, 1u32);
+        let block_dims = (1u32, 1u32, 1u32);
+        self.validate_launch_dims(grid_dims, block_dims)?;
+        let grid: GridSize = grid_dims.into();
+        let block: BlockSize = block_dims.into();
         unsafe {
             let mut close_ptr = d_close.as_device_ptr().as_raw();
             let mut vol_ptr = d_volume.as_device_ptr().as_raw();
@@ -301,9 +398,7 @@ impl CudaNvi {
                 &mut first_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
         Ok(())
     }
@@ -339,13 +434,18 @@ impl CudaNvi {
         let func = self
             .module
             .get_function("nvi_many_series_one_param_f32")
-            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaNviError::MissingKernelSymbol {
+                name: "nvi_many_series_one_param_f32",
+            })?;
 
         // One thread per series; kernel grid-strides over s.
         let block_x: u32 = 256;
         let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        let grid_dims = (grid_x.max(1), 1u32, 1u32);
+        let block_dims = (block_x, 1u32, 1u32);
+        self.validate_launch_dims(grid_dims, block_dims)?;
+        let grid: GridSize = grid_dims.into();
+        let block: BlockSize = block_dims.into();
 
         unsafe {
             let mut close_ptr = d_close_tm.as_device_ptr().as_raw();
@@ -362,9 +462,7 @@ impl CudaNvi {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
         Ok(())
     }

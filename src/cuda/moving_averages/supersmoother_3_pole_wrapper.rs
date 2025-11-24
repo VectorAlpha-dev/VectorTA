@@ -195,6 +195,28 @@ impl CudaSupersmoother3Pole {
         }
     }
 
+    #[inline]
+    fn ptr_device_id<T: cust::memory::DeviceCopy>(buf: &DeviceBuffer<T>) -> Result<u32, CudaSuperSmoother3PoleError> {
+        unsafe {
+            let mut dev_ordinal: i32 = -1;
+            let ptr = buf.as_device_ptr().as_raw() as *mut c_void;
+            use cust::sys as cu;
+            let res = cu::cuPointerGetAttribute(
+                &mut dev_ordinal as *mut _ as *mut c_void,
+                cu::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
+                ptr,
+            );
+            if res == cu::CUresult::CUDA_SUCCESS && dev_ordinal >= 0 {
+                Ok(dev_ordinal as u32)
+            } else {
+                // Fallback to current context device if attribute not available
+                let mut cur_dev: i32 = 0;
+                let _ = cu::cuCtxGetDevice(&mut cur_dev as *mut _);
+                Ok(cur_dev as u32)
+            }
+        }
+    }
+
     fn expand_periods(range: &SuperSmoother3PoleBatchRange) -> Vec<SuperSmoother3PoleParams> {
         let (start, end, step) = range.period;
         let periods: Vec<usize> = if step == 0 || start == end {
@@ -370,9 +392,15 @@ impl CudaSupersmoother3Pole {
         let total_elems = n_combos
             .checked_mul(series_len)
             .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("rows * cols overflow".into()))?;
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = total_elems * std::mem::size_of::<f32>();
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("series_len * sizeof overflow".into()))?;
+        let periods_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("n_combos * sizeof overflow".into()))?;
+        let out_bytes = total_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("total_elems * sizeof overflow".into()))?;
         let required = prices_bytes + periods_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024; // 64MB cushion
         if !Self::will_fit(required, headroom) {
@@ -456,6 +484,19 @@ impl CudaSupersmoother3Pole {
             return Err(CudaSuperSmoother3PoleError::InvalidInput(
                 "series_len and n_combos must be > 0".into(),
             ));
+        }
+        // Ensure all buffers belong to the same device as this wrapper
+        let dev_prices = Self::ptr_device_id(d_prices)?;
+        let dev_periods = Self::ptr_device_id(d_periods)?;
+        let dev_out = Self::ptr_device_id(d_out)?;
+        if dev_prices != self.device_id {
+            return Err(CudaSuperSmoother3PoleError::DeviceMismatch { buf: dev_prices, current: self.device_id });
+        }
+        if dev_periods != self.device_id {
+            return Err(CudaSuperSmoother3PoleError::DeviceMismatch { buf: dev_periods, current: self.device_id });
+        }
+        if dev_out != self.device_id {
+            return Err(CudaSuperSmoother3PoleError::DeviceMismatch { buf: dev_out, current: self.device_id });
         }
         self.launch_batch_kernel(
             d_prices,
@@ -621,9 +662,15 @@ impl CudaSupersmoother3Pole {
         let total_elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("rows * cols overflow".into()))?;
-        let prices_bytes = total_elems * std::mem::size_of::<f32>();
-        let first_valid_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = total_elems * std::mem::size_of::<f32>();
+        let prices_bytes = total_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("total_elems * sizeof overflow".into()))?;
+        let first_valid_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("cols * sizeof overflow".into()))?;
+        let out_bytes = total_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("total_elems * sizeof overflow".into()))?;
         let required = prices_bytes + first_valid_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
@@ -771,7 +818,8 @@ impl DeviceArrayF32Py {
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
-        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        let size = self.inner.rows.saturating_mul(self.inner.cols);
+        let ptr_val: usize = if size == 0 { 0 } else { self.inner.buf.as_device_ptr().as_raw() as usize };
         d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
         if self.stream_handle != 0 {
@@ -779,91 +827,176 @@ impl DeviceArrayF32Py {
         }
         Ok(d.into())
     }
-
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
 
-    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<usize>) -> PyResult<PyObject> {
-        // Minimal DLPack v0.6 capsule for 2D FP32 row‑major CUDA tensor
-        use std::ffi::{c_void, CString};
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<PyObject>,
+        max_version: Option<(i32, i32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
         use pyo3::ffi as pyffi;
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
 
-        #[repr(C)]
-        struct DLDevice { device_type: i32, device_id: i32 }
+        // Synchronize producer stream so no pending work remains.
+        unsafe { let _ = cust::sys::cuStreamSynchronize(self.stream_handle as *mut _); }
+
         #[repr(C)]
         struct DLDataType { code: u8, bits: u8, lanes: u16 }
         #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
         struct DLTensor {
-            data: *mut c_void,
+            data: *mut std::ffi::c_void,
             device: DLDevice,
             ndim: i32,
             dtype: DLDataType,
             shape: *mut i64,
             strides: *mut i64,
-            byte_offset: usize,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLPackVersion { major: u32, minor: u32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
         }
         #[repr(C)]
         struct DLManagedTensor {
             dl_tensor: DLTensor,
-            manager_ctx: *mut c_void,
+            manager_ctx: *mut std::ffi::c_void,
             deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
         }
 
-        #[repr(C)]
-        struct ManagerCtx {
-            shape: *mut i64,
-            strides: *mut i64,
-            _shape_box: Box<[i64; 2]>,
-            _strides_box: Box<[i64; 2]>,
-            _self_ref: pyo3::PyObject,
+        struct Manager {
+            ctx: cust::sys::CUcontext,
+            device_id: i32,
+            _buf: DeviceBuffer<f32>,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
         }
 
-        unsafe extern "C" fn deleter(self_ptr: *mut DLManagedTensor) {
-            if self_ptr.is_null() { return; }
-            let mt = Box::from_raw(self_ptr);
-            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
-            if !ctx_ptr.is_null() {
-                let _ctx = Box::from_raw(ctx_ptr);
+        unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() { return; }
+            let mgr = (*p).manager_ctx as *mut Manager;
+            if !mgr.is_null() {
+                let mut old: cust::sys::CUcontext = std::ptr::null_mut();
+                let _ = cust::sys::cuCtxPushCurrent((*mgr).ctx);
+                let _boxed: Box<Manager> = Box::from_raw(mgr);
+                let _ = cust::sys::cuCtxPopCurrent(&mut old as *mut _);
+                let _ = cust::sys::cuDevicePrimaryCtxRelease((*p).dl_tensor.device.device_id as i32);
             }
-            drop(mt);
+            let _ = Box::from_raw(p);
+        }
+        unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            let mgr = (*p).manager_ctx as *mut Manager;
+            if !mgr.is_null() {
+                let mut old: cust::sys::CUcontext = std::ptr::null_mut();
+                let dev = (*mgr).device_id;
+                let _ = cust::sys::cuCtxPushCurrent((*mgr).ctx);
+                let _boxed: Box<Manager> = Box::from_raw(mgr);
+                let _ = cust::sys::cuCtxPopCurrent(&mut old as *mut _);
+                let _ = cust::sys::cuDevicePrimaryCtxRelease(dev);
+            }
+            let _ = Box::from_raw(p);
         }
 
-        let rows = slf.inner.rows as i64;
-        let cols = slf.inner.cols as i64;
-        let mut shape_box = Box::new([rows, cols]);
-        let mut strides_box = Box::new([cols, 1]);
-        let shape_ptr: *mut i64 = shape_box.as_mut_ptr();
-        let strides_ptr: *mut i64 = strides_box.as_mut_ptr();
+        unsafe extern "C" fn capsule_dtor(capsule: *mut pyo3::ffi::PyObject) {
+            let vname = std::ffi::CString::new("dltensor_versioned").unwrap();
+            let legacy = std::ffi::CString::new("dltensor").unwrap();
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, vname.as_ptr());
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensorVersioned;
+                if let Some(del) = (*mt).deleter { del(mt) }
+                return;
+            }
+            let ptr2 = pyo3::ffi::PyCapsule_GetPointer(capsule, legacy.as_ptr());
+            if !ptr2.is_null() {
+                let mt = ptr2 as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt) }
+            }
+        }
 
-        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
-        let mgr = Box::new(ManagerCtx {
-            shape: shape_ptr,
-            strides: strides_ptr,
-            _shape_box: shape_box,
-            _strides_box: strides_box,
-            _self_ref: self_ref,
-        });
-        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+        let rows = self.inner.rows as i64;
+        let cols = self.inner.cols as i64;
+        let size = (rows as usize).saturating_mul(cols as usize);
+        let data_ptr = if size == 0 { null_mut() } else { self.inner.buf.as_device_ptr().as_raw() as *mut _ };
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
 
-        let tensor = DLTensor {
-            data: slf.inner.buf.as_device_ptr().as_raw() as *mut c_void,
-            device: DLDevice { device_type: 2, device_id: slf._device_id as i32 },
-            ndim: 2,
-            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-            shape: shape_ptr,
-            strides: strides_ptr,
-            byte_offset: 0,
-        };
-        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
-        let ptr = Box::into_raw(mt) as *mut c_void;
+        // Negotiate version
+        let use_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+
+        // Move buffer ownership into capsule manager
+        let dummy = DeviceBuffer::from_slice(&[]).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(&mut self.inner, DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 });
+
+        // Retain primary context for allocation device
+        let (dev_type, dev_id) = self.__dlpack_device__();
+        debug_assert_eq!(dev_type, 2);
+        let mut retained: cust::sys::CUcontext = std::ptr::null_mut();
+        unsafe { let _ = cust::sys::cuDevicePrimaryCtxRetain(&mut retained as *mut _, dev_id); }
+
+        let mgr = Box::new(Manager { ctx: retained, device_id: dev_id, _buf: inner.buf, _shape: shape, _strides: strides });
+        let mgr_ptr = Box::into_raw(mgr) as *mut std::ffi::c_void;
 
         unsafe {
-            let name = CString::new("dltensor").unwrap();
-            let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
-            if cap.is_null() {
-                let _ = Box::from_raw(ptr as *mut DLManagedTensor);
-                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+            if use_versioned {
+                let mt = Box::new(DLManagedTensorVersioned {
+                    version: DLPackVersion { major: 1, minor: 2 },
+                    manager_ctx: mgr_ptr,
+                    deleter: Some(deleter_v1),
+                    flags: 0,
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice { device_type: 2, device_id: dev_id },
+                        ndim: 2,
+                        dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                        shape: (*((mgr_ptr as *mut Manager)))._shape.as_mut_ptr(),
+                        strides: (*((mgr_ptr as *mut Manager)))._strides.as_mut_ptr(),
+                        byte_offset: 0,
+                    },
+                });
+                let ptr = Box::into_raw(mt) as *mut std::ffi::c_void;
+                let name = std::ffi::CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_dtor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack v1.x capsule"));
+                }
+                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+            } else {
+                let mt = Box::new(DLManagedTensor {
+                    manager_ctx: mgr_ptr,
+                    deleter: Some(deleter_legacy),
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice { device_type: 2, device_id: dev_id },
+                        ndim: 2,
+                        dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                        shape: (*((mgr_ptr as *mut Manager)))._shape.as_mut_ptr(),
+                        strides: (*((mgr_ptr as *mut Manager)))._strides.as_mut_ptr(),
+                        byte_offset: 0,
+                    },
+                });
+                let ptr = Box::into_raw(mt) as *mut std::ffi::c_void;
+                let name = std::ffi::CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_dtor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+                }
+                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
             }
-            Ok(pyo3::PyObject::from_owned_ptr(py, cap))
         }
     }
 }

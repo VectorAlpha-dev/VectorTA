@@ -26,25 +26,31 @@ use cust::stream::{Stream, StreamFlags};
 use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CudaRsmkError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("rsmk cuda: invalid input: {0}")]
     InvalidInput(String),
+    #[error("rsmk cuda: unsupported: {0}")]
     Unsupported(String),
+    #[error("rsmk cuda: out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("rsmk cuda: missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("rsmk cuda: invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error(
+        "rsmk cuda: launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
+    )]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("rsmk cuda: device mismatch: buf={buf}, current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("rsmk cuda: not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaRsmkError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaRsmkError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaRsmkError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-            CudaRsmkError::Unsupported(s) => write!(f, "Unsupported: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaRsmkError {}
 
 pub struct DeviceArrayF32Pair {
     pub a: DeviceArrayF32,
@@ -65,15 +71,15 @@ impl DeviceArrayF32Pair {
 pub struct CudaRsmk {
     module: Module,
     pub(crate) stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
 }
 
 impl CudaRsmk {
     pub fn new(device_id: usize) -> Result<Self, CudaRsmkError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/rsmk_kernel.ptx"));
         let jit_opts = &[
@@ -87,17 +93,27 @@ impl CudaRsmk {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaRsmkError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
         })
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     #[inline]
@@ -109,15 +125,20 @@ impl CudaRsmk {
     }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaRsmkError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Ok((free, _total)) = mem_get_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaRsmkError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
         }
+        Ok(())
     }
 
     // Utility: find first index where both series finite and compare != 0
@@ -146,10 +167,35 @@ impl CudaRsmk {
 
         // Expand parameter grid (mirrors scalar expand_grid: EMA/EMA only)
         fn axis(a: (usize, usize, usize)) -> Vec<usize> {
-            if a.2 == 0 || a.0 == a.1 {
-                return vec![a.0];
+            let (start, end, step) = a;
+            if step == 0 || start == end {
+                return vec![start];
             }
-            (a.0..=a.1).step_by(a.2).collect()
+            let mut vals = Vec::new();
+            if start <= end {
+                let st = step.max(1);
+                for v in (start..=end).step_by(st) {
+                    vals.push(v);
+                }
+            } else {
+                let mut cur = start;
+                let s = step.max(1);
+                loop {
+                    vals.push(cur);
+                    if cur <= end {
+                        break;
+                    }
+                    if cur < s {
+                        break;
+                    }
+                    let next = cur - s;
+                    if next == cur {
+                        break;
+                    }
+                    cur = next;
+                }
+            }
+            vals
         }
         let looks = axis(sweep.lookback);
         let periods = axis(sweep.period);
@@ -177,44 +223,56 @@ impl CudaRsmk {
         // VRAM estimate: indicator + signal + momentum buffers per unique lookback
         let rows = combos.len();
         let uniq_looks: BTreeSet<usize> = combos.iter().map(|p| p.lookback.unwrap()).collect();
-        let out_bytes = 2usize * rows * len * std::mem::size_of::<f32>();
-        let mom_bytes = uniq_looks.len() * len * std::mem::size_of::<f32>();
-        let in_bytes = 2usize * len * std::mem::size_of::<f32>();
-        let required = out_bytes + mom_bytes + in_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaRsmkError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                required as f64 / (1024.0 * 1024.0)
-            )));
-        }
+        let el = std::mem::size_of::<f32>();
+        let rows_len = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("rows*len overflow".into()))?;
+        let out_bytes = rows_len
+            .checked_mul(2 * el)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("output size overflow".into()))?;
+        let mom_bytes = uniq_looks
+            .len()
+            .checked_mul(len)
+            .and_then(|x| x.checked_mul(el))
+            .ok_or_else(|| CudaRsmkError::InvalidInput("momentum size overflow".into()))?;
+        let in_bytes = len
+            .checked_mul(2 * el)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("input size overflow".into()))?;
+        let required = out_bytes
+            .checked_add(mom_bytes)
+            .and_then(|x| x.checked_add(in_bytes))
+            .ok_or_else(|| CudaRsmkError::InvalidInput("VRAM size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
         // Upload inputs
-        let d_main =
-            DeviceBuffer::from_slice(main_f32).map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
-        let d_comp = DeviceBuffer::from_slice(compare_f32)
-            .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+        let d_main = DeviceBuffer::from_slice(main_f32)?;
+        let d_comp = DeviceBuffer::from_slice(compare_f32)?;
 
         // Prepare output buffers (row-major: rows x len)
-        let mut d_indicator: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
-            .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
-        let mut d_signal: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
-            .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+        let mut d_indicator: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows_len) }?;
+        let mut d_signal: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows_len) }?;
 
         // Kernel handles
         let mut k_mom: Function = self
             .module
             .get_function("rsmk_momentum_f32")
-            .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaRsmkError::MissingKernelSymbol {
+                name: "rsmk_momentum_f32",
+            })?;
         let mut k_apply_row: Function = self
             .module
             .get_function("rsmk_apply_mom_single_row_ema_ema_f32")
-            .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaRsmkError::MissingKernelSymbol {
+                name: "rsmk_apply_mom_single_row_ema_ema_f32",
+            })?;
 
         // Build momentum per unique lookback and cache device buffers
         let mut mom_dev: HashMap<usize, DeviceBuffer<f32>> = HashMap::new();
         for &lb in &uniq_looks {
-            let mut d_m = unsafe { DeviceBuffer::<f32>::uninitialized(len) }
-                .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+            let mut d_m: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
             unsafe {
                 let mut main_ptr = d_main.as_device_ptr().as_raw();
                 let mut comp_ptr = d_comp.as_device_ptr().as_raw();
@@ -230,15 +288,13 @@ impl CudaRsmk {
                     &mut len_i as *mut _ as *mut c_void,
                     &mut mom_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(
-                        &mut k_mom,
-                        GridSize::xyz(1, 1, 1),
-                        BlockSize::xyz(1, 1, 1),
-                        0,
-                        args,
-                    )
-                    .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+                self.stream.launch(
+                    &mut k_mom,
+                    GridSize::xyz(1, 1, 1),
+                    BlockSize::xyz(1, 1, 1),
+                    0,
+                    args,
+                )?;
             }
             mom_dev.insert(lb, d_m);
         }
@@ -278,21 +334,17 @@ impl CudaRsmk {
                     &mut ind_ptr as *mut _ as *mut c_void,
                     &mut sig_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(
-                        &mut k_apply_row,
-                        GridSize::xyz(1, 1, 1),
-                        BlockSize::xyz(1, 1, 1),
-                        0,
-                        args,
-                    )
-                    .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+                self.stream.launch(
+                    &mut k_apply_row,
+                    GridSize::xyz(1, 1, 1),
+                    BlockSize::xyz(1, 1, 1),
+                    0,
+                    args,
+                )?;
             }
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32Pair {
@@ -320,7 +372,10 @@ impl CudaRsmk {
         rows: usize,
         params: &RsmkParams,
     ) -> Result<DeviceArrayF32Pair, CudaRsmkError> {
-        if main_tm_f32.len() != compare_tm_f32.len() || main_tm_f32.len() != rows * cols {
+        let expected = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("rows*cols overflow".into()))?;
+        if main_tm_f32.len() != compare_tm_f32.len() || main_tm_f32.len() != expected {
             return Err(CudaRsmkError::InvalidInput(
                 "time-major dims mismatch".into(),
             ));
@@ -366,43 +421,49 @@ impl CudaRsmk {
         }
 
         // VRAM estimate: indicator + signal + inputs + firsts
-        let out_bytes = 2usize * rows * cols * std::mem::size_of::<f32>();
-        let in_bytes =
-            2usize * rows * cols * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>();
-        if !Self::will_fit(out_bytes + in_bytes, 64 * 1024 * 1024) {
-            return Err(CudaRsmkError::InvalidInput(
-                "insufficient VRAM for RSMK many-series".into(),
-            ));
-        }
+        let el_f32 = std::mem::size_of::<f32>();
+        let el_i32 = std::mem::size_of::<i32>();
+        let series_elems = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = series_elems
+            .checked_mul(2 * el_f32)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("output size overflow".into()))?;
+        let in_bytes_main = series_elems
+            .checked_mul(2 * el_f32)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("input size overflow".into()))?;
+        let in_bytes_firsts = cols
+            .checked_mul(el_i32)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("firsts size overflow".into()))?;
+        let required = out_bytes
+            .checked_add(in_bytes_main)
+            .and_then(|x| x.checked_add(in_bytes_firsts))
+            .ok_or_else(|| CudaRsmkError::InvalidInput("VRAM size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
         // Upload inputs
-        let d_main = DeviceBuffer::from_slice(main_tm_f32)
-            .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
-        let d_comp = DeviceBuffer::from_slice(compare_tm_f32)
-            .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
-        let h_firsts =
-            LockedBuffer::from_slice(&firsts).map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+        let d_main = DeviceBuffer::from_slice(main_tm_f32)?;
+        let d_comp = DeviceBuffer::from_slice(compare_tm_f32)?;
+        let h_firsts = LockedBuffer::from_slice(&firsts)?;
         let mut d_firsts: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols, &self.stream) }
-                .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(cols, &self.stream) }?;
         unsafe {
-            d_firsts
-                .async_copy_from(&h_firsts, &self.stream)
-                .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+            d_firsts.async_copy_from(&h_firsts, &self.stream)?;
         }
 
         // Outputs
         let mut d_indicator: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(rows * cols) }
-                .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
-        let mut d_signal: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * cols) }
-            .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(series_elems) }?;
+        let mut d_signal: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_elems) }?;
 
         // Launch kernel (one thread per series)
         let mut func: Function = self
             .module
             .get_function("rsmk_many_series_one_param_time_major_ema_ema_f32")
-            .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaRsmkError::MissingKernelSymbol {
+                name: "rsmk_many_series_one_param_time_major_ema_ema_f32",
+            })?;
         let block = BlockSize::xyz(1, 1, 1);
         let grid = GridSize::xyz(1, cols as u32, 1);
         unsafe {
@@ -429,13 +490,10 @@ impl CudaRsmk {
                 &mut sig_ptr as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&mut func, grid, block, 0, args)
-                .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+                .launch(&mut func, grid, block, 0, args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRsmkError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32Pair {
             a: DeviceArrayF32 {
                 buf: d_indicator,

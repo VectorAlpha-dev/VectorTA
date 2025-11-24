@@ -31,6 +31,8 @@
 //!   - sinwma_scalar ≈ 165–170 µs; AVX2 ≈ 157–160 µs; AVX512 ≈ 56–57 µs.
 //!   - sinwma_batch_scalarbatch ≈ 2.6 ms; AVX2Batch ≈ 2.1 ms; AVX512Batch ≈ 2.0 ms.
 //! - Decision: Keep SIMD enabled (≥5% faster vs scalar) and retain scalar as the reference path.
+//! - CUDA: Wrapper present (typed errors, launch checks). Python interop provides CAI v3 (byte‑strides)
+//!   and DLPack v1.x negotiation (versioned capsules); VRAM handle retains primary context via RAII.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

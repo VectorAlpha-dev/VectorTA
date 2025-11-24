@@ -21,6 +21,7 @@
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 //! - **SIMD stubs**: When `nightly-avx` is not enabled, AVX2/AVX512 fall back to an unsafe-fast scalar path; the Scalar path stays fully safe (WASM-friendly).
 //! - **Batch note**: ScalarBatch uses a per-length shared-EMA path (row-specific optimization) to avoid redundant EMA recomputation across RSI levels.
+//! - **Decision log**: SIMD warmup vectorization and CUDA batch/many-series kernels are enabled; scalar CPU remains the reference path and numerical outputs are unchanged.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -365,6 +366,15 @@ pub enum ReverseRsiError {
 
     #[error("reverse_rsi: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+
+    #[error("reverse_rsi: output slice length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("reverse_rsi: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+
+    #[error("reverse_rsi: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // ==================== MAIN ALGORITHM ====================
@@ -393,7 +403,13 @@ fn reverse_rsi_prepare<'a>(
     if !(0.0 < rsi_lvl && rsi_lvl < 100.0) || rsi_lvl.is_nan() || rsi_lvl.is_infinite() {
         return Err(ReverseRsiError::InvalidRsiLevel { level: rsi_lvl });
     }
-    let ema_len = (2 * rsi_len) - 1; // warmup bars count
+    let ema_len = rsi_len
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or(ReverseRsiError::InvalidPeriod {
+            period: rsi_len,
+            data_len: len,
+        })?; // warmup bars count
     if len - first < ema_len {
         return Err(ReverseRsiError::NotEnoughValidData {
             needed: ema_len,
@@ -915,9 +931,9 @@ pub fn reverse_rsi_into(
 ) -> Result<(), ReverseRsiError> {
     let (data, first, rsi_len, rsi_lvl, ema_len) = reverse_rsi_prepare(input, Kernel::Auto)?;
     if out.len() != data.len() {
-        return Err(ReverseRsiError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
+        return Err(ReverseRsiError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
         });
     }
 
@@ -952,9 +968,9 @@ pub fn reverse_rsi_into_slice(
 ) -> Result<(), ReverseRsiError> {
     let (data, first, rsi_len, rsi_lvl, ema_len) = reverse_rsi_prepare(input, kernel)?;
     if dst.len() != data.len() {
-        return Err(ReverseRsiError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(ReverseRsiError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
     reverse_rsi_compute_into(data, first, rsi_len, rsi_lvl, kernel, dst)?; // pass kernel
@@ -1149,41 +1165,111 @@ pub fn reverse_rsi_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(ReverseRsiError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+        other => {
+            return Err(ReverseRsiError::InvalidKernelForBatch(other));
         }
     };
     // compute using scalar/AVX phase inside reverse_rsi_with_kernel per-row (same as now)
     reverse_rsi_batch_inner(data, sweep, kernel, true)
 }
 
-pub(crate) fn expand_grid(sweep: &ReverseRsiBatchRange) -> Vec<ReverseRsiParams> {
-    let mut combos = Vec::new();
+fn axis_usize(
+    (start, end, step): (usize, usize, usize),
+) -> Result<Vec<usize>, ReverseRsiError> {
+    if step == 0 || start == end {
+        return Ok(vec![start]);
+    }
 
+    if start < end {
+        let mut v = Vec::new();
+        let mut x = start;
+        let st = step.max(1);
+        while x <= end {
+            v.push(x);
+            x = x
+                .checked_add(st)
+                .ok_or_else(|| ReverseRsiError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                })?;
+        }
+        if v.is_empty() {
+            return Err(ReverseRsiError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        return Ok(v);
+    }
+
+    let mut v = Vec::new();
+    let mut x = start as isize;
+    let end_i = end as isize;
+    let st = (step as isize).max(1);
+    while x >= end_i {
+        v.push(x as usize);
+        x -= st;
+    }
+    if v.is_empty() {
+        return Err(ReverseRsiError::InvalidRange {
+            start: start.to_string(),
+            end: end.to_string(),
+            step: step.to_string(),
+        });
+    }
+    Ok(v)
+}
+
+fn axis_f64(
+    (start, end, step): (f64, f64, f64),
+) -> Result<Vec<f64>, ReverseRsiError> {
+    if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+        return Ok(vec![start]);
+    }
+    let mut v = Vec::new();
+    let mut x = start;
+    if step > 0.0 {
+        while x <= end + 1e-12 {
+            v.push(x);
+            x += step;
+        }
+    } else {
+        while x >= end - 1e-12 {
+            v.push(x);
+            x += step; // negative step
+        }
+    }
+    if v.is_empty() {
+        return Err(ReverseRsiError::InvalidRange {
+            start: start.to_string(),
+            end: end.to_string(),
+            step: step.to_string(),
+        });
+    }
+    Ok(v)
+}
+
+pub(crate) fn expand_grid(
+    sweep: &ReverseRsiBatchRange,
+) -> Result<Vec<ReverseRsiParams>, ReverseRsiError> {
     let (len_start, len_end, len_step) = sweep.rsi_length_range;
     let (lvl_start, lvl_end, lvl_step) = sweep.rsi_level_range;
 
-    let lengths = if len_step == 0 {
-        vec![len_start]
-    } else {
-        (len_start..=len_end).step_by(len_step).collect::<Vec<_>>()
-    };
+    let lengths = axis_usize((len_start, len_end, len_step))?;
+    let levels = axis_f64((lvl_start, lvl_end, lvl_step))?;
 
-    let levels = if lvl_step == 0.0 {
-        vec![lvl_start]
-    } else {
-        let mut lvls = Vec::new();
-        let mut current = lvl_start;
-        while current <= lvl_end {
-            lvls.push(current);
-            current += lvl_step;
-        }
-        lvls
-    };
+    let cap = lengths
+        .len()
+        .checked_mul(levels.len())
+        .ok_or_else(|| ReverseRsiError::InvalidRange {
+            start: lengths.len().to_string(),
+            end: levels.len().to_string(),
+            step: "lengths*levels".into(),
+        })?;
 
+    let mut combos = Vec::with_capacity(cap);
     for &length in &lengths {
         for &level in &levels {
             combos.push(ReverseRsiParams {
@@ -1193,7 +1279,7 @@ pub(crate) fn expand_grid(sweep: &ReverseRsiBatchRange) -> Vec<ReverseRsiParams>
         }
     }
 
-    combos
+    Ok(combos)
 }
 
 #[inline(always)]
@@ -1221,13 +1307,21 @@ fn reverse_rsi_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<ReverseRsiBatchOutput, ReverseRsiError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let cols = data.len();
     let rows = combos.len();
 
     if cols == 0 {
         return Err(ReverseRsiError::EmptyInputData);
     }
+
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| ReverseRsiError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
@@ -1247,6 +1341,13 @@ fn reverse_rsi_batch_inner(
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
+
+    if buf_guard.len() != total {
+        return Err(ReverseRsiError::OutputLengthMismatch {
+            expected: total,
+            got: buf_guard.len(),
+        });
+    }
 
     reverse_rsi_batch_inner_into(data, &combos, kern, parallel, out)?;
 
@@ -1275,6 +1376,21 @@ fn reverse_rsi_batch_inner_into(
     out: &mut [f64],
 ) -> Result<(), ReverseRsiError> {
     let cols = data.len();
+    let rows = combos.len();
+
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| ReverseRsiError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
+    if out.len() != expected {
+        return Err(ReverseRsiError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
     let row_kern = to_non_batch(match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -1426,10 +1542,17 @@ pub fn reverse_rsi_batch(
     cols: usize,
     params: &[ReverseRsiParams],
 ) -> Result<Vec<Vec<f64>>, ReverseRsiError> {
-    if data_matrix.len() != rows * cols {
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| ReverseRsiError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
+    if data_matrix.len() != expected {
         return Err(ReverseRsiError::InvalidPeriod {
             period: data_matrix.len(),
-            data_len: rows * cols,
+            data_len: expected,
         });
     }
 
@@ -1524,10 +1647,13 @@ pub fn reverse_rsi_batch_py<'py>(
         rsi_level_range,
     };
     let kern = validate_kernel(kernel, true)?;
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow in reverse_rsi_batch_py"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     py.allow_threads(|| {
@@ -1586,10 +1712,13 @@ pub fn reverse_rsi_cuda_batch_dev_py<'py>(
         rsi_length_range,
         rsi_level_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaReverseRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.reverse_rsi_batch_dev(slice_in, &sweep)
+            .map(|(inner, combos)| (inner, combos, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
@@ -1603,7 +1732,7 @@ pub fn reverse_rsi_cuda_batch_dev_py<'py>(
         .collect();
     dict.set_item("rsi_lengths", lens.into_pyarray(py))?;
     dict.set_item("rsi_levels", lvls.into_pyarray(py))?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) }, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1626,13 +1755,16 @@ pub fn reverse_rsi_cuda_many_series_one_param_dev_py<'py>(
         rsi_length: Some(rsi_length),
         rsi_level: Some(rsi_level),
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaReverseRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.reverse_rsi_many_series_one_param_time_major_dev(slice_in, cols, rows, &params)
+            .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 #[cfg(feature = "python")]
@@ -1780,7 +1912,10 @@ pub fn reverse_rsi_batch_columnar_into(
     rsi_length: usize,
     rsi_level: f64,
 ) -> i32 {
-    let total_len = rows * cols;
+    let total_len = match rows.checked_mul(cols) {
+        Some(v) => v,
+        None => return -1,
+    };
     let data = unsafe { std::slice::from_raw_parts(in_ptr, total_len) };
     let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, total_len) };
 
@@ -1826,12 +1961,16 @@ pub fn reverse_rsi_batch_into(
             rsi_length_range: (rsi_len_start, rsi_len_end, rsi_len_step),
             rsi_level_range: (rsi_lvl_start, rsi_lvl_end, rsi_lvl_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
         // write directly into caller buffer
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow in reverse_rsi_batch_into"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         reverse_rsi_batch_inner_into(data, &combos, detect_best_batch_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)

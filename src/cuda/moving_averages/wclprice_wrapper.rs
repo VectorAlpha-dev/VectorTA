@@ -27,25 +27,29 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaWclpriceError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaWclpriceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaWclpriceError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaWclpriceError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaWclpriceError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -90,7 +94,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaWclprice {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaWclpricePolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -101,31 +105,24 @@ pub struct CudaWclprice {
 
 impl CudaWclprice {
     pub fn new(device_id: usize) -> Result<Self, CudaWclpriceError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/wclprice_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?,
-            },
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaWclpricePolicy::default(),
             last_batch: None,
@@ -149,6 +146,12 @@ impl CudaWclprice {
     pub fn policy(&self) -> &CudaWclpricePolicy {
         &self.policy
     }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
         self.last_batch
     }
@@ -156,9 +159,7 @@ impl CudaWclprice {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaWclpriceError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
 
     #[inline]
@@ -270,7 +271,7 @@ impl CudaWclprice {
         let func = self
             .module
             .get_function("wclprice_batch_f32")
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaWclpriceError::MissingKernelSymbol { name: "wclprice_batch_f32" })?;
 
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => Self::choose_block_x("WCLPRICE_BLOCK_X", 256, 64),
@@ -283,15 +284,41 @@ impl CudaWclprice {
         self.maybe_log_batch_debug();
 
         // 1 combo (single row), grid-stride along time
-        let grid: GridSize = (((series_len as u32 + block_x - 1) / block_x).max(1), 1, 1).into();
+        let series_len_u32 = u32::try_from(series_len)
+            .map_err(|_| CudaWclpriceError::InvalidInput("series_len too large".into()))?;
+        let gx = ((series_len_u32 + block_x - 1) / block_x).max(1);
+        let gy = 1u32;
+        let gz = 1u32;
+        let grid: GridSize = (gx, gy, gz).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        // Best-effort launch bounds check against device attributes.
+        let dev = Device::get_device(self.device_id)?;
+        let max_grid_x = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)?
+            as u32;
+        let max_threads = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)?
+            as u32;
+        if gx > max_grid_x || block_x > max_threads {
+            return Err(CudaWclpriceError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
 
         unsafe {
             let mut high_ptr = d_high.as_device_ptr().as_raw();
             let mut low_ptr = d_low.as_device_ptr().as_raw();
             let mut close_ptr = d_close.as_device_ptr().as_raw();
-            let mut len_i = series_len as i32;
-            let mut first_i = first_valid as i32;
+            let mut len_i = i32::try_from(series_len)
+                .map_err(|_| CudaWclpriceError::InvalidInput("series_len too large for kernel".into()))?;
+            let mut first_i = i32::try_from(first_valid)
+                .map_err(|_| CudaWclpriceError::InvalidInput("first_valid too large for kernel".into()))?;
             let mut out_ptr = d_out.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut high_ptr as *mut _ as *mut c_void,
@@ -301,9 +328,7 @@ impl CudaWclprice {
                 &mut first_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -317,40 +342,40 @@ impl CudaWclprice {
     ) -> Result<DeviceArrayF32, CudaWclpriceError> {
         let (series_len, first_valid) = Self::prepare_batch_inputs(high, low, close, sweep)?;
 
-        // VRAM estimate: 3 inputs + 1 output
-        let bytes = series_len * std::mem::size_of::<f32>() * 4;
-        if !Self::will_fit(bytes, 64 * 1024 * 1024) {
-            return Err(CudaWclpriceError::InvalidInput(
-                "insufficient VRAM for WCLPRICE".into(),
-            ));
+        // VRAM estimate: 3 inputs + 1 output (all FP32).
+        let elem_bytes = std::mem::size_of::<f32>();
+        let series_bytes = series_len
+            .checked_mul(elem_bytes)
+            .ok_or_else(|| CudaWclpriceError::InvalidInput("series_len byte size overflow".into()))?;
+        let inputs_bytes = series_bytes
+            .checked_mul(3)
+            .ok_or_else(|| CudaWclpriceError::InvalidInput("input byte size overflow".into()))?;
+        let out_bytes = series_bytes;
+        let required = inputs_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaWclpriceError::InvalidInput("total byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaWclpriceError::OutOfMemory { required, free, headroom });
+            } else {
+                return Err(CudaWclpriceError::InvalidInput("insufficient device memory".into()));
+            }
         }
 
-        let h_high =
-            LockedBuffer::from_slice(high).map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let h_low =
-            LockedBuffer::from_slice(low).map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let h_close =
-            LockedBuffer::from_slice(close).map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+        let h_high = LockedBuffer::from_slice(high)?;
+        let h_low = LockedBuffer::from_slice(low)?;
+        let h_close = LockedBuffer::from_slice(close)?;
+        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
+        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
+        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
         unsafe {
-            d_high
-                .copy_from(h_high.as_slice())
-                .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-            d_low
-                .copy_from(h_low.as_slice())
-                .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-            d_close
-                .copy_from(h_close.as_slice())
-                .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+            d_high.copy_from(h_high.as_slice())?;
+            d_low.copy_from(h_low.as_slice())?;
+            d_close.copy_from(h_close.as_slice())?;
         }
 
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
         self.launch_batch_kernel(
             &d_high,
             &d_low,
@@ -359,9 +384,7 @@ impl CudaWclprice {
             first_valid,
             &mut d_out,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -382,7 +405,9 @@ impl CudaWclprice {
         if cols == 0 || rows == 0 {
             return Err(CudaWclpriceError::InvalidInput("invalid dims".into()));
         }
-        let expected = cols * rows;
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaWclpriceError::InvalidInput("rows*cols overflow".into()))?;
         if high_tm.len() != expected || low_tm.len() != expected || close_tm.len() != expected {
             return Err(CudaWclpriceError::InvalidInput(format!(
                 "time-major length mismatch: high={}, low={}, close={}, expected={}",
@@ -396,7 +421,10 @@ impl CudaWclprice {
         for s in 0..cols {
             let mut fv = None;
             for t in 0..rows {
-                let idx = t * cols + s;
+                let idx = t
+                    .checked_mul(cols)
+                    .and_then(|base| base.checked_add(s))
+                    .ok_or_else(|| CudaWclpriceError::InvalidInput("index overflow".into()))?;
                 if high_tm[idx].is_finite() && low_tm[idx].is_finite() && close_tm[idx].is_finite()
                 {
                     fv = Some(t as i32);
@@ -422,7 +450,9 @@ impl CudaWclprice {
         let func = self
             .module
             .get_function("wclprice_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaWclpriceError::MissingKernelSymbol {
+                name: "wclprice_many_series_one_param_time_major_f32",
+            })?;
 
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => Self::choose_block_x("WCLPRICE_MS_BLOCK_X", 256, 64),
@@ -434,14 +464,39 @@ impl CudaWclprice {
         }
         self.maybe_log_many_debug();
 
-        let grid: GridSize = (cols as u32, 1, 1).into();
+        let cols_u32 = u32::try_from(cols)
+            .map_err(|_| CudaWclpriceError::InvalidInput("cols too large".into()))?;
+        let gx = cols_u32;
+        let gy = 1u32;
+        let gz = 1u32;
+        let grid: GridSize = (gx, gy, gz).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        let dev = Device::get_device(self.device_id)?;
+        let max_grid_x = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)?
+            as u32;
+        let max_threads = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)?
+            as u32;
+        if gx > max_grid_x || block_x > max_threads {
+            return Err(CudaWclpriceError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
         unsafe {
             let mut high_ptr = d_high.as_device_ptr().as_raw();
             let mut low_ptr = d_low.as_device_ptr().as_raw();
             let mut close_ptr = d_close.as_device_ptr().as_raw();
-            let mut cols_i = cols as i32;
-            let mut rows_i = rows as i32;
+            let mut cols_i = i32::try_from(cols)
+                .map_err(|_| CudaWclpriceError::InvalidInput("cols too large for kernel".into()))?;
+            let mut rows_i = i32::try_from(rows)
+                .map_err(|_| CudaWclpriceError::InvalidInput("rows too large for kernel".into()))?;
             let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
             let mut out_ptr = d_out.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
@@ -453,9 +508,7 @@ impl CudaWclprice {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -471,60 +524,55 @@ impl CudaWclprice {
         let first_valids = Self::prepare_many_series_inputs(high_tm, low_tm, close_tm, cols, rows)?;
 
         // VRAM: 3 inputs + first_valids + output
-        let bytes = cols * rows * std::mem::size_of::<f32>() * 3
-            + cols * std::mem::size_of::<i32>()
-            + cols * rows * std::mem::size_of::<f32>();
-        if !Self::will_fit(bytes, 64 * 1024 * 1024) {
-            return Err(CudaWclpriceError::InvalidInput(
-                "insufficient VRAM for WCLPRICE many-series".into(),
-            ));
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaWclpriceError::InvalidInput("rows*cols overflow".into()))?;
+        let elem_bytes = std::mem::size_of::<f32>();
+        let prices_bytes = elems
+            .checked_mul(elem_bytes)
+            .ok_or_else(|| CudaWclpriceError::InvalidInput("price byte size overflow".into()))?;
+        let inputs_bytes = prices_bytes
+            .checked_mul(3)
+            .ok_or_else(|| CudaWclpriceError::InvalidInput("input byte size overflow".into()))?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaWclpriceError::InvalidInput("first_valids byte size overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(elem_bytes)
+            .ok_or_else(|| CudaWclpriceError::InvalidInput("output byte size overflow".into()))?;
+        let required = inputs_bytes
+            .checked_add(first_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaWclpriceError::InvalidInput("total byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaWclpriceError::OutOfMemory { required, free, headroom });
+            } else {
+                return Err(CudaWclpriceError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
-        let h_high = LockedBuffer::from_slice(high_tm)
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let h_low =
-            LockedBuffer::from_slice(low_tm).map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let h_close = LockedBuffer::from_slice(close_tm)
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let h_first = LockedBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-        let mut d_first_valids: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(cols) }
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+        let h_high = LockedBuffer::from_slice(high_tm)?;
+        let h_low = LockedBuffer::from_slice(low_tm)?;
+        let h_close = LockedBuffer::from_slice(close_tm)?;
+        let h_first = LockedBuffer::from_slice(&first_valids)?;
+        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_first_valids: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(cols) }?;
         unsafe {
-            d_high
-                .copy_from(h_high.as_slice())
-                .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-            d_low
-                .copy_from(h_low.as_slice())
-                .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-            d_close
-                .copy_from(h_close.as_slice())
-                .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
-            d_first_valids
-                .copy_from(h_first.as_slice())
-                .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+            d_high.copy_from(h_high.as_slice())?;
+            d_low.copy_from(h_low.as_slice())?;
+            d_close.copy_from(h_close.as_slice())?;
+            d_first_valids.copy_from(h_first.as_slice())?;
         }
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
-        self.launch_many_series_kernel(
-            &d_high,
-            &d_low,
-            &d_close,
-            cols,
-            rows,
-            &d_first_valids,
-            &mut d_out,
-        )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaWclpriceError::Cuda(e.to_string()))?;
+        self.launch_many_series_kernel(&d_high, &d_low, &d_close, cols, rows, &d_first_valids, &mut d_out)?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,

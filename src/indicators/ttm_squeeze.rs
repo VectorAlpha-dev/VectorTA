@@ -14,10 +14,10 @@
 //! - **momentum**: Momentum oscillator values
 //! - **squeeze**: Squeeze state (0=NoSqz, 1=LowSqz, 2=MidSqz, 3=HighSqz)
 //!
-//! ## Developer Notes
-//! - SIMD: not implemented for this indicator; workload is sequential/windowed and largely memory-bound/branch-heavy. Keep scalar as reference path.
-//! - Streaming kernel: replaced with O(1) update using rolling sums + TR ring + monotonic deques, matching classic scalar outputs after warmup.
-//! - Batch (ScalarBatch): row-specific path implemented. Rows are grouped by `length` and share a single rolling state; momentum is shared per-length and squeeze levels are computed per-row using squared-threshold compares. Other batch kernels fall back to per-row computation.
+//! ## Developer Notes / Decision log
+//! - SIMD: not implemented for this indicator; workload is sequential/windowed and largely memory-bound/branch-heavy. Scalar is the reference path; AVX batch kernels are stubs that delegate to scalar logic.
+//! - CUDA: wrapper exists with VRAM checks and typed errors; Python exposes CUDA Array Interface v3 and DLPack v1.x via shared `DeviceArrayF32Py` handles.
+//! - Streaming / batch: streaming kernel uses O(1) rolling state; ScalarBatch uses row-specific grouping by `length` with shared momentum and per-row squeeze thresholds. Other batch kernels fall back to per-row computation.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyUntypedArrayMethods};
@@ -255,12 +255,33 @@ pub enum TtmSqueezeError {
     #[error("ttm_squeeze: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 
+    #[error("ttm_squeeze: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
     #[error("ttm_squeeze: Inconsistent slice lengths - high={high}, low={low}, close={close}")]
     InconsistentSliceLengths {
         high: usize,
         low: usize,
         close: usize,
     },
+
+    #[error("ttm_squeeze: Invalid bb_mult: must be positive")]
+    InvalidBbMult { bb_mult: f64 },
+
+    #[error("ttm_squeeze: Invalid kc_mult_high: must be positive")]
+    InvalidKcMultHigh { kc_mult_high: f64 },
+
+    #[error("ttm_squeeze: Invalid kc_mult_mid: must be positive")]
+    InvalidKcMultMid { kc_mult_mid: f64 },
+
+    #[error("ttm_squeeze: Invalid kc_mult_low: must be positive")]
+    InvalidKcMultLow { kc_mult_low: f64 },
+
+    #[error("ttm_squeeze: Invalid range in batch sweep: start={start}, end={end}, step={step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
+
+    #[error("ttm_squeeze: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 
     #[error("ttm_squeeze: SMA error: {0}")]
     SmaError(String),
@@ -310,33 +331,27 @@ fn validate_params(params: &TtmSqueezeParams) -> Result<(), TtmSqueezeError> {
 
     if let Some(bb) = params.bb_mult {
         if !ok(bb) {
-            return Err(TtmSqueezeError::SmaError(
-                "Invalid bb_mult: must be positive".into(),
-            ));
+            return Err(TtmSqueezeError::InvalidBbMult { bb_mult: bb });
         }
     }
 
     if let Some(x) = params.kc_mult_high {
         if !ok(x) {
-            return Err(TtmSqueezeError::SmaError(
-                "Invalid kc_mult_high: must be positive".into(),
-            ));
+            return Err(TtmSqueezeError::InvalidKcMultHigh {
+                kc_mult_high: x,
+            });
         }
     }
 
     if let Some(x) = params.kc_mult_mid {
         if !ok(x) {
-            return Err(TtmSqueezeError::SmaError(
-                "Invalid kc_mult_mid: must be positive".into(),
-            ));
+            return Err(TtmSqueezeError::InvalidKcMultMid { kc_mult_mid: x });
         }
     }
 
     if let Some(x) = params.kc_mult_low {
         if !ok(x) {
-            return Err(TtmSqueezeError::SmaError(
-                "Invalid kc_mult_low: must be positive".into(),
-            ));
+            return Err(TtmSqueezeError::InvalidKcMultLow { kc_mult_low: x });
         }
     }
 
@@ -604,9 +619,9 @@ pub fn ttm_squeeze_into_slices(
     }
 
     if dst_momentum.len() != close.len() || dst_squeeze.len() != close.len() {
-        return Err(TtmSqueezeError::NotEnoughValidData {
-            needed: close.len(),
-            valid: dst_momentum.len().min(dst_squeeze.len()),
+        return Err(TtmSqueezeError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst_momentum.len().min(dst_squeeze.len()),
         });
     }
 
@@ -1567,15 +1582,27 @@ pub fn ttm_squeeze_cuda_batch_dev_py(
         kc_mid: kc_mid_range,
         kc_low: kc_low_range,
     };
-    let (mo, sq) = py.allow_threads(|| {
+    let (mo, sq, ctx, dev_id_u32) = py.allow_threads(|| {
         let cuda =
             CudaTtmSqueeze::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ttm_squeeze_batch_dev(h, l, c, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id_u32 = cuda.device_id();
+        match cuda.ttm_squeeze_batch_dev(h, l, c, &sweep) {
+            Ok((mo, sq)) => Ok((mo, sq, ctx, dev_id_u32)),
+            Err(e) => Err(PyValueError::new_err(e.to_string())),
+        }
     })?;
     Ok((
-        DeviceArrayF32Py { inner: mo },
-        DeviceArrayF32Py { inner: sq },
+        DeviceArrayF32Py {
+            inner: mo,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id_u32),
+        },
+        DeviceArrayF32Py {
+            inner: sq,
+            _ctx: Some(ctx),
+            device_id: Some(dev_id_u32),
+        },
     ))
 }
 
@@ -1602,17 +1629,29 @@ pub fn ttm_squeeze_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let (mo, sq) = py.allow_threads(|| {
+    let (mo, sq, ctx, dev_id_u32) = py.allow_threads(|| {
         let cuda =
             CudaTtmSqueeze::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ttm_squeeze_many_series_one_param_time_major_dev(
+        let ctx = cuda.context_arc();
+        let dev_id_u32 = cuda.device_id();
+        match cuda.ttm_squeeze_many_series_one_param_time_major_dev(
             h, l, c, cols, rows, length, bb_mult, kc_high, kc_mid, kc_low,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+        ) {
+            Ok((mo, sq)) => Ok((mo, sq, ctx, dev_id_u32)),
+            Err(e) => Err(PyValueError::new_err(e.to_string())),
+        }
     })?;
     Ok((
-        DeviceArrayF32Py { inner: mo },
-        DeviceArrayF32Py { inner: sq },
+        DeviceArrayF32Py {
+            inner: mo,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id_u32),
+        },
+        DeviceArrayF32Py {
+            inner: sq,
+            _ctx: Some(ctx),
+            device_id: Some(dev_id_u32),
+        },
     ))
 }
 
@@ -1945,38 +1984,113 @@ impl TtmSqueezeBatchOutput {
     }
 }
 
-fn axis_usize(a: (usize, usize, usize)) -> Vec<usize> {
-    if a.2 == 0 || a.0 == a.1 {
-        vec![a.0]
-    } else {
-        (a.0..=a.1).step_by(a.2).collect()
+fn axis_usize(a: (usize, usize, usize)) -> Result<Vec<usize>, TtmSqueezeError> {
+    let (start, end, step) = a;
+    if step == 0 || start == end {
+        return Ok(vec![start]);
     }
-}
 
-fn axis_f64(a: (f64, f64, f64)) -> Vec<f64> {
-    if a.2.abs() < 1e-12 || (a.0 - a.1).abs() < 1e-12 {
-        vec![a.0]
-    } else {
-        let mut v = vec![];
-        let mut x = a.0;
-        while x <= a.1 + 1e-12 {
+    let mut v = Vec::new();
+    if start < end {
+        let mut x = start;
+        while x <= end {
             v.push(x);
-            x += a.2;
+            match x.checked_add(step) {
+                Some(next) => {
+                    if next == x {
+                        break;
+                    }
+                    x = next;
+                }
+                None => break,
+            }
         }
-        v
+    } else {
+        let mut x = start;
+        loop {
+            if x < end {
+                break;
+            }
+            v.push(x);
+            match x.checked_sub(step) {
+                Some(next) => {
+                    if next == x {
+                        break;
+                    }
+                    x = next;
+                }
+                None => break,
+            }
+        }
     }
+
+    if v.is_empty() {
+        return Err(TtmSqueezeError::InvalidRange {
+            start: start as f64,
+            end: end as f64,
+            step: step as f64,
+        });
+    }
+
+    Ok(v)
 }
 
-fn expand_grid_squeeze(r: &TtmSqueezeBatchRange) -> Vec<TtmSqueezeParams> {
-    let lengths = axis_usize(r.length);
-    let bb_mults = axis_f64(r.bb_mult);
-    let kc_highs = axis_f64(r.kc_high);
-    let kc_mids = axis_f64(r.kc_mid);
-    let kc_lows = axis_f64(r.kc_low);
+fn axis_f64(a: (f64, f64, f64)) -> Result<Vec<f64>, TtmSqueezeError> {
+    let (start, end, step) = a;
+    let step_mag = step.abs();
+    if step_mag < 1e-12 || (start - end).abs() < 1e-12 {
+        return Ok(vec![start]);
+    }
 
-    let mut out = Vec::with_capacity(
-        lengths.len() * bb_mults.len() * kc_highs.len() * kc_mids.len() * kc_lows.len(),
-    );
+    let mut v = Vec::new();
+    let mut x = start;
+    if start <= end {
+        while x <= end + 1e-12 {
+            v.push(x);
+            x += step_mag;
+        }
+    } else {
+        while x >= end - 1e-12 {
+            v.push(x);
+            x -= step_mag;
+        }
+    }
+
+    if v.is_empty() {
+        return Err(TtmSqueezeError::InvalidRange { start, end, step });
+    }
+
+    Ok(v)
+}
+
+fn expand_grid_squeeze(r: &TtmSqueezeBatchRange) -> Result<Vec<TtmSqueezeParams>, TtmSqueezeError> {
+    let lengths = axis_usize(r.length)?;
+    let bb_mults = axis_f64(r.bb_mult)?;
+    let kc_highs = axis_f64(r.kc_high)?;
+    let kc_mids = axis_f64(r.kc_mid)?;
+    let kc_lows = axis_f64(r.kc_low)?;
+
+    let cap = lengths
+        .len()
+        .checked_mul(bb_mults.len())
+        .and_then(|v| v.checked_mul(kc_highs.len()))
+        .and_then(|v| v.checked_mul(kc_mids.len()))
+        .and_then(|v| v.checked_mul(kc_lows.len()))
+        .ok_or(TtmSqueezeError::InvalidRange {
+            start: r.length.0 as f64,
+            end: r.length.1 as f64,
+            step: r.length.2 as f64,
+        })?;
+
+    if cap == 0 {
+        return Err(TtmSqueezeError::InvalidRange {
+            start: r.length.0 as f64,
+            end: r.length.1 as f64,
+            step: r.length.2 as f64,
+        });
+    }
+
+    let mut out = Vec::with_capacity(cap);
 
     for &l in &lengths {
         for &bb in &bb_mults {
@@ -1996,7 +2110,7 @@ fn expand_grid_squeeze(r: &TtmSqueezeBatchRange) -> Vec<TtmSqueezeParams> {
         }
     }
 
-    out
+    Ok(out)
 }
 
 pub fn ttm_squeeze_batch_with_kernel(
@@ -2014,16 +2128,17 @@ pub fn ttm_squeeze_batch_with_kernel(
         });
     }
 
-    let combos = expand_grid_squeeze(sweep);
-    if combos.is_empty() {
-        return Err(TtmSqueezeError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
-
+    let combos = expand_grid_squeeze(sweep)?;
     let rows = combos.len();
     let cols = close.len();
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(TtmSqueezeError::InvalidRange {
+            start: sweep.length.0 as f64,
+            end: sweep.length.1 as f64,
+            step: sweep.length.2 as f64,
+        })?;
+
     let first = close
         .iter()
         .position(|x| !x.is_nan())
@@ -2052,11 +2167,8 @@ pub fn ttm_squeeze_batch_with_kernel(
     let chosen_batch = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         kb if kb.is_batch() => kb,
-        _ => {
-            return Err(TtmSqueezeError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+        other => {
+            return Err(TtmSqueezeError::InvalidKernelForBatch(other));
         }
     };
 

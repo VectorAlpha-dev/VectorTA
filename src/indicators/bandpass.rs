@@ -20,6 +20,11 @@
 //!   - signal: Smoothed signal line
 //!   - trigger: Trigger line for crossover signals
 //!
+//! ## Decision Log
+//! - SIMD: runtime-selected AVX2/AVX512 stubs delegate to the scalar kernel; the scalar path is the reference implementation.
+//! - CUDA: bandpass kernels are enabled via `CudaBandpass`; device arrays expose CUDA Array Interface v3 and DLPack v1.x with handles tied to a primary context on the allocation device.
+//! - Perf posture: scalar CPU is the baseline; CUDA paths are tuned for correctness and throughput parity on long series, with no row-specific SIMD batch kernels.
+//!
 //! ## Developer Notes (Implementation Status)
 //! - **SIMD Kernels**:
 //!   - AVX2: STUB (calls scalar implementation)
@@ -418,7 +423,7 @@ pub fn bandpass_with_kernel(
 /// directly into the provided slices. Each output slice length must equal the input length.
 ///
 /// Returns `Ok(())` on success; propagates existing `BandPassError` variants (including
-/// `DestLenMismatch` when lengths differ).
+/// `OutputLengthMismatch` when lengths differ).
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn bandpass_into(
@@ -976,28 +981,37 @@ pub struct BandPassDeviceArrayF32Py {
 impl BandPassDeviceArrayF32Py {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = &self.inner;
         let d = PyDict::new(py);
-        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("shape", (inner.rows, inner.cols))?;
         d.set_item("typestr", "<f4")?;
         d.set_item(
             "strides",
             (
-                self.inner.cols * std::mem::size_of::<f32>(),
+                inner.cols * std::mem::size_of::<f32>(),
                 std::mem::size_of::<f32>(),
             ),
         )?;
-        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        if self.stream != 0 { d.set_item("stream", self.stream)?; }
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // Producing CUDA stream is synchronized before returning this handle,
+        // so CAI v3 may omit the "stream" key per spec.
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
-    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
-        use pyo3::ffi;
-        use std::ffi::CString;
-        use std::os::raw::{c_char, c_void};
+    #[pyo3(signature=(_stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        _stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
 
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
@@ -1020,53 +1034,124 @@ impl BandPassDeviceArrayF32Py {
             deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
         }
         #[repr(C)]
-        struct Manager { py_self: *mut ffi::PyObject, shape: *mut [i64; 2] }
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _self_ref: PyObject,
+        }
 
-        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
-            if p.is_null() { return; }
-            unsafe {
-                let mgr = (*p).manager_ctx as *mut Manager;
-                if !mgr.is_null() {
-                    let mgr_box = Box::from_raw(mgr);
-                    let g = ffi::PyGILState_Ensure();
-                    ffi::Py_DECREF(mgr_box.py_self);
-                    ffi::PyGILState_Release(g);
-                    if !mgr_box.shape.is_null() { let _ = Box::from_raw(mgr_box.shape); }
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ = Box::from_raw(ctx_ptr);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            // Only free if still named "dltensor"
+            let name = b"dltensor\0";
+            let ptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
                 }
-                let _ = Box::from_raw(p);
+                let used = b"used_dltensor\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_versioned(capsule: *mut pyffi::PyObject) {
+            // Only free if still named "dltensor_versioned"
+            let name = b"dltensor_versioned\0";
+            let vptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensorVersioned;
+            if !vptr.is_null() {
+                let mgr = (*vptr).manager;
+                if !mgr.is_null() {
+                    if let Some(del) = (*mgr).deleter {
+                        del(mgr);
+                    }
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                let _ = Box::from_raw(vptr);
             }
         }
 
         let rows = slf.inner.rows as i64;
         let cols = slf.inner.cols as i64;
+        let total_elems = (rows as i128) * (cols as i128);
+
+        // Element-based strides per DLPack (v1.2+ requires non-NULL strides)
         let mut shape = Box::new([rows, cols]);
-        let shape_ptr: *mut [i64; 2] = &mut *shape;
-        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
-        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        // Keep this Python handle alive until the consumer is done.
+        let self_ref = unsafe { PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _self_ref: self_ref,
+        });
         let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
 
-        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
-        let dl = DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
-                ndim: 2,
-                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                shape: shape_ptr as *mut i64,
-                strides: std::ptr::null_mut(),
-                byte_offset: 0,
-            },
-            manager_ctx: mgr_ptr,
-            deleter: Some(dlpack_deleter),
+        let data_ptr: *mut c_void = if total_elems == 0 {
+            std::ptr::null_mut()
+        } else {
+            slf.inner.device_ptr() as usize as *mut c_void
         };
-        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
-        let name = CString::new("dltensor").unwrap();
-        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
-        if capsule.is_null() {
-            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
-            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        let tensor = DLTensor {
+            data: data_ptr,
+            device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: tensor,
+            manager_ctx: mgr_ptr,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned { manager: Box::into_raw(mt), version: 1 });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor_versioned));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err("failed to create versioned DLPack capsule"));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err("failed to create DLPack capsule"));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
     }
 }
 
@@ -2954,10 +3039,13 @@ pub fn bandpass_batch_py<'py>(
     let cols = output.cols;
 
     unsafe {
-        let bp_arr = PyArray1::<f64>::new(py, [rows * cols], false);
-        let bpn_arr = PyArray1::<f64>::new(py, [rows * cols], false);
-        let sig_arr = PyArray1::<f64>::new(py, [rows * cols], false);
-        let trg_arr = PyArray1::<f64>::new(py, [rows * cols], false);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| PyValueError::new_err("bandpass_batch: rows*cols overflow"))?;
+        let bp_arr = PyArray1::<f64>::new(py, [total], false);
+        let bpn_arr = PyArray1::<f64>::new(py, [total], false);
+        let sig_arr = PyArray1::<f64>::new(py, [total], false);
+        let trg_arr = PyArray1::<f64>::new(py, [total], false);
 
         bp_arr.as_slice_mut()?.copy_from_slice(&output.bp);
         bpn_arr
@@ -3013,32 +3101,36 @@ pub fn bandpass_cuda_batch_dev_py<'py>(
         period: period_range,
         bandwidth: bandwidth_range,
     };
-    let (outputs, combos, dev_id, stream_h, ctx) = py.allow_threads(|| {
-        let cuda = CudaBandpass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (outputs, combos, dev_id, ctx) = py.allow_threads(|| {
+        let cuda = CudaBandpass::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
-        let stream_h = cuda.stream_handle_usize();
         let ctx = cuda.context_arc();
-        cuda.bandpass_batch_dev(slice, &sweep)
-            .map(|r| (r.outputs, r.combos, dev_id, stream_h, ctx))
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let res = cuda
+            .bandpass_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.stream()
+            .synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((res.outputs, res.combos, dev_id, ctx))
     })?;
 
     let d = PyDict::new(py);
     d.set_item(
         "bp",
-        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.first, _ctx: ctx.clone(), device_id: dev_id, stream: stream_h })?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.first, _ctx: ctx.clone(), device_id: dev_id, stream: 0 })?,
     )?;
     d.set_item(
         "bp_normalized",
-        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.second, _ctx: ctx.clone(), device_id: dev_id, stream: stream_h })?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.second, _ctx: ctx.clone(), device_id: dev_id, stream: 0 })?,
     )?;
     d.set_item(
         "signal",
-        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.third, _ctx: ctx.clone(), device_id: dev_id, stream: stream_h })?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.third, _ctx: ctx.clone(), device_id: dev_id, stream: 0 })?,
     )?;
     d.set_item(
         "trigger",
-        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.fourth, _ctx: ctx, device_id: dev_id, stream: stream_h })?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.fourth, _ctx: ctx, device_id: dev_id, stream: 0 })?,
     )?;
 
     let periods: Vec<usize> = combos.iter().map(|p| p.period.unwrap()).collect();
@@ -3075,32 +3167,36 @@ pub fn bandpass_cuda_many_series_one_param_dev_py<'py>(
         bandwidth: Some(bandwidth),
     };
 
-    let (outputs, dev_id, stream_h, ctx) = py.allow_threads(|| {
-        let cuda = CudaBandpass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (outputs, dev_id, ctx) = py.allow_threads(|| {
+        let cuda = CudaBandpass::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
-        let stream_h = cuda.stream_handle_usize();
         let ctx = cuda.context_arc();
-        cuda.bandpass_many_series_one_param_time_major_dev(flat, cols, rows, &params)
-            .map(|o| (o, dev_id, stream_h, ctx))
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out = cuda
+            .bandpass_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.stream()
+            .synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((out, dev_id, ctx))
     })?;
 
     let d = PyDict::new(py);
     d.set_item(
         "bp",
-        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.first, _ctx: ctx.clone(), device_id: dev_id, stream: stream_h })?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.first, _ctx: ctx.clone(), device_id: dev_id, stream: 0 })?,
     )?;
     d.set_item(
         "bp_normalized",
-        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.second, _ctx: ctx.clone(), device_id: dev_id, stream: stream_h })?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.second, _ctx: ctx.clone(), device_id: dev_id, stream: 0 })?,
     )?;
     d.set_item(
         "signal",
-        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.third, _ctx: ctx.clone(), device_id: dev_id, stream: stream_h })?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.third, _ctx: ctx.clone(), device_id: dev_id, stream: 0 })?,
     )?;
     d.set_item(
         "trigger",
-        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.fourth, _ctx: ctx, device_id: dev_id, stream: stream_h })?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.fourth, _ctx: ctx, device_id: dev_id, stream: 0 })?,
     )?;
     d.set_item("rows", rows)?;
     d.set_item("cols", cols)?;
@@ -3177,7 +3273,11 @@ pub fn bandpass_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsVal
     let cols = out.cols;
 
     // concatenate by blocks: all bp rows, all bpn rows, all signal rows, all trigger rows
-    let mut values = Vec::with_capacity(4 * rows * cols);
+    let total = rows
+        .checked_mul(cols)
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| JsValue::from_str("bandpass_batch_js: rows*cols overflow"))?;
+    let mut values = Vec::with_capacity(total);
     values.extend_from_slice(&out.bp);
     values.extend_from_slice(&out.bp_normalized);
     values.extend_from_slice(&out.signal);

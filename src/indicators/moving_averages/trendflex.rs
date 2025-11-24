@@ -15,6 +15,7 @@
 //! - Scalar: optimized streaming O(1) update (no ssf scratch vector; ring-buffer sliding sum).
 //! - Memory: zero-copy helpers used (alloc_with_nan_prefix, make_uninit_matrix) ✓
 //! - Decision note: AVX512 shows >5% speedup vs scalar at 100k; AVX2 is roughly on par to modestly faster.
+//! - CUDA: wrappers return VRAM handles with primary-context RAII; Python exposes CAI v3 and DLPack v1.x (version negotiation).
 //! - Batch: per-row SIMD retained; no row-specific shared-precompute path implemented yet (limited reuse; revisit if batch profiles warrant).
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -119,10 +120,17 @@ impl TrendFlexDeviceArrayF32Py {
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
-    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: pyo3::prelude::Python<'py>, _stream: Option<i64>) -> pyo3::PyResult<pyo3::prelude::PyObject> {
-        use pyo3::ffi;
-        use std::ffi::CString;
-        use std::os::raw::{c_char, c_void};
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: pyo3::prelude::Python<'py>,
+        _stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> pyo3::PyResult<pyo3::prelude::PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
 
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
@@ -139,66 +147,107 @@ impl TrendFlexDeviceArrayF32Py {
             byte_offset: u64,
         }
         #[repr(C)]
-        struct DLManagedTensor {
-            dl_tensor: DLTensor,
-            manager_ctx: *mut c_void,
-            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
-        }
+        struct DLManagedTensor { dl_tensor: DLTensor, manager_ctx: *mut c_void, deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)> }
         #[repr(C)]
-        struct Manager {
-            py_self: *mut ffi::PyObject,
-            shape: *mut [i64; 2],
+        struct DLManagedTensorVersioned { manager: *mut DLManagedTensor, version: u32 }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            py_self: *mut pyffi::PyObject,
         }
 
-        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
-            if p.is_null() { return; }
+        unsafe extern "C" fn capsule_destructor(cap: *mut pyffi::PyObject) {
+            if cap.is_null() { return; }
             unsafe {
-                let mgr = (*p).manager_ctx as *mut Manager;
-                if !mgr.is_null() {
-                    let mgr_box = Box::from_raw(mgr);
-                    let g = ffi::PyGILState_Ensure();
-                    ffi::Py_DECREF(mgr_box.py_self);
-                    ffi::PyGILState_Release(g);
-                    if !mgr_box.shape.is_null() {
-                        let _ = Box::from_raw(mgr_box.shape);
+                let name_c = pyffi::PyCapsule_GetName(cap);
+                if name_c.is_null() { return; }
+                let name = std::ffi::CStr::from_ptr(name_c).to_string_lossy();
+                let valid = name == "dltensor" || name == "dltensor_versioned";
+                let ptr = pyffi::PyCapsule_GetPointer(cap, name_c as *const _);
+                if ptr.is_null() { return; }
+                if valid {
+                    if name == "dltensor_versioned" {
+                        let v = ptr as *mut DLManagedTensorVersioned;
+                        if !v.is_null() {
+                            let mt = (*v).manager;
+                            if !mt.is_null() { if let Some(del) = (*mt).deleter { del(mt); } }
+                            let _ = Box::from_raw(v);
+                        }
+                    } else {
+                        let mt = ptr as *mut DLManagedTensor;
+                        if !mt.is_null() { if let Some(del) = (*mt).deleter { del(mt); } }
                     }
                 }
-                let _ = Box::from_raw(p);
             }
         }
 
         let rows = slf.inner.rows as i64;
         let cols = slf.inner.cols as i64;
-        let mut shape = Box::new([rows, cols]);
-        let shape_ptr: *mut [i64; 2] = &mut *shape;
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
 
-        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
-        unsafe { ffi::Py_INCREF(mgr.py_self); }
-        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+        let shape_box = Box::new([rows, cols]);
+        let strides_box = Box::new([cols, 1]); // strides in elements
+        let (shape_ptr, strides_ptr) = (
+            shape_box.as_ptr() as *mut i64,
+            strides_box.as_ptr() as *mut i64,
+        );
+        let mgr = ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape_box,
+            _strides: strides_box,
+            py_self: slf.as_ptr(),
+        };
+        unsafe { pyffi::Py_INCREF(mgr.py_self); }
+        let mgr_ptr = Box::into_raw(Box::new(mgr)) as *mut c_void;
 
-        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
-        let dl = DLManagedTensor {
+        let data_ptr = if rows == 0 || cols == 0 { std::ptr::null_mut() } else { slf.inner.device_ptr() as usize as *mut c_void };
+        let mt = Box::new(DLManagedTensor {
             dl_tensor: DLTensor {
                 data: data_ptr,
                 device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
                 ndim: 2,
                 dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                shape: shape_ptr as *mut i64,
-                strides: std::ptr::null_mut(),
+                shape: shape_ptr,
+                strides: strides_ptr,
                 byte_offset: 0,
             },
             manager_ctx: mgr_ptr,
-            deleter: Some(dlpack_deleter),
-        };
+            deleter: Some(|p: *mut DLManagedTensor| unsafe {
+                if p.is_null() { return; }
+                let ctx = (*p).manager_ctx as *mut ManagerCtx;
+                if !ctx.is_null() {
+                    // Drop boxes and DECREF the Python self we INCREF'd
+                    let pyobj = (*ctx).py_self;
+                    let _ = Box::from_raw(ctx);
+                    if !pyobj.is_null() { pyffi::Py_DECREF(pyobj); }
+                }
+                let _ = Box::from_raw(p);
+            }),
+        });
 
-        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
-        let name = CString::new("dltensor").unwrap();
-        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
-        if capsule.is_null() {
-            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
-            return Err(pyo3::exceptions::PyValueError::new_err("failed to create DLPack capsule"));
-        }
-        Ok(unsafe { pyo3::prelude::PyObject::from_owned_ptr(py, capsule) })
+        let pyname = if want_versioned { "dltensor_versioned" } else { "dltensor" };
+        let cap = unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned { manager: Box::into_raw(mt), version: 1 });
+                let name = CString::new(pyname).unwrap();
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let raw = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if raw.is_null() { let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned); return Err(pyo3::exceptions::PyValueError::new_err("failed to create DLPack capsule")); }
+                pyo3::prelude::PyObject::from_owned_ptr(py, raw)
+            } else {
+                let name = CString::new(pyname).unwrap();
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let raw = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if raw.is_null() { let _ = Box::from_raw(ptr as *mut DLManagedTensor); return Err(pyo3::exceptions::PyValueError::new_err("failed to create DLPack capsule")); }
+                pyo3::prelude::PyObject::from_owned_ptr(py, raw)
+            }
+        };
+        Ok(cap)
     }
 }
 
@@ -345,6 +394,11 @@ pub fn trendflex_with_kernel(
         .position(|x| !x.is_nan())
         .ok_or(TrendFlexError::AllValuesNaN)?;
     let ss_period = ((period as f64) / 2.0).round() as usize;
+    // Guard: ensure enough valid data after first non-NaN to fill window
+    let valid = len - first;
+    if valid < period {
+        return Err(TrendFlexError::NotEnoughValidData { needed: period, valid });
+    }
     if ss_period > len {
         return Err(TrendFlexError::SmootherPeriodExceedsData {
             ss_period,
@@ -413,6 +467,10 @@ pub fn trendflex_into_slice(
         .position(|x| !x.is_nan())
         .ok_or(TrendFlexError::AllValuesNaN)?;
     let ss_period = ((period as f64) / 2.0).round() as usize;
+    let valid = len - first;
+    if valid < period {
+        return Err(TrendFlexError::NotEnoughValidData { needed: period, valid });
+    }
     if ss_period > data.len() {
         return Err(TrendFlexError::SmootherPeriodExceedsData {
             ss_period,
@@ -1308,14 +1366,11 @@ pub fn trendflex_batch_with_kernel(
     sweep: &TrendFlexBatchRange,
     k: Kernel,
 ) -> Result<TrendFlexBatchOutput, TrendFlexError> {
-    // Coerce non-batch kernels to their batch equivalents
+    // Mirror ALMA policy: error on explicit non-batch kernels
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
-        Kernel::Scalar => Kernel::ScalarBatch,
-        Kernel::Avx2 => Kernel::Avx2Batch,
-        Kernel::Avx512 => Kernel::Avx512Batch,
         other if other.is_batch() => other,
-        _ => Kernel::ScalarBatch, // Fallback for any unexpected kernel
+        _ => return Err(TrendFlexError::InvalidKernelForBatch(k)),
     };
 
     let simd = match kernel {
@@ -1384,6 +1439,13 @@ fn expand_grid(r: &TrendFlexBatchRange) -> Result<Vec<TrendFlexParams>, TrendFle
 pub fn expand_grid_trendflex(r: &TrendFlexBatchRange) -> Vec<TrendFlexParams> {
     // Keep external signature stable for CUDA wrapper; fall back to empty on error.
     expand_grid(r).unwrap_or_default()
+}
+
+/// Checked expansion for CUDA wrapper and other external callers that need
+/// to differentiate invalid ranges vs. empty results.
+#[inline(always)]
+pub fn expand_grid_trendflex_checked(r: &TrendFlexBatchRange) -> Result<Vec<TrendFlexParams>, TrendFlexError> {
+    expand_grid(r)
 }
 
 #[inline(always)]
@@ -2146,23 +2208,23 @@ mod tests {
         Ok(())
     }
 
-    // Test for batch kernel coercion
+    // Test for batch kernel policy (non-batch -> error)
     #[test]
-    fn test_trendflex_batch_kernel_coercion() {
+    fn test_trendflex_batch_kernel_policy() {
         let data = vec![1.0; 50];
         let sweep = TrendFlexBatchRange { period: (5, 10, 1) };
 
-        // Test that non-batch kernels are coerced to batch kernels
+        // Non-batch kernels should return InvalidKernelForBatch
         let result_scalar = trendflex_batch_with_kernel(&data, &sweep, Kernel::Scalar);
-        assert!(result_scalar.is_ok());
+        assert!(matches!(result_scalar, Err(TrendFlexError::InvalidKernelForBatch(Kernel::Scalar))));
 
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         {
             let result_avx2 = trendflex_batch_with_kernel(&data, &sweep, Kernel::Avx2);
-            assert!(result_avx2.is_ok());
+            assert!(matches!(result_avx2, Err(TrendFlexError::InvalidKernelForBatch(Kernel::Avx2))));
 
             let result_avx512 = trendflex_batch_with_kernel(&data, &sweep, Kernel::Avx512);
-            assert!(result_avx512.is_ok());
+            assert!(matches!(result_avx512, Err(TrendFlexError::InvalidKernelForBatch(Kernel::Avx512))));
         }
 
         // Test that batch kernels still work
@@ -2430,10 +2492,13 @@ pub fn trendflex_batch_py<'py>(
         period: period_range,
     };
 
-    // Calculate dimensions
+    // Calculate dimensions with overflow guard
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("dimensions overflow"))?;
 
     // Pre-allocate NumPy array (like ALMA does)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };

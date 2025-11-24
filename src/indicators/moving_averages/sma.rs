@@ -14,6 +14,7 @@
 //! - SIMD: AVX-512 enabled; >5% faster than scalar at 100k.
 //! - AVX2 implemented but disabled by default (underperforms scalar on test HW).
 //! - Streaming update: O(1) via rolling sum; zero-copy alloc helpers in use.
+//! - CUDA: VRAM-first wrapper with typed errors; interop via CAI v3 and DLPack v1.x (versioned/legacy capsules).
 //!
 //! Decision: Streaming kernel optimized (cached reciprocal, branchless mask wrap for power-of-two
 //! periods). Behavior unchanged; returns Some on first valid output (period == 1 returns immediately).
@@ -182,8 +183,8 @@ impl SmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum SmaError {
-    #[error("sma: Empty data provided for SMA.")]
-    EmptyData,
+    #[error("sma: Empty input data.")]
+    EmptyInputData,
     #[error("sma: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("sma: Not enough valid data: needed = {needed}, valid = {valid}")]
@@ -191,7 +192,7 @@ pub enum SmaError {
     #[error("sma: All values are NaN.")]
     AllValuesNaN,
     #[error("sma: Output buffer size mismatch: expected = {expected}, got = {got}")]
-    OutputLenMismatch { expected: usize, got: usize },
+    OutputLengthMismatch { expected: usize, got: usize },
     #[error("sma: Invalid range: start={start}, end={end}, step={step}")]
     InvalidRange { start: usize, end: usize, step: usize },
     #[error("sma: Invalid kernel for batch: {0:?}")]
@@ -224,7 +225,7 @@ pub fn sma_into(input: &SmaInput, out: &mut [f64]) -> Result<(), SmaError> {
     let (data, period, first, chosen) = sma_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(SmaError::OutputLenMismatch {
+        return Err(SmaError::OutputLengthMismatch {
             expected: data.len(),
             got: out.len(),
         });
@@ -249,7 +250,7 @@ pub fn sma_into_slice(dst: &mut [f64], input: &SmaInput, kern: Kernel) -> Result
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(SmaError::OutputLenMismatch {
+        return Err(SmaError::OutputLengthMismatch {
             expected: data.len(),
             got: dst.len(),
         });
@@ -274,7 +275,7 @@ fn sma_prepare<'a>(
 ) -> Result<(&'a [f64], usize, usize, Kernel), SmaError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
-        return Err(SmaError::EmptyData);
+        return Err(SmaError::EmptyInputData);
     }
 
     let period = input.get_period();
@@ -838,7 +839,7 @@ fn sma_batch_inner(
 ) -> Result<SmaBatchOutput, SmaError> {
     let combos = expand_grid_sma(sweep)?;
     if data.is_empty() {
-        return Err(SmaError::EmptyData);
+        return Err(SmaError::EmptyInputData);
     }
 
     let cols = data.len();
@@ -909,7 +910,7 @@ fn sma_batch_inner_into(
 ) -> Result<Vec<SmaParams>, SmaError> {
     let combos = expand_grid_sma(sweep)?;
     if data.is_empty() {
-        return Err(SmaError::EmptyData);
+        return Err(SmaError::EmptyInputData);
     }
 
     let first = data
@@ -1148,9 +1149,13 @@ pub fn sma_batch_py<'py>(
 
     let rows = combos.len();
     let cols = data_slice.len();
+    // Checked arithmetic to avoid overflow in allocation length
+    let nelems = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
     // Pre-allocate NumPy array (1-D, will reshape later)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [nelems], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Perform batch computation with zero-copy directly into NumPy array
@@ -1296,15 +1301,19 @@ impl SmaDeviceArrayF32Py {
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA
-        (2, self.device_id as i32)
-    }
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
-    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
-        use pyo3::ffi;
-        use std::ffi::CString;
-        use std::os::raw::{c_char, c_void};
+    #[pyo3(signature=(_stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        _stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
 
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
@@ -1321,66 +1330,88 @@ impl SmaDeviceArrayF32Py {
             byte_offset: u64,
         }
         #[repr(C)]
-        struct DLManagedTensor {
-            dl_tensor: DLTensor,
-            manager_ctx: *mut c_void,
-            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
-        }
+        struct DLManagedTensor { dl_tensor: DLTensor, manager_ctx: *mut c_void, deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)> }
         #[repr(C)]
-        struct Manager {
-            py_self: *mut ffi::PyObject,
-            shape: *mut [i64; 2],
+        struct DLManagedTensorVersioned { manager: *mut DLManagedTensor, version: u32 }
+        #[repr(C)]
+        struct ManagerCtx { shape: *mut i64, strides: *mut i64, _shape: Box<[i64; 2]>, _strides: Box<[i64; 2]>, _self_ref: PyObject }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            let mt = Box::from_raw(p);
+            let ctx = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx.is_null() { drop(Box::from_raw(ctx)); }
+            // mt dropped here
         }
 
-        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
-            if p.is_null() { return; }
-            unsafe {
-                let mgr = (*p).manager_ctx as *mut Manager;
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            // Only free if still named "dltensor"
+            let name = b"dltensor\0";
+            let ptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter { del(ptr); }
+                let used = b"used_dltensor\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_versioned(capsule: *mut pyffi::PyObject) {
+            // Only free if still named "dltensor_versioned"
+            let name = b"dltensor_versioned\0";
+            let vptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensorVersioned;
+            if !vptr.is_null() {
+                let mgr = (*vptr).manager;
                 if !mgr.is_null() {
-                    let mgr_box = Box::from_raw(mgr);
-                    let g = ffi::PyGILState_Ensure();
-                    ffi::Py_DECREF(mgr_box.py_self);
-                    ffi::PyGILState_Release(g);
-                    if !mgr_box.shape.is_null() {
-                        let _ = Box::from_raw(mgr_box.shape);
-                    }
+                    if let Some(del) = (*mgr).deleter { del(mgr); }
                 }
-                let _ = Box::from_raw(p);
+                let used = b"used_dltensor_versioned\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                let _ = Box::from_raw(vptr);
             }
         }
 
         let rows = slf.inner.rows as i64;
         let cols = slf.inner.cols as i64;
-        let mut shape = Box::new([rows, cols]);
-        let shape_ptr: *mut [i64; 2] = &mut *shape;
+        let total_elems = (rows as i128) * (cols as i128);
 
-        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
-        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        // Element-based strides per DLPack (v1.2+ requires non-NULL strides)
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        // Keep this object alive through the capsule lifetime
+        let self_ref = unsafe { PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx { shape: shape_ptr, strides: strides_ptr, _shape: shape, _strides: strides, _self_ref: self_ref });
         let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
 
-        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
-        let dl = DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
-                ndim: 2,
-                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                shape: shape_ptr as *mut i64,
-                strides: std::ptr::null_mut(),
-                byte_offset: 0,
-            },
-            manager_ctx: mgr_ptr,
-            deleter: Some(dlpack_deleter),
-        };
+        let data_ptr: *mut c_void = if total_elems == 0 { std::ptr::null_mut() } else { slf.inner.device_ptr() as usize as *mut c_void };
+        let tensor = DLTensor { data: data_ptr, device: DLDevice { device_type: 2, device_id: slf.device_id as i32 }, ndim: 2, dtype: DLDataType { code: 2, bits: 32, lanes: 1 }, shape: shape_ptr, strides: strides_ptr, byte_offset: 0 };
+        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
 
-        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
-        let name = CString::new("dltensor").unwrap();
-        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
-        if capsule.is_null() {
-            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
-            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned { manager: Box::into_raw(mt), version: 1 });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor_versioned));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err("failed to create versioned DLPack capsule"));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err("failed to create DLPack capsule"));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
     }
 }
 

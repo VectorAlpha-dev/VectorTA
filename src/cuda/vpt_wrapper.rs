@@ -19,39 +19,43 @@ use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use std::error::Error;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaVptError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaVptError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Cuda(e) => write!(f, "CUDA error: {}", e),
-            Self::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl Error for CudaVptError {}
 
 pub struct CudaVpt {
     module: Module,
     stream: Stream,
-    _ctx: Context,
+    ctx: Arc<Context>,
+    device_id: u32,
     sm_count: u32,
     block_x: u32,
 }
 
 impl CudaVpt {
     pub fn new(device_id: usize) -> Result<Self, CudaVptError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        let ctx = Context::new(device).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let ctx = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vpt_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
@@ -59,18 +63,32 @@ impl CudaVpt {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         // Query SM count to cap grid size heuristically for large GPUs.
-        let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))? as u32;
+        let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
         let block_x = 256u32;
 
-        Ok(Self { module, stream, _ctx: ctx, sm_count, block_x })
+        Ok(Self {
+            module,
+            stream,
+            ctx,
+            device_id: device_id as u32,
+            sm_count,
+            block_x,
+        })
+    }
+
+    /// Expose context/device for Python interop and tests.
+    #[inline]
+    pub fn context(&self) -> Arc<Context> {
+        self.ctx.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     #[inline]
@@ -95,12 +113,17 @@ impl CudaVpt {
     }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required: usize, headroom: usize) -> Result<(), CudaVptError> {
         if let Ok((free, _)) = mem_get_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
+            if required.saturating_add(headroom) > free {
+                return Err(CudaVptError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            }
         }
+        Ok(())
     }
 
     /// One series (single row). Writes warmup NaNs to match scalar semantics.
@@ -120,22 +143,21 @@ impl CudaVpt {
         let first = Self::first_valid_pair(price, volume)?;
 
         // VRAM: inputs + output
-        let bytes = (2 * len + len) * std::mem::size_of::<f32>();
-        if !Self::will_fit(bytes, 64 << 20) {
-            return Err(CudaVptError::Cuda("insufficient free VRAM".into()));
-        }
+        let el = std::mem::size_of::<f32>();
+        let bytes = len
+            .checked_mul(3)
+            .and_then(|x| x.checked_mul(el))
+            .ok_or_else(|| CudaVptError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(bytes, 64 << 20)?;
 
-        let d_price =
-            DeviceBuffer::from_slice(price).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        let d_volume =
-            DeviceBuffer::from_slice(volume).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+        let d_price = DeviceBuffer::from_slice(price)?;
+        let d_volume = DeviceBuffer::from_slice(volume)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
         let func = self
             .module
             .get_function("vpt_batch_f32")
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVptError::MissingKernelSymbol { name: "vpt_batch_f32" })?;
         let stream = &self.stream;
         unsafe {
             launch!(func<<<(1, 1, 1), (1, 1, 1), 0, stream>>>(
@@ -145,12 +167,10 @@ impl CudaVpt {
                 first as i32,
                 d_out.as_device_ptr()
             ))
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+            ?
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: 1,
@@ -194,28 +214,29 @@ impl CudaVpt {
         }
 
         // VRAM: 2 inputs + output + first_valids
-        let bytes_inputs_outputs = (3usize)
-            .saturating_mul(expected)
-            .saturating_mul(std::mem::size_of::<f32>());
-        let bytes_first = cols.saturating_mul(std::mem::size_of::<i32>());
-        let required = bytes_inputs_outputs.saturating_add(bytes_first);
-        if !Self::will_fit(required, 64 << 20) {
-            return Err(CudaVptError::Cuda("insufficient free VRAM".into()));
-        }
+        let el_f32 = std::mem::size_of::<f32>();
+        let el_i32 = std::mem::size_of::<i32>();
+        let bytes_inputs_outputs = 3usize
+            .checked_mul(expected)
+            .and_then(|x| x.checked_mul(el_f32))
+            .ok_or_else(|| CudaVptError::InvalidInput("size overflow".into()))?;
+        let bytes_first = cols
+            .checked_mul(el_i32)
+            .ok_or_else(|| CudaVptError::InvalidInput("size overflow".into()))?;
+        let required = bytes_inputs_outputs
+            .checked_add(bytes_first)
+            .ok_or_else(|| CudaVptError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, 64 << 20)?;
 
-        let d_price =
-            DeviceBuffer::from_slice(price_tm).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        let d_volume =
-            DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+        let d_price = DeviceBuffer::from_slice(price_tm)?;
+        let d_volume = DeviceBuffer::from_slice(volume_tm)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }?;
 
         let func = self
             .module
             .get_function("vpt_many_series_one_param_f32")
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVptError::MissingKernelSymbol { name: "vpt_many_series_one_param_f32" })?;
         // Launch with grid capped by SMs*16 for scalable occupancy on large GPUs.
         let block_x = self.block_x;
         let mut grid_x = ((cols as u32) + block_x - 1) / block_x;
@@ -233,12 +254,10 @@ impl CudaVpt {
                 d_first.as_device_ptr(),
                 d_out.as_device_ptr()
             ))
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+            ?
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,

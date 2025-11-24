@@ -13,6 +13,7 @@
 //!
 //! ## Developer Notes
 //! - SIMD status: AVX2 provides a scalar, FMA‑enabled path (via `mul_add`) for a consistent 5–10% speedup on large series; AVX512 reuses the same path. RSX is a short, stateful IIR chain, so there is no cross‑time lane parallelism without complex look‑ahead transforms.
+//! - CUDA status: Enabled for batch and many-series FP32 kernels; producing streams synchronize before returning VRAM handles, which expose CUDA Array Interface v3 and DLPack v1.x for Python interop.
 //! - Batch status: Row‑specific batch kernels were not attempted; there is no clear shared precompute across periods to amortize work beyond minor per‑row wins.
 //! - Scalar path: Warmup/init hoisted out of the loop; safe, branch‑lean hot loop following ALMA patterns. Outputs and prefixes use zero‑copy helpers.
 //! - Streaming update: O(1) per tick via explicit RSX IIR state; mirrors batch logic exactly. Ring buffer removed; warmup semantics preserved (None until `period-1`, then NaN once, then values).
@@ -188,11 +189,17 @@ pub enum RsxError {
     #[error("rsx: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 
-    #[error("rsx: Size mismatch: destination length = {dst}, source length = {src}")]
-    SizeMismatch { dst: usize, src: usize },
+    #[error("rsx: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("rsx: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
 
     #[error("rsx: Invalid kernel: expected batch kernel, got {kernel:?}")]
     InvalidKernel { kernel: Kernel },
+
+    #[error("rsx: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline(always)]
@@ -262,9 +269,9 @@ pub fn rsx_with_kernel(input: &RsxInput, kernel: Kernel) -> Result<RsxOutput, Rs
 pub fn rsx_into_slice(dst: &mut [f64], input: &RsxInput, kern: Kernel) -> Result<(), RsxError> {
     let (data, period, first, chosen) = rsx_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(RsxError::SizeMismatch {
-            dst: dst.len(),
-            src: data.len(),
+        return Err(RsxError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -742,7 +749,7 @@ pub fn rsx_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        other => return Err(RsxError::InvalidKernel { kernel: other }),
+        other => return Err(RsxError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -777,19 +784,54 @@ impl RsxBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &RsxBatchRange) -> Vec<RsxParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &RsxBatchRange) -> Result<Vec<RsxParams>, RsxError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, RsxError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let st = step.max(1);
+            let v: Vec<usize> = (start..=end).step_by(st).collect();
+            if v.is_empty() {
+                return Err(RsxError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
+        }
+        // reversed bounds
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(RsxError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
+    if periods.is_empty() {
+        return Err(RsxError::InvalidRange {
+            start: r.period.0.to_string(),
+            end: r.period.1.to_string(),
+            step: r.period.2.to_string(),
+        });
+    }
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(RsxParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -817,11 +859,12 @@ fn rsx_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<RsxBatchOutput, RsxError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(RsxError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(RsxError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
         });
     }
 
@@ -839,6 +882,13 @@ fn rsx_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+
+    // Guard rows*cols overflow for matrix allocation
+    let _ = rows.checked_mul(cols).ok_or_else(|| RsxError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
 
     // Resolve kernel selection
     let actual_kernel = match kern {
@@ -1714,12 +1764,16 @@ pub fn rsx_batch_py<'py>(
     };
 
     // Calculate dimensions
-    let combos = expand_grid(&sweep);
+    let combos =
+        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
     // Pre-allocate output array (OK for batch operations)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Compute without GIL
@@ -1769,11 +1823,12 @@ fn rsx_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<RsxParams>, RsxError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(RsxError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(RsxError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
         });
     }
 
@@ -1957,9 +2012,13 @@ pub fn rsx_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
     };
 
     // mirror ALMA: build rows*cols buffer using helpers
-    let combos = expand_grid(&sweep);
+    let combos =
+        expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = data.len();
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
 
     // allocate rows×cols uninit and prefix-init via helper
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -2020,11 +2079,15 @@ pub fn rsx_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos =
+            expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         rsx_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2037,9 +2100,267 @@ pub fn rsx_batch_into(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::rsx_wrapper::CudaRsx;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::ffi as pyffi;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::ffi::{c_void, CString};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "RsxDeviceArrayF32", unsendable)]
+pub struct RsxDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl RsxDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producing stream synchronizes before returning the handle.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        // Array API stream semantics: producer is already synchronized, so we only validate.
+        if let Some(s) = stream {
+            if s == 0 {
+                return Err(PyValueError::new_err(
+                    "__dlpack__ stream=0 is invalid for CUDA",
+                ));
+            }
+        }
+        if let Some((dev_ty, dev_id)) = dl_device {
+            if dev_ty != 2 || dev_id != slf.device_id as i32 {
+                return Err(PyValueError::new_err(
+                    "dl_device mismatch; cross-device copy not supported for RsxDeviceArrayF32",
+                ));
+            }
+        }
+        if let Some(true) = copy {
+            return Err(PyValueError::new_err(
+                "copy=True not supported for RsxDeviceArrayF32",
+            ));
+        }
+
+        // DLPack v0.6 and v1.x (versioned) producer
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            py_self: *mut pyffi::PyObject,
+        }
+
+        unsafe extern "C" fn capsule_destructor(cap: *mut pyffi::PyObject) {
+            if cap.is_null() {
+                return;
+            }
+            let name_c = unsafe { pyffi::PyCapsule_GetName(cap) };
+            if name_c.is_null() {
+                return;
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr(name_c) }.to_string_lossy();
+            let valid = name == "dltensor" || name == "dltensor_versioned";
+            let ptr = unsafe { pyffi::PyCapsule_GetPointer(cap, name_c as *const _) };
+            if ptr.is_null() || !valid {
+                return;
+            }
+            unsafe {
+                if name == "dltensor_versioned" {
+                    let v = ptr as *mut DLManagedTensorVersioned;
+                    if !v.is_null() {
+                        let mt = (*v).manager;
+                        if !mt.is_null() {
+                            if let Some(del) = (*mt).deleter {
+                                del(mt);
+                            }
+                        }
+                        let _ = Box::from_raw(v);
+                    }
+                } else {
+                    let mt = ptr as *mut DLManagedTensor;
+                    if !mt.is_null() {
+                        if let Some(del) = (*mt).deleter {
+                            del(mt);
+                        }
+                    }
+                }
+            }
+        }
+
+        unsafe extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            unsafe {
+                let ctx = (*p).manager_ctx as *mut ManagerCtx;
+                if !ctx.is_null() {
+                    let pyobj = (*ctx).py_self;
+                    let _ = Box::from_raw(ctx);
+                    if !pyobj.is_null() {
+                        pyffi::Py_DECREF(pyobj);
+                    }
+                }
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+
+        // Allocate shape/strides (elements) and INCREF self so the VRAM buffer outlives the capsule
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr = shape_box.as_mut_ptr();
+        let strides_ptr = strides_box.as_mut_ptr();
+        let py_self = slf.as_ptr();
+        unsafe {
+            pyffi::Py_INCREF(py_self);
+        }
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape_box: shape_box,
+            _strides_box: strides_box,
+            py_self,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let total_elems = (rows as i128).saturating_mul(cols as i128);
+        let data_ptr = if total_elems == 0 {
+            std::ptr::null_mut()
+        } else {
+            slf.inner.device_ptr() as usize as *mut c_void
+        };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice {
+                    device_type: 2,
+                    device_id: slf.device_id as i32,
+                },
+                ndim: 2,
+                dtype: DLDataType {
+                    code: 2,
+                    bits: 32,
+                    lanes: 1,
+                },
+                shape: shape_ptr,
+                strides: strides_ptr,
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(managed_deleter),
+        });
+
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create versioned DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl RsxDeviceArrayF32Py {
+    pub fn new_from_rust(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self {
+            inner,
+            _ctx: ctx_guard,
+            device_id,
+        }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "rsx_cuda_batch_dev")]
@@ -2049,7 +2370,7 @@ pub fn rsx_cuda_batch_dev_py(
     data: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<RsxDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2057,12 +2378,18 @@ pub fn rsx_cuda_batch_dev_py(
     let sweep = RsxBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
-        let cuda = CudaRsx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.rsx_batch_dev(prices, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
-    Ok(DeviceArrayF32Py { inner })
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| {
+            let cuda = CudaRsx::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let dev_id = cuda.device_id();
+            let arr = cuda
+                .rsx_batch_dev(prices, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
+        })?;
+    Ok(RsxDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2075,7 +2402,7 @@ pub fn rsx_cuda_many_series_one_param_dev_py(
     rows: usize,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<RsxDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2086,10 +2413,16 @@ pub fn rsx_cuda_many_series_one_param_dev_py(
     if prices_tm.len() != expected {
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
-    let inner = py.allow_threads(|| {
-        let cuda = CudaRsx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.rsx_many_series_one_param_time_major_dev(prices_tm, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
-    Ok(DeviceArrayF32Py { inner })
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| {
+            let cuda = CudaRsx::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let dev_id = cuda.device_id();
+            let arr = cuda
+                .rsx_many_series_one_param_time_major_dev(prices_tm, cols, rows, period)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
+        })?;
+    Ok(RsxDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }

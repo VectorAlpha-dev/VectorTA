@@ -24,6 +24,7 @@
 //!   This preserves warmup semantics and reduces redundant work when multiple percentiles are
 //!   requested per length. Default benches (single percentage per length) see no change.
 //! - Zero-copy Memory: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
+//! - Decision log: SIMD disabled (scalar-only); CUDA wrapper enabled for FP32 with VRAM-backed handles and CAI v3/DLPack v1.x; numerical outputs match the scalar path (tests unchanged).
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -153,6 +154,15 @@ pub enum PercentileNearestRankError {
 
     #[error("percentile_nearest_rank: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+
+    #[error("percentile_nearest_rank: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("percentile_nearest_rank: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+
+    #[error("percentile_nearest_rank: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline(always)]
@@ -319,9 +329,9 @@ pub fn percentile_nearest_rank_into_slice(
 ) -> Result<(), PercentileNearestRankError> {
     let (data, length, percentage, first, chosen) = pnr_prepare(input, kernel)?;
     if dst.len() != data.len() {
-        return Err(PercentileNearestRankError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(PercentileNearestRankError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -800,12 +810,16 @@ pub fn percentile_nearest_rank_batch_py<'py>(
     };
 
     // expand once to know rows/cols and reuse later for metadata
-    let combos = expand_grid_pnr(&sweep);
+    let combos = expand_grid_pnr(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
     // flat output buffer, no extra copy
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Initialize warmup values with NaN
@@ -952,31 +966,98 @@ impl PercentileNearestRankBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid_pnr(r: &PercentileNearestRankBatchRange) -> Vec<PercentileNearestRankParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid_pnr(
+    r: &PercentileNearestRankBatchRange,
+) -> Result<Vec<PercentileNearestRankParams>, PercentileNearestRankError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, PercentileNearestRankError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
+        }
+        // reversed bounds
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(PercentileNearestRankError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
 
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step == 0.0 || (start - end).abs() < 1e-12 {
-            return vec![start];
+    fn axis_f64(
+        (start, end, step): (f64, f64, f64),
+    ) -> Result<Vec<f64>, PercentileNearestRankError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(PercentileNearestRankError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
         }
         let mut v = Vec::new();
-        let mut val = start;
-        while val <= end + 1e-12 {
-            v.push(val);
-            val += step;
+        let mut x = start;
+        let st = step.abs();
+        while x + 1e-12 >= end {
+            v.push(x);
+            x -= st;
         }
-        v
+        if v.is_empty() {
+            return Err(PercentileNearestRankError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
 
-    let lengths = axis_usize(r.length);
-    let percentages = axis_f64(r.percentage);
+    let lengths = axis_usize(r.length)?;
+    let percentages = axis_f64(r.percentage)?;
 
-    let mut combos = Vec::with_capacity(lengths.len() * percentages.len());
+    let cap = lengths
+        .len()
+        .checked_mul(percentages.len())
+        .ok_or_else(|| PercentileNearestRankError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+
+    if cap == 0 {
+        return Err(PercentileNearestRankError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
+        });
+    }
+
+    let mut combos = Vec::with_capacity(cap);
     for &length in &lengths {
         for &percentage in &percentages {
             combos.push(PercentileNearestRankParams {
@@ -985,7 +1066,7 @@ fn expand_grid_pnr(r: &PercentileNearestRankBatchRange) -> Vec<PercentileNearest
             });
         }
     }
-    combos
+    Ok(combos)
 }
 
 #[inline(always)]
@@ -997,12 +1078,7 @@ pub fn pnr_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(PercentileNearestRankError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(PercentileNearestRankError::InvalidKernelForBatch(k)),
     };
     pnr_batch_inner(data, sweep, kernel, true)
 }
@@ -1035,11 +1111,12 @@ fn pnr_batch_inner(
     if data.is_empty() {
         return Err(PercentileNearestRankError::EmptyInputData);
     }
-    let combos = expand_grid_pnr(sweep);
+    let combos = expand_grid_pnr(sweep)?;
     if combos.is_empty() {
-        return Err(PercentileNearestRankError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(PercentileNearestRankError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
         });
     }
     let rows = combos.len();
@@ -1057,6 +1134,15 @@ fn pnr_batch_inner(
             valid: data.len() - first,
         });
     }
+
+    // Guard rows * cols overflow before allocating
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PercentileNearestRankError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
 
     // allocate uninit matrix and set NaN prefixes per row
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -2081,10 +2167,13 @@ pub fn percentile_nearest_rank_cuda_batch_dev_py<'py>(
         length: length_range,
         percentage: percentage_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, ctx, dev_id, combos) = py.allow_threads(|| {
         let cuda = CudaPercentileNearestRank::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.pnr_batch_dev(slice_in, &sweep)
+            .map(|(inner, combos)| (inner, ctx, dev_id, combos))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
@@ -2099,7 +2188,7 @@ pub fn percentile_nearest_rank_cuda_batch_dev_py<'py>(
         .collect();
     dict.set_item("lengths", lengths.into_pyarray(py))?;
     dict.set_item("percentages", percentages.into_pyarray(py))?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) }, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2118,11 +2207,14 @@ pub fn percentile_nearest_rank_cuda_many_series_one_param_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaPercentileNearestRank::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.pnr_many_series_one_param_time_major_dev(slice_in, cols, rows, length, percentage)
+            .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }

@@ -13,7 +13,7 @@
 
 #![cfg(feature = "cuda")]
 
-use super::alma_wrapper::DeviceArrayF32;
+use super::alma_wrapper::{DeviceArrayF32, CudaAlmaError};
 use crate::indicators::vidya::{VidyaBatchRange, VidyaParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -24,25 +24,28 @@ use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
-use std::error::Error;
 use std::ffi::c_void;
 use std::fmt;
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CudaVidyaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaVidyaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaVidyaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaVidyaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl Error for CudaVidyaError {}
 
 // -------- Policy (kept simple; one block per combo/series) --------
 
@@ -86,7 +89,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaVidya {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: std::sync::Arc<Context>,
+    device_id: u32,
     policy: CudaVidyaPolicy,
     // Introspection
     last_batch: Option<BatchKernelSelected>,
@@ -99,10 +103,9 @@ pub struct CudaVidya {
 
 impl CudaVidya {
     pub fn new(device_id: usize) -> Result<Self, CudaVidyaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaVidyaError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaVidyaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = std::sync::Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vidya_kernel.ptx"));
         let jit_opts = &[
@@ -111,25 +114,26 @@ impl CudaVidya {
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
-            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                Ok(m) => m,
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaVidyaError::Cuda(e.to_string()))?
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
                 }
-            },
+            }
         };
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        let max_grid_x = device
-            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
-            .map_err(|e| CudaVidyaError::Cuda(e.to_string()))? as usize;
+        let max_grid_x =
+            device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as usize;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaVidyaPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -141,9 +145,17 @@ impl CudaVidya {
 
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaVidyaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVidyaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
+    }
+
+    #[inline]
+    pub fn context_arc_clone(&self) -> std::sync::Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     // ---------- Batch (one-series × many-params) ----------
@@ -158,35 +170,47 @@ impl CudaVidya {
 
         let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
         let params_bytes =
-            (prepared.short_i32.len() + prepared.long_i32.len()) * 4 + prepared.alpha_f32.len() * 4;
-        let out_bytes = n_combos * prepared.series_len * 4;
-        let required = prices_bytes + params_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaVidyaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            (prepared.short_i32.len() + prepared.long_i32.len()) * std::mem::size_of::<i32>()
+                + prepared.alpha_f32.len() * std::mem::size_of::<f32>();
+        let out_elems = n_combos
+            .checked_mul(prepared.series_len)
+            .ok_or_else(|| CudaVidyaError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaVidyaError::InvalidInput("rows*cols*sizeof(f32) overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaVidyaError::InvalidInput("VRAM size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaVidyaError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaVidyaError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
         let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_f32, &self.stream)
-                .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice_async(data_f32, &self.stream)?
         };
         let d_short = unsafe {
-            DeviceBuffer::from_slice_async(&prepared.short_i32, &self.stream)
-                .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice_async(&prepared.short_i32, &self.stream)?
         };
         let d_long = unsafe {
-            DeviceBuffer::from_slice_async(&prepared.long_i32, &self.stream)
-                .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice_async(&prepared.long_i32, &self.stream)?
         };
         let d_alpha = unsafe {
-            DeviceBuffer::from_slice_async(&prepared.alpha_f32, &self.stream)
-                .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice_async(&prepared.alpha_f32, &self.stream)?
         };
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(n_combos * prepared.series_len, &self.stream)
-                .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(n_combos * prepared.series_len, &self.stream)?
         };
 
         self.launch_batch_kernel(
@@ -220,28 +244,47 @@ impl CudaVidya {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        let prices_bytes = num_series * series_len * 4;
-        let params_bytes = prepared.first_valids.len() * 4;
-        let out_bytes = num_series * series_len * 4;
-        let required = prices_bytes + params_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaVidyaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+        let elems = num_series
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaVidyaError::InvalidInput("rows*cols overflow".into()))?;
+        let prices_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaVidyaError::InvalidInput("rows*cols*sizeof(f32) overflow".into()))?;
+        let params_bytes = prepared
+            .first_valids
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaVidyaError::InvalidInput("first_valids bytes overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaVidyaError::InvalidInput("rows*cols*sizeof(f32) overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaVidyaError::InvalidInput("VRAM size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaVidyaError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaVidyaError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
         let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
-                .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)?
         };
         let d_first = unsafe {
-            DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream)
-                .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream)?
         };
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream)
-                .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream)?
         };
 
         self.launch_many_series_kernel(
@@ -283,7 +326,7 @@ impl CudaVidya {
         let func = self
             .module
             .get_function("vidya_batch_f32")
-            .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVidyaError::MissingKernelSymbol { name: "vidya_batch_f32" })?;
 
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
@@ -304,8 +347,24 @@ impl CudaVidya {
         // Chunk by device grid.x cap
         let cap = self.max_grid_x.max(1).min(usize::MAX / 2);
         for (start, len) in Self::grid_chunks(n_combos, cap) {
-            let grid: GridSize = (len as u32, 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
+            let gx = len as u32;
+            let gy = 1u32;
+            let gz = 1u32;
+            let bx = block_x;
+            let by = 1u32;
+            let bz = 1u32;
+            if gx == 0 || bx == 0 {
+                return Err(CudaVidyaError::LaunchConfigTooLarge {
+                    gx,
+                    gy,
+                    gz,
+                    bx,
+                    by,
+                    bz,
+                });
+            }
+            let grid: GridSize = (gx, gy, gz).into();
+            let block: BlockSize = (bx, by, bz).into();
             let out_ptr = unsafe { d_out.as_device_ptr().add(start * series_len) };
             let short_ptr = unsafe { d_short.as_device_ptr().add(start) };
             let long_ptr = unsafe { d_long.as_device_ptr().add(start) };
@@ -326,8 +385,7 @@ impl CudaVidya {
                         n_combos_i,
                         out_ptr
                     )
-                )
-                .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?;
+                )?;
             }
         }
         Ok(())
@@ -351,7 +409,9 @@ impl CudaVidya {
         let func = self
             .module
             .get_function("vidya_many_series_one_param_f32")
-            .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVidyaError::MissingKernelSymbol {
+                name: "vidya_many_series_one_param_f32",
+            })?;
 
         let mut block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -370,8 +430,24 @@ impl CudaVidya {
         self.maybe_log_many_debug();
 
         // One block per series (compat 1D launch)
-        let grid: GridSize = (num_series as u32, 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        let gx = num_series as u32;
+        let gy = 1u32;
+        let gz = 1u32;
+        let bx = block_x;
+        let by = 1u32;
+        let bz = 1u32;
+        if gx == 0 || bx == 0 {
+            return Err(CudaVidyaError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        let grid: GridSize = (gx, gy, gz).into();
+        let block: BlockSize = (bx, by, bz).into();
 
         let stream = &self.stream;
         unsafe {
@@ -386,8 +462,7 @@ impl CudaVidya {
                     series_len as i32,
                     d_out_tm.as_device_ptr()
                 )
-            )
-            .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?;
+            )?;
         }
         Ok(())
     }
@@ -457,7 +532,11 @@ impl CudaVidya {
                 "num_series and series_len must be positive".into(),
             ));
         }
-        if data_tm_f32.len() != num_series * series_len {
+        if data_tm_f32.len()
+            != num_series
+                .checked_mul(series_len)
+                .ok_or_else(|| CudaVidyaError::InvalidInput("rows*cols overflow".into()))?
+        {
             return Err(CudaVidyaError::InvalidInput(
                 "time-major slice length mismatch".into(),
             ));
@@ -509,6 +588,11 @@ impl CudaVidya {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
             Err(_) => true,
         }
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
     }
     #[inline]
     fn will_fit(required_bytes: usize, headroom: usize) -> bool {

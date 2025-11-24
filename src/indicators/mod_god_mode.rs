@@ -1,8 +1,8 @@
 //! # Modified God Mode (Comprehensive Version)
 //!
 //! Decision log:
-//! - Fused scalar kernel enabled for all modes; >40% faster vs modular on 100k (RUSTFLAGS="-C target-cpu=native").
-//! - SIMD (AVX2/AVX512) stubbed to scalar: small wins at 100k but regress at 10k and 1M; selection now delegates to scalar for consistency.
+//! - Fused scalar kernel enabled; SIMD (AVX2/AVX512) stubs delegate to scalar for consistent performance across sizes.
+//! - CUDA FP32 kernels enabled for one-series × many-params and many-series × one-param; Python returns VRAM handles (CAI v3 + DLPack v1.x).
 //! - Row-specific batch SIMD not implemented: heavy EMA/RSI recurrences limit lane parallelism and shared precompute.
 //!
 //! A composite momentum oscillator combining multiple technical indicators.
@@ -214,13 +214,13 @@ impl<'a> ModGodModeInput<'a> {
 /// Error type for Modified God Mode indicator
 #[derive(Debug, Error)]
 pub enum ModGodModeError {
-    #[error("mod_god_mode: Input data slice is empty.")]
+    #[error("mod_god_mode: input data slice is empty.")]
     EmptyInputData,
 
-    #[error("mod_god_mode: All values are NaN.")]
+    #[error("mod_god_mode: all values are NaN.")]
     AllValuesNaN,
 
-    #[error("mod_god_mode: Invalid period: n1={n1}, n2={n2}, n3={n3}, data_len={data_len}")]
+    #[error("mod_god_mode: invalid periods: n1={n1}, n2={n2}, n3={n3}, data_len={data_len}")]
     InvalidPeriod {
         n1: usize,
         n2: usize,
@@ -228,16 +228,22 @@ pub enum ModGodModeError {
         data_len: usize,
     },
 
-    #[error("mod_god_mode: Not enough valid data: needed={needed}, valid={valid}")]
+    #[error("mod_god_mode: not enough valid data: needed={needed}, valid={valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 
-    #[error("mod_god_mode: Destination length mismatch: dst={dst}, src={src}")]
-    InvalidDestinationLen { dst: usize, src: usize },
+    #[error("mod_god_mode: output slice length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
 
-    #[error("mod_god_mode: Invalid kernel for batch")]
-    InvalidKernelForBatch,
+    #[error("mod_god_mode: invalid range expansion: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
 
-    #[error("mod_god_mode: Calculation error: {0}")]
+    #[error("mod_god_mode: invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    #[error("mod_god_mode: invalid input: {0}")]
+    InvalidInput(String),
+
+    #[error("mod_god_mode: calculation error: {0}")]
     CalculationError(String),
 }
 
@@ -980,9 +986,9 @@ pub fn mod_god_mode_into_slices(
             .len()
             .min(dst_signal.len())
             .min(dst_hist.len());
-        return Err(ModGodModeError::InvalidDestinationLen {
-            dst: dst_len,
-            src: len,
+        return Err(ModGodModeError::OutputLengthMismatch {
+            expected: len,
+            got: dst_len,
         });
     }
 
@@ -1385,7 +1391,7 @@ pub fn mod_god_mode_into(
             .len()
             .min(out_signal.len())
             .min(out_histogram.len());
-        return Err(ModGodModeError::InvalidDestinationLen { dst: dst_len, src: len });
+        return Err(ModGodModeError::OutputLengthMismatch { expected: len, got: dst_len });
     }
 
     if len == 0 {
@@ -1469,9 +1475,9 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
             .len()
             .min(dst_signal.len())
             .min(dst_hist.len());
-        return Err(ModGodModeError::InvalidDestinationLen {
-            dst: dst_len,
-            src: len,
+        return Err(ModGodModeError::OutputLengthMismatch {
+            expected: len,
+            got: dst_len,
         });
     }
 
@@ -3328,18 +3334,46 @@ impl ModGodModeBatchOutput {
 }
 
 #[inline]
-fn expand_grid_mod(r: &ModGodModeBatchRange) -> Vec<ModGodModeParams> {
-    let ax = |(a, b, s): (usize, usize, usize)| {
-        if s == 0 || a == b {
-            vec![a]
-        } else {
-            (a..=b).step_by(s).collect()
+fn axis_usize_mod(
+    (start, end, step): (usize, usize, usize),
+) -> Result<Vec<usize>, ModGodModeError> {
+    if step == 0 || start == end {
+        return Ok(vec![start]);
+    }
+    if start < end {
+        let v: Vec<_> = (start..=end).step_by(step).collect();
+        if v.is_empty() {
+            return Err(ModGodModeError::InvalidRange { start, end, step });
         }
-    };
-    let n1s = ax(r.n1);
-    let n2s = ax(r.n2);
-    let n3s = ax(r.n3);
-    let mut v = Vec::with_capacity(n1s.len() * n2s.len() * n3s.len());
+        Ok(v)
+    } else {
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur >= end {
+            v.push(cur);
+            if cur - end < step {
+                break;
+            }
+            cur -= step;
+        }
+        if v.is_empty() {
+            return Err(ModGodModeError::InvalidRange { start, end, step });
+        }
+        Ok(v)
+    }
+}
+
+#[inline]
+fn expand_grid_mod(r: &ModGodModeBatchRange) -> Result<Vec<ModGodModeParams>, ModGodModeError> {
+    let n1s = axis_usize_mod(r.n1)?;
+    let n2s = axis_usize_mod(r.n2)?;
+    let n3s = axis_usize_mod(r.n3)?;
+    let cap = n1s
+        .len()
+        .checked_mul(n2s.len())
+        .and_then(|v| v.checked_mul(n3s.len()))
+        .ok_or_else(|| ModGodModeError::InvalidInput("batch grid size overflow".into()))?;
+    let mut v = Vec::with_capacity(cap);
     for &a in &n1s {
         for &b in &n2s {
             for &c in &n3s {
@@ -3353,7 +3387,14 @@ fn expand_grid_mod(r: &ModGodModeBatchRange) -> Vec<ModGodModeParams> {
             }
         }
     }
-    v
+    if v.is_empty() {
+        return Err(ModGodModeError::InvalidRange {
+            start: r.n1.0,
+            end: r.n3.1,
+            step: r.n1.2.max(r.n2.2).max(r.n3.2),
+        });
+    }
+    Ok(v)
 }
 
 pub fn mod_god_mode_batch_with_kernel(
@@ -3364,12 +3405,15 @@ pub fn mod_god_mode_batch_with_kernel(
     sweep: &ModGodModeBatchRange,
     k: Kernel,
 ) -> Result<ModGodModeBatchOutput, ModGodModeError> {
-    let combos = expand_grid_mod(sweep);
+    let combos = expand_grid_mod(sweep)?;
     let rows = combos.len();
     let cols = close.len();
     if cols == 0 {
         return Err(ModGodModeError::EmptyInputData);
     }
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| ModGodModeError::InvalidInput("rows*cols overflow".into()))?;
 
     // Allocate uninit matrices
     let mut mu_w = make_uninit_matrix(rows, cols);
@@ -3404,7 +3448,7 @@ pub fn mod_god_mode_batch_with_kernel(
     let batch_kern = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(ModGodModeError::InvalidKernelForBatch),
+        _ => return Err(ModGodModeError::InvalidKernelForBatch(k)),
     };
 
     let row_kern = match batch_kern {
@@ -3753,7 +3797,7 @@ pub fn mod_god_mode_cuda_batch_dev_py<'py>(
         n3: n3_range,
         mode: m,
     };
-    let (wt, sig, hist, combos, rows, cols) = py.allow_threads(|| {
+    let (wt, sig, hist, combos, rows, cols, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaModGodMode::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let res = cuda
@@ -3762,12 +3806,44 @@ pub fn mod_god_mode_cuda_batch_dev_py<'py>(
         let out = res.outputs;
         let rows = out.rows();
         let cols = out.cols();
-        Ok::<_, PyErr>((out.wt1, out.wt2, out.hist, res.combos, rows, cols))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        Ok::<_, PyErr>((out.wt1, out.wt2, out.hist, res.combos, rows, cols, ctx, dev_id))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item("wavetrend", Py::new(py, DeviceArrayF32Py { inner: wt })?)?;
-    dict.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: sig })?)?;
-    dict.set_item("histogram", Py::new(py, DeviceArrayF32Py { inner: hist })?)?;
+    dict.set_item(
+        "wavetrend",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: wt,
+                _ctx: Some(ctx.clone()),
+                device_id: Some(dev_id),
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "signal",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: sig,
+                _ctx: Some(ctx.clone()),
+                device_id: Some(dev_id),
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "histogram",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: hist,
+                _ctx: Some(ctx),
+                device_id: Some(dev_id),
+            },
+        )?,
+    )?;
     dict.set_item(
         "n1s",
         combos
@@ -3848,17 +3924,55 @@ pub fn mod_god_mode_cuda_many_series_one_param_dev_py<'py>(
         mode: Some(m),
         use_volume: Some(use_volume),
     };
-    let (wt, sig, hist) = py.allow_threads(|| {
+    let (wt, sig, hist, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaModGodMode::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.mod_god_mode_many_series_one_param_time_major_dev(h, l, c, vol, cols, rows, &params)
-            .map(|tr| (tr.wt1, tr.wt2, tr.hist))
+            .map(|tr| {
+                (
+                    tr.wt1,
+                    tr.wt2,
+                    tr.hist,
+                    cuda.context_arc(),
+                    cuda.device_id(),
+                )
+            })
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item("wavetrend", Py::new(py, DeviceArrayF32Py { inner: wt })?)?;
-    dict.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: sig })?)?;
-    dict.set_item("histogram", Py::new(py, DeviceArrayF32Py { inner: hist })?)?;
+    dict.set_item(
+        "wavetrend",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: wt,
+                _ctx: Some(ctx.clone()),
+                device_id: Some(dev_id),
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "signal",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: sig,
+                _ctx: Some(ctx.clone()),
+                device_id: Some(dev_id),
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "histogram",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: hist,
+                _ctx: Some(ctx),
+                device_id: Some(dev_id),
+            },
+        )?,
+    )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     dict.set_item("n1", n1)?;

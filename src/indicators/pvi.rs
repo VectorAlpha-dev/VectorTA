@@ -19,6 +19,7 @@
 //!   (affine in initial value). This yields substantial speedups for many initial_value rows.
 //! - **Streaming**: O(1) with simple cumulative calculation
 //! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//! - **Decision log**: SIMD under `nightly-avx` (AVX2/AVX512 stubs), CUDA wrapper returns VRAM handles with typed errors, and Python interop exposes CAI v3 + DLPack v1.x; numerical outputs unchanged.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -192,14 +193,24 @@ impl PviBuilder {
 
 #[derive(Debug, Error)]
 pub enum PviError {
-    #[error("pvi: Empty data provided.")]
-    EmptyData,
-    #[error("pvi: All values are NaN.")]
+    #[error("pvi: empty input data")]
+    EmptyInputData,
+    #[error("pvi: all values are NaN")]
     AllValuesNaN,
-    #[error("pvi: Close and volume data have different lengths.")]
+    #[error("pvi: close and volume data have different lengths")]
     MismatchedLength,
-    #[error("pvi: Not enough valid data: needed at least 2 valid data points.")]
-    NotEnoughValidData,
+    #[error(
+        "pvi: not enough valid data: needed at least {needed} valid data points, got {valid}"
+    )]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("pvi: output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("pvi: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
+    #[error("pvi: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("pvi: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -222,7 +233,7 @@ pub fn pvi_with_kernel(input: &PviInput, kernel: Kernel) -> Result<PviOutput, Pv
     };
 
     if close.is_empty() || volume.is_empty() {
-        return Err(PviError::EmptyData);
+        return Err(PviError::EmptyInputData);
     }
     if close.len() != volume.len() {
         return Err(PviError::MismatchedLength);
@@ -232,8 +243,9 @@ pub fn pvi_with_kernel(input: &PviInput, kernel: Kernel) -> Result<PviOutput, Pv
         .zip(volume.iter())
         .position(|(&c, &v)| !c.is_nan() && !v.is_nan())
         .ok_or(PviError::AllValuesNaN)?;
-    if (close.len() - first_valid_idx) < 2 {
-        return Err(PviError::NotEnoughValidData);
+    let valid = close.len() - first_valid_idx;
+    if valid < 2 {
+        return Err(PviError::NotEnoughValidData { needed: 2, valid });
     }
 
     let mut out = alloc_with_nan_prefix(close.len(), first_valid_idx);
@@ -294,14 +306,16 @@ pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
     };
 
     if close.is_empty() || volume.is_empty() {
-        return Err(PviError::EmptyData);
+        return Err(PviError::EmptyInputData);
     }
     if close.len() != volume.len() {
         return Err(PviError::MismatchedLength);
     }
     if out.len() != close.len() {
-        // Reuse the module's length error on mismatch
-        return Err(PviError::MismatchedLength);
+        return Err(PviError::OutputLengthMismatch {
+            expected: close.len(),
+            got: out.len(),
+        });
     }
 
     // Compute warmup (first-valid) identical to Vec API
@@ -310,8 +324,9 @@ pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
         .zip(volume.iter())
         .position(|(&c, &v)| !c.is_nan() && !v.is_nan())
         .ok_or(PviError::AllValuesNaN)?;
-    if (close.len() - first_valid_idx) < 2 {
-        return Err(PviError::NotEnoughValidData);
+    let valid = close.len() - first_valid_idx;
+    if valid < 2 {
+        return Err(PviError::NotEnoughValidData { needed: 2, valid });
     }
 
     // Prefill warmup prefix to match alloc_with_nan_prefix's quiet-NaN
@@ -363,13 +378,16 @@ pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result
     };
 
     if close.is_empty() || volume.is_empty() {
-        return Err(PviError::EmptyData);
+        return Err(PviError::EmptyInputData);
     }
     if close.len() != volume.len() {
         return Err(PviError::MismatchedLength);
     }
     if dst.len() != close.len() {
-        return Err(PviError::MismatchedLength);
+        return Err(PviError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst.len(),
+        });
     }
 
     let first_valid_idx = close
@@ -377,8 +395,9 @@ pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result
         .zip(volume.iter())
         .position(|(&c, &v)| !c.is_nan() && !v.is_nan())
         .ok_or(PviError::AllValuesNaN)?;
-    if (close.len() - first_valid_idx) < 2 {
-        return Err(PviError::NotEnoughValidData);
+    let valid = close.len() - first_valid_idx;
+    if valid < 2 {
+        return Err(PviError::NotEnoughValidData { needed: 2, valid });
     }
 
     // Helper functions already handle NaN prefix initialization
@@ -763,7 +782,7 @@ pub fn pvi_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(PviError::EmptyData),
+        other => return Err(PviError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -796,27 +815,66 @@ impl PviBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &PviBatchRange) -> Vec<PviParams> {
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+fn expand_grid(r: &PviBatchRange) -> Result<Vec<PviParams>, PviError> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, PviError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        let mut vals = Vec::new();
+        if start <= end {
+            let mut x = start;
+            loop {
+                vals.push(x);
+                if x >= end {
+                    break;
+                }
+                let next = x + step;
+                if !next.is_finite() || next == x {
+                    break;
+                }
+                x = next;
+                if x > end + 1e-12 {
+                    break;
+                }
+            }
+        } else {
+            let mut x = start;
+            loop {
+                vals.push(x);
+                if x <= end {
+                    break;
+                }
+                let next = x - step.abs();
+                if !next.is_finite() || next == x {
+                    break;
+                }
+                x = next;
+                if x < end - 1e-12 {
+                    break;
+                }
+            }
         }
-        v
+        if vals.is_empty() {
+            return Err(PviError::InvalidRange { start, end, step });
+        }
+        Ok(vals)
     }
-    let initials = axis_f64(r.initial_value);
+
+    let initials = axis_f64(r.initial_value)?;
     let mut out = Vec::with_capacity(initials.len());
     for &v in &initials {
         out.push(PviParams {
             initial_value: Some(v),
         });
     }
-    out
+    if out.is_empty() {
+        return Err(PviError::InvalidRange {
+            start: r.initial_value.0,
+            end: r.initial_value.1,
+            step: r.initial_value.2,
+        });
+    }
+    Ok(out)
 }
 
 #[inline(always)]
@@ -847,12 +905,9 @@ fn pvi_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<PviBatchOutput, PviError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(PviError::EmptyData);
-    }
+    let combos = expand_grid(sweep)?;
     if close.is_empty() || volume.is_empty() {
-        return Err(PviError::EmptyData);
+        return Err(PviError::EmptyInputData);
     }
     if close.len() != volume.len() {
         return Err(PviError::MismatchedLength);
@@ -863,8 +918,9 @@ fn pvi_batch_inner(
         .zip(volume.iter())
         .position(|(&c, &v)| !c.is_nan() && !v.is_nan())
         .ok_or(PviError::AllValuesNaN)?;
-    if (close.len() - first_valid_idx) < 2 {
-        return Err(PviError::NotEnoughValidData);
+    let valid = close.len() - first_valid_idx;
+    if valid < 2 {
+        return Err(PviError::NotEnoughValidData { needed: 2, valid });
     }
 
     let rows = combos.len();
@@ -919,12 +975,9 @@ fn pvi_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<PviParams>, PviError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(PviError::EmptyData);
-    }
+    let combos = expand_grid(sweep)?;
     if close.is_empty() || volume.is_empty() {
-        return Err(PviError::EmptyData);
+        return Err(PviError::EmptyInputData);
     }
     if close.len() != volume.len() {
         return Err(PviError::MismatchedLength);
@@ -935,14 +988,21 @@ fn pvi_batch_inner_into(
         .zip(volume.iter())
         .position(|(&c, &v)| !c.is_nan() && !v.is_nan())
         .ok_or(PviError::AllValuesNaN)?;
-    if (close.len() - first_valid_idx) < 2 {
-        return Err(PviError::NotEnoughValidData);
+    let valid = close.len() - first_valid_idx;
+    if valid < 2 {
+        return Err(PviError::NotEnoughValidData { needed: 2, valid });
     }
 
     let rows = combos.len();
     let cols = close.len();
-    if out.len() != rows * cols {
-        return Err(PviError::MismatchedLength);
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PviError::InvalidInput("rows*cols overflow".into()))?;
+    if out.len() != expected {
+        return Err(PviError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
     // Work on MaybeUninit view to avoid UB
@@ -1864,7 +1924,7 @@ pub fn pvi_batch_py<'py>(
         initial_value: initial_value_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = close_slice.len();
 
@@ -2060,9 +2120,13 @@ pub fn pvi_batch_into(
             initial_value: (initial_value_start, initial_value_end, initial_value_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * len);
+        let total = rows
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("pvi_batch_into: rows*len overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         let kernel = detect_best_batch_kernel();
         let simd = match kernel {
@@ -2085,7 +2149,263 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaPvi;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::ffi as pyffi;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::ffi::{c_void, CString};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "PviDeviceArrayF32", unsendable)]
+pub struct PviDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl PviDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producing stream is synchronized before returning the handle.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        // Array API stream semantics: producer is already synchronized, so we only validate.
+        if let Some(s) = stream {
+            if s == 0 {
+                return Err(PyValueError::new_err(
+                    "__dlpack__ stream=0 is invalid for CUDA",
+                ));
+            }
+        }
+        if let Some((dev_ty, dev_id)) = dl_device {
+            if dev_ty != 2 || dev_id != slf.device_id as i32 {
+                return Err(PyValueError::new_err(
+                    "dl_device mismatch; cross-device copy not supported for PviDeviceArrayF32",
+                ));
+            }
+        }
+        if let Some(true) = copy {
+            return Err(PyValueError::new_err(
+                "copy=True not supported for PviDeviceArrayF32",
+            ));
+        }
+
+        // DLPack v0.6 and v1.x (versioned) producer
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            py_self: *mut pyffi::PyObject,
+        }
+
+        unsafe extern "C" fn capsule_destructor(cap: *mut pyffi::PyObject) {
+            if cap.is_null() {
+                return;
+            }
+            let name_c = unsafe { pyffi::PyCapsule_GetName(cap) };
+            if name_c.is_null() {
+                return;
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr(name_c) }.to_string_lossy();
+            let valid = name == "dltensor" || name == "dltensor_versioned";
+            let ptr = unsafe { pyffi::PyCapsule_GetPointer(cap, name_c as *const _) };
+            if ptr.is_null() || !valid {
+                return;
+            }
+            unsafe {
+                if name == "dltensor_versioned" {
+                    let v = ptr as *mut DLManagedTensorVersioned;
+                    if !v.is_null() {
+                        let mt = (*v).manager;
+                        if !mt.is_null() {
+                            if let Some(del) = (*mt).deleter {
+                                del(mt);
+                            }
+                        }
+                        let _ = Box::from_raw(v);
+                    }
+                } else {
+                    let mt = ptr as *mut DLManagedTensor;
+                    if !mt.is_null() {
+                        if let Some(del) = (*mt).deleter {
+                            del(mt);
+                        }
+                    }
+                }
+            }
+        }
+
+        unsafe extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            unsafe {
+                let ctx = (*p).manager_ctx as *mut ManagerCtx;
+                if !ctx.is_null() {
+                    let pyobj = (*ctx).py_self;
+                    let _ = Box::from_raw(ctx);
+                    if !pyobj.is_null() {
+                        pyffi::Py_DECREF(pyobj);
+                    }
+                }
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+
+        // Allocate shape/strides (elements) and INCREF self so the VRAM buffer outlives the capsule
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr = shape_box.as_mut_ptr();
+        let strides_ptr = strides_box.as_mut_ptr();
+        let py_self = slf.as_ptr();
+        unsafe { pyffi::Py_INCREF(py_self); }
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape_box: shape_box,
+            _strides_box: strides_box,
+            py_self,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let total_elems = (rows as i128).saturating_mul(cols as i128);
+        let data_ptr = if total_elems == 0 {
+            std::ptr::null_mut()
+        } else {
+            slf.inner.device_ptr() as usize as *mut c_void
+        };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice {
+                    device_type: 2,
+                    device_id: slf.device_id as i32,
+                },
+                ndim: 2,
+                dtype: DLDataType {
+                    code: 2,
+                    bits: 32,
+                    lanes: 1,
+                },
+                shape: shape_ptr,
+                strides: strides_ptr,
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(managed_deleter),
+        });
+
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create versioned DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl PviDeviceArrayF32Py {
+    pub fn new_from_rust(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self {
+            inner,
+            _ctx: ctx_guard,
+            device_id,
+        }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "pvi_cuda_batch_dev")]
@@ -2096,7 +2416,7 @@ pub fn pvi_cuda_batch_dev_py(
     volume: PyReadonlyArray1<'_, f32>,
     initial_values: PyReadonlyArray1<'_, f32>,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<PviDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2109,12 +2429,18 @@ pub fn pvi_cuda_batch_dev_py(
     if inits_slice.is_empty() {
         return Err(PyValueError::new_err("initial_values must be non-empty"));
     }
-    let inner = py.allow_threads(|| {
-        let cuda = CudaPvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.pvi_batch_dev(close_slice, volume_slice, inits_slice)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
-    Ok(DeviceArrayF32Py { inner })
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| {
+            let cuda =
+                CudaPvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let dev_id = cuda.device_id();
+            let arr = cuda
+                .pvi_batch_dev(close_slice, volume_slice, inits_slice)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
+        })?;
+    Ok(PviDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2128,22 +2454,28 @@ pub fn pvi_cuda_many_series_one_param_dev_py(
     rows: usize,
     initial_value: f32,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<PviDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let close_slice = close_tm.as_slice()?;
     let volume_slice = volume_tm.as_slice()?;
-    let inner = py.allow_threads(|| {
-        let cuda = CudaPvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.pvi_many_series_one_param_time_major_dev(
-            close_slice,
-            volume_slice,
-            cols,
-            rows,
-            initial_value,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
-    Ok(DeviceArrayF32Py { inner })
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| {
+            let cuda =
+                CudaPvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let dev_id = cuda.device_id();
+            let arr = cuda
+                .pvi_many_series_one_param_time_major_dev(
+                    close_slice,
+                    volume_slice,
+                    cols,
+                    rows,
+                    initial_value,
+                )
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
+        })?;
+    Ok(PviDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }

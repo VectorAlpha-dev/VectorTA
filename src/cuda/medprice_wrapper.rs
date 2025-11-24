@@ -15,26 +15,30 @@ use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use std::ffi::c_void;
-use std::fmt;
 use cust::sys as cu; // raw driver API for SM count and low-level opts
+use std::ffi::c_void;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaMedpriceError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf}, current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaMedpriceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaMedpriceError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaMedpriceError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for CudaMedpriceError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -51,7 +55,8 @@ pub enum ManySeriesKernelPolicy {
 pub struct CudaMedprice {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     batch_policy: BatchKernelPolicy,
     many_policy: ManySeriesKernelPolicy,
     sm_count: u32,
@@ -59,10 +64,9 @@ pub struct CudaMedprice {
 
 impl CudaMedprice {
     pub fn new(device_id: usize) -> Result<Self, CudaMedpriceError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/medprice_kernel.ptx"));
         let jit_opts = &[
@@ -70,27 +74,48 @@ impl CudaMedprice {
             // Keep the JIT at maximum optimization for these tiny kernels.
             ModuleJitOption::OptLevel(OptLevel::O4),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                Ok(m) => m,
-                Err(e) => return Err(CudaMedpriceError::Cuda(e.to_string())),
-            },
-        };
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         let sm_count = sm_count_from_current_ctx()?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             batch_policy: BatchKernelPolicy::Auto,
             many_policy: ManySeriesKernelPolicy::Auto,
             sm_count,
         })
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaMedpriceError> {
+        if let Ok((free, _total)) = mem_get_info() {
+            let total = required_bytes.saturating_add(headroom_bytes);
+            if total > free {
+                return Err(CudaMedpriceError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
+        }
+        Ok(())
     }
 
     pub fn medprice_dev(
@@ -107,14 +132,26 @@ impl CudaMedprice {
             .find(|&i| !high[i].is_nan() && !low[i].is_nan())
             .ok_or_else(|| CudaMedpriceError::InvalidInput("all values are NaN".into()))?;
 
-        let d_high = DeviceBuffer::from_slice(&high[..len])
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(&low[..len])
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        // VRAM check: 2 inputs + 1 output + headroom
+        let elem = std::mem::size_of::<f32>();
+        let in_bytes = len
+            .checked_mul(2)
+            .and_then(|n| n.checked_mul(elem))
+            .ok_or_else(|| CudaMedpriceError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes = len
+            .checked_mul(elem)
+            .ok_or_else(|| CudaMedpriceError::InvalidInput("byte size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaMedpriceError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let d_high = DeviceBuffer::from_slice(&high[..len])?;
+        let d_low = DeviceBuffer::from_slice(&low[..len])?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
         self.medprice_device(&d_high, &d_low, len, first_valid, &mut d_out)?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -140,7 +177,7 @@ impl CudaMedprice {
         let func = self
             .module
             .get_function("medprice_kernel_f32")
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMedpriceError::MissingKernelSymbol { name: "medprice_kernel_f32" })?;
 
         // SM-aware grid sizing for grid-stride loop
         let block_x: u32 = 256;
@@ -161,9 +198,7 @@ impl CudaMedprice {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -176,39 +211,37 @@ impl CudaMedprice {
         low: &[f32],
     ) -> Result<DeviceArrayF32, CudaMedpriceError> {
         let len = high.len().min(low.len());
-        if len == 0 { return Err(CudaMedpriceError::InvalidInput("empty input".into())); }
-        let _first = (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan())
+        if len == 0 {
+            return Err(CudaMedpriceError::InvalidInput("empty input".into()));
+        }
+        let _first = (0..len)
+            .find(|&i| !high[i].is_nan() && !low[i].is_nan())
             .ok_or_else(|| CudaMedpriceError::InvalidInput("all values are NaN".into()))?;
 
-        // VRAM check (2 inputs + 1 output + 1 i32 first_valid + 64MB headroom)
-        if let Ok((free, _)) = mem_get_info() {
-            let need: usize = 2 * len * std::mem::size_of::<f32>()
-                + len * std::mem::size_of::<f32>()
-                + std::mem::size_of::<i32>()
-                + 64 * 1024 * 1024;
-            if need > free {
-                return Err(CudaMedpriceError::InvalidInput(
-                    "insufficient device memory".into(),
-                ));
-            }
-            if need > free {
-                return Err(CudaMedpriceError::InvalidInput(
-                    "insufficient device memory".into(),
-                ));
-            }
-        }
+        // VRAM check (2 inputs + 1 output + small metadata + headroom)
+        let elem = std::mem::size_of::<f32>();
+        let in_bytes = len
+            .checked_mul(2)
+            .and_then(|n| n.checked_mul(elem))
+            .ok_or_else(|| CudaMedpriceError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes = len
+            .checked_mul(elem)
+            .ok_or_else(|| CudaMedpriceError::InvalidInput("byte size overflow".into()))?;
+        let meta_bytes = std::mem::size_of::<i32>();
+        let required = in_bytes
+            .checked_add(out_bytes)
+            .and_then(|b| b.checked_add(meta_bytes))
+            .ok_or_else(|| CudaMedpriceError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        let d_high = DeviceBuffer::from_slice(&high[..len])
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(&low[..len])
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(&high[..len])?;
+        let d_low = DeviceBuffer::from_slice(&low[..len])?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
         let func = self
             .module
             .get_function("medprice_batch_f32")
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMedpriceError::MissingKernelSymbol { name: "medprice_batch_f32" })?;
         // rows=1; grid.y <= 65_535 satisfied
         let block_x = match self.batch_policy { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain{block_x} => block_x.max(32) };
         let (grid, block) = grid_1d_for(len, block_x, self.sm_count);
@@ -231,10 +264,10 @@ impl CudaMedprice {
                 &mut fv as *mut _ as *mut c_void,
                 &mut out_p as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
+
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 { buf: d_out, rows: 1, cols: len })
     }
@@ -252,7 +285,9 @@ impl CudaMedprice {
                 "cols/rows must be > 0".into(),
             ));
         }
-        let n = cols * rows;
+        let n = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMedpriceError::InvalidInput("rows*cols overflow".into()))?;
         if high_tm.len() < n || low_tm.len() < n {
             return Err(CudaMedpriceError::InvalidInput(
                 "input size mismatch".into(),
@@ -260,21 +295,21 @@ impl CudaMedprice {
         }
 
         // VRAM check: 2*n inputs + n out + 64MB headroom (no first_valids allocation)
-        if let Ok((free, _)) = mem_get_info() {
-            let need: usize = 3 * n * std::mem::size_of::<f32>()
-                + 64 * 1024 * 1024;
-            if need > free {
-                return Err(CudaMedpriceError::InvalidInput(
-                    "insufficient device memory".into(),
-                ));
-            }
-        }
+        let elem = std::mem::size_of::<f32>();
+        let bytes_inputs_outputs = 3usize
+            .checked_mul(n)
+            .and_then(|m| m.checked_mul(elem))
+            .ok_or_else(|| CudaMedpriceError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(bytes_inputs_outputs, 64 * 1024 * 1024)?;
 
-        let d_high = DeviceBuffer::from_slice(&high_tm[..n]).map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(&low_tm[..n]).map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(&high_tm[..n])?;
+        let d_low = DeviceBuffer::from_slice(&low_tm[..n])?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
 
-        let func = self.module.get_function("medprice_many_series_one_param_f32").map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let func = self
+            .module
+            .get_function("medprice_many_series_one_param_f32")
+            .map_err(|_| CudaMedpriceError::MissingKernelSymbol { name: "medprice_many_series_one_param_f32" })?;
         let block_x = match self.many_policy { ManySeriesKernelPolicy::Auto => 256, ManySeriesKernelPolicy::OneD{block_x} => block_x.max(32) };
         let (grid, block) = grid_1d_for(cols, block_x, self.sm_count);
 
@@ -294,10 +329,10 @@ impl CudaMedprice {
                 &mut fv as *mut _ as *mut c_void,
                 &mut out_p as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
+
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
@@ -376,7 +411,7 @@ fn sm_count_from_current_ctx() -> Result<u32, CudaMedpriceError> {
         let mut dev: cu::CUdevice = 0;
         let r1 = cu::cuCtxGetDevice(&mut dev as *mut _);
         if r1 != cu::CUresult::CUDA_SUCCESS {
-            return Err(CudaMedpriceError::Cuda(format!(
+            return Err(CudaMedpriceError::InvalidInput(format!(
                 "cuCtxGetDevice failed: {:?}", r1
             )));
         }
@@ -387,7 +422,7 @@ fn sm_count_from_current_ctx() -> Result<u32, CudaMedpriceError> {
             dev,
         );
         if r2 != cu::CUresult::CUDA_SUCCESS {
-            return Err(CudaMedpriceError::Cuda(format!(
+            return Err(CudaMedpriceError::InvalidInput(format!(
                 "cuDeviceGetAttribute(MP_COUNT) failed: {:?}", r2
             )));
         }

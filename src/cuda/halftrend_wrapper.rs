@@ -29,6 +29,8 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -73,25 +75,31 @@ pub struct CudaHalftrendMany {
     pub sell: DeviceArrayF32,
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaHalftrendError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaHalftrendError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaHalftrendError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaHalftrendError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaHalftrendError {}
 
 pub struct CudaHalftrend {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     batch_policy: BatchKernelPolicy,
     many_policy: ManySeriesKernelPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -102,10 +110,9 @@ pub struct CudaHalftrend {
 
 impl CudaHalftrend {
     pub fn new(device_id: usize) -> Result<Self, CudaHalftrendError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/halftrend_kernel.ptx"));
         let jit_opts = &[
@@ -115,22 +122,20 @@ impl CudaHalftrend {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             batch_policy: BatchKernelPolicy::Auto,
             many_policy: ManySeriesKernelPolicy::Auto,
             last_batch: None,
@@ -139,6 +144,9 @@ impl CudaHalftrend {
             debug_many_logged: false,
         })
     }
+
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) { self.batch_policy = p; }
     pub fn set_many_series_policy(&mut self, p: ManySeriesKernelPolicy) { self.many_policy = p; }
@@ -150,6 +158,15 @@ impl CudaHalftrend {
         match mem_get_info() {
             Ok((free, _)) => required_bytes.saturating_add(headroom) <= free,
             Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if let Ok((free, _)) = mem_get_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
         }
     }
 
@@ -166,62 +183,60 @@ impl CudaHalftrend {
 
     // ---------------------- Batch (one-series × many-params) ----------------------
 
-    fn expand_grid(range: &HalfTrendBatchRange) -> Vec<HalfTrendParams> {
-        fn axis_usize(t: (usize, usize, usize)) -> Vec<usize> {
-            if t.2 == 0 || t.0 == t.1 {
-                return vec![t.0];
-            }
-            if t.2 == 0 || t.0 == t.1 {
-                return vec![t.0];
-            }
-            (t.0..=t.1).step_by(t.2).collect()
-        }
-        fn axis_f64(t: (f64, f64, f64)) -> Vec<f64> {
-            if t.2 == 0.0 || (t.0 - t.1).abs() < 1e-12 {
-                return vec![t.0];
-            }
-            if t.2 == 0.0 || (t.0 - t.1).abs() < 1e-12 {
-                return vec![t.0];
-            }
+    fn expand_grid(range: &HalfTrendBatchRange) -> Result<Vec<HalfTrendParams>, CudaHalftrendError> {
+        fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaHalftrendError> {
+            if step == 0 || start == end { return Ok(vec![start]); }
+            if start < end { return Ok((start..=end).step_by(step.max(1)).collect()); }
             let mut v = Vec::new();
-            let mut x = t.0;
-            while x <= t.1 + 1e-12 {
-                v.push(x);
-                x += t.2;
-            }
-            while x <= t.1 + 1e-12 {
-                v.push(x);
-                x += t.2;
-            }
-            v
+            let mut x = start as isize;
+            let end_i = end as isize;
+            let st = (step as isize).max(1);
+            while x >= end_i { v.push(x as usize); x -= st; }
+            if v.is_empty() { return Err(CudaHalftrendError::InvalidInput("empty usize axis".into())); }
+            Ok(v)
         }
-        let amps = axis_usize(range.amplitude);
-        let cds = axis_f64(range.channel_deviation);
-        let atrs = axis_usize(range.atr_period);
-        let mut out = Vec::with_capacity(amps.len() * cds.len() * atrs.len());
-        for &a in &amps {
-            for &c in &cds {
-                for &p in &atrs {
-                    out.push(HalfTrendParams {
-                        amplitude: Some(a),
-                        channel_deviation: Some(c),
-                        atr_period: Some(p),
-                    });
-                }
+        fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaHalftrendError> {
+            if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return Ok(vec![start]); }
+            if start < end {
+                let mut v = Vec::new(); let mut x = start; let st = step.abs();
+                while x <= end + 1e-12 { v.push(x); x += st; }
+                if v.is_empty() { return Err(CudaHalftrendError::InvalidInput("empty f64 axis".into())); }
+                return Ok(v);
             }
+            let mut v = Vec::new(); let mut x = start; let st = step.abs();
+            while x + 1e-12 >= end { v.push(x); x -= st; }
+            if v.is_empty() { return Err(CudaHalftrendError::InvalidInput("empty f64 axis".into())); }
+            Ok(v)
         }
-        for &a in &amps {
-            for &c in &cds {
-                for &p in &atrs {
-                    out.push(HalfTrendParams {
-                        amplitude: Some(a),
-                        channel_deviation: Some(c),
-                        atr_period: Some(p),
-                    });
-                }
-            }
+        let amps = axis_usize(range.amplitude)?;
+        let cds = axis_f64(range.channel_deviation)?;
+        let atrs = axis_usize(range.atr_period)?;
+        let cap = amps.len().checked_mul(cds.len()).and_then(|x| x.checked_mul(atrs.len()))
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("combination overflow".into()))?;
+        let mut out = Vec::with_capacity(cap);
+        for &a in &amps { for &c in &cds { for &p in &atrs {
+            out.push(HalfTrendParams { amplitude: Some(a), channel_deviation: Some(c), atr_period: Some(p) });
+        } } }
+        Ok(out)
+    }
+
+    #[inline]
+    fn validate_launch(&self, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32) -> Result<(), CudaHalftrendError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX).unwrap_or(1024) as u32;
+        let max_by = dev.get_attribute(cust::device::DeviceAttribute::MaxBlockDimY).unwrap_or(1024) as u32;
+        let max_bz = dev.get_attribute(cust::device::DeviceAttribute::MaxBlockDimZ).unwrap_or(64) as u32;
+        let max_gx = dev.get_attribute(cust::device::DeviceAttribute::MaxGridDimX).unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev.get_attribute(cust::device::DeviceAttribute::MaxGridDimY).unwrap_or(65_535) as u32;
+        let max_gz = dev.get_attribute(cust::device::DeviceAttribute::MaxGridDimZ).unwrap_or(65_535) as u32;
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads || bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
+            return Err(CudaHalftrendError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
         }
-        out
+        Ok(())
     }
 
     fn rolling_max(src: &[f64], period: usize) -> Vec<f64> {
@@ -363,16 +378,26 @@ impl CudaHalftrend {
         let first = Self::first_valid_ohlc_f32(high, low, close)
             .ok_or_else(|| CudaHalftrendError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = Self::expand_grid(sweep);
+        let combos = Self::expand_grid(sweep)?;
         if combos.is_empty() {
-            return Err(CudaHalftrendError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-            return Err(CudaHalftrendError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
+            return Err(CudaHalftrendError::InvalidInput("no parameter combinations".into()));
         }
         let rows = combos.len();
+        // Rough VRAM requirement: inputs 3N + helpers 5*rows*N + warms + params + 6*rows*N
+        let req_bytes = (3usize
+            .checked_mul(n)
+            .and_then(|x| x.checked_add(5usize.checked_mul(rows).and_then(|y| y.checked_mul(n))?))
+            .and_then(|x| x.checked_add(rows))
+            .and_then(|x| x.checked_add(6usize.checked_mul(rows).and_then(|y| y.checked_mul(n))?))
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?)
+            .checked_mul(std::mem::size_of::<f32>())
+            .and_then(|x| x.checked_add(64 * 1024 * 1024))
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
+        if let Ok((free, _)) = mem_get_info() {
+            if !Self::will_fit(req_bytes, 0) {
+                return Err(CudaHalftrendError::OutOfMemory { required: req_bytes, free, headroom: 0 });
+            }
+        }
 
         // Shared precompute on host by unique periods/amplitudes
         use std::collections::{BTreeSet, HashMap};
@@ -448,29 +473,38 @@ impl CudaHalftrend {
 
         // Prepare device inputs and helper buffers
         let d_high = unsafe { DeviceBuffer::from_slice_async(&high[..n], &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            .map_err(CudaHalftrendError::from)?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low[..n], &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            .map_err(CudaHalftrendError::from)?;
         let d_close = unsafe { DeviceBuffer::from_slice_async(&close[..n], &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            .map_err(CudaHalftrendError::from)?;
         let d_warms = DeviceBuffer::from_slice(&warms)
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            .map_err(CudaHalftrendError::from)?;
         let d_chdevs = DeviceBuffer::from_slice(&chdevs)
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            .map_err(CudaHalftrendError::from)?;
 
         // Outputs (we keep external row-major metadata: rows x n)
-        let mut d_ht: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows*n, &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows*n, &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_ah: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows*n, &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_al: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows*n, &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_bs: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows*n, &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_ss: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows*n, &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let elems = rows
+            .checked_mul(n)
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
+        let mut d_ht: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_tr: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_ah: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_al: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_bs: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_ss: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
 
         if !use_time_major {
             // Legacy ROW-MAJOR [rows, n] helper matrices
@@ -499,21 +533,21 @@ impl CudaHalftrend {
 
             // Upload legacy helpers
             let d_atr = unsafe { DeviceBuffer::from_slice_async(&atr_rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                .map_err(CudaHalftrendError::from)?;
             let d_hma = unsafe { DeviceBuffer::from_slice_async(&hma_rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                .map_err(CudaHalftrendError::from)?;
             let d_lma = unsafe { DeviceBuffer::from_slice_async(&lma_rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                .map_err(CudaHalftrendError::from)?;
             let d_rhi = unsafe { DeviceBuffer::from_slice_async(&rhi_rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                .map_err(CudaHalftrendError::from)?;
             let d_rlo = unsafe { DeviceBuffer::from_slice_async(&rlo_rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                .map_err(CudaHalftrendError::from)?;
 
             // Launch row-major kernel (keeps existing ABI)
             let func = self
                 .module
                 .get_function("halftrend_batch_f32")
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaHalftrendError::MissingKernelSymbol { name: "halftrend_batch_f32" })?;
             let block_x = match self.batch_policy { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain { block_x } => block_x.max(32) };
             if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
                 eprintln!("[halftrend] batch kernel (row-major): block_x={} rows={} len={} first_valid={}",
@@ -523,7 +557,9 @@ impl CudaHalftrend {
             unsafe { (*(self as *const _ as *mut CudaHalftrend)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
 
             unsafe {
-                let grid: GridSize = (((rows as u32) + block_x - 1) / block_x).max(1).into();
+                let grid_x = (((rows as u32) + block_x - 1) / block_x).max(1);
+                self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
+                let grid: GridSize = (grid_x, 1, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
                 let mut h = d_high.as_device_ptr().as_raw();
                 let mut l = d_low.as_device_ptr().as_raw();
@@ -564,21 +600,30 @@ impl CudaHalftrend {
                     &mut oss as *mut _ as *mut c_void,
                 ];
                 self.stream.launch(&func, grid, block, 0, &mut args)
-                    .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                    .map_err(CudaHalftrendError::from)?;
             }
         } else {
             // TIME-MAJOR [n, rows] helper matrices in pinned memory
-            let len_tm = rows * n;
-            let mut atr_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-            let mut hma_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-            let mut lma_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-            let mut rhi_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-            let mut rlo_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let len_tm = rows
+                .checked_mul(n)
+                .ok_or_else(|| {
+                    CudaHalftrendError::InvalidInput("size overflow".into())
+                })?;
+            let mut atr_tm =
+                unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut hma_tm =
+                unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut lma_tm =
+                unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut rhi_tm =
+                unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut rlo_tm =
+                unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                    .map_err(CudaHalftrendError::from)?;
 
             for (row, prm) in combos.iter().enumerate() {
                 let a = prm.amplitude.unwrap();
@@ -599,30 +644,45 @@ impl CudaHalftrend {
             }
 
             // Device helpers (uninitialized + async copy from pinned host)
-            let mut d_atr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-            let mut d_hma: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-            let mut d_lma: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-            let mut d_rhi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-            let mut d_rlo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let mut d_atr: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut d_hma: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut d_lma: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut d_rhi: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut d_rlo: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                    .map_err(CudaHalftrendError::from)?;
 
             unsafe {
-                d_atr.async_copy_from(&atr_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-                d_hma.async_copy_from(&hma_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-                d_lma.async_copy_from(&lma_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-                d_rhi.async_copy_from(&rhi_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-                d_rlo.async_copy_from(&rlo_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                d_atr
+                    .async_copy_from(&atr_tm, &self.stream)
+                    .map_err(CudaHalftrendError::from)?;
+                d_hma
+                    .async_copy_from(&hma_tm, &self.stream)
+                    .map_err(CudaHalftrendError::from)?;
+                d_lma
+                    .async_copy_from(&lma_tm, &self.stream)
+                    .map_err(CudaHalftrendError::from)?;
+                d_rhi
+                    .async_copy_from(&rhi_tm, &self.stream)
+                    .map_err(CudaHalftrendError::from)?;
+                d_rlo
+                    .async_copy_from(&rlo_tm, &self.stream)
+                    .map_err(CudaHalftrendError::from)?;
             }
 
             // Launch TIME-MAJOR kernel
             let func = self
                 .module
                 .get_function("halftrend_batch_time_major_f32")
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaHalftrendError::MissingKernelSymbol { name: "halftrend_batch_time_major_f32" })?;
             let block_x = 256u32;
             if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
                 eprintln!("[halftrend] batch kernel (time-major): block_x={} rows={} len={} first_valid={}",
@@ -633,7 +693,9 @@ impl CudaHalftrend {
 
             // Note: kernel outputs time-major [n, rows] into the same d_* buffers.
             unsafe {
-                let grid: GridSize = (((rows as u32) + block_x - 1) / block_x).max(1).into();
+                let grid_x = (((rows as u32) + block_x - 1) / block_x).max(1);
+                self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
+                let grid: GridSize = (grid_x, 1, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
                 let mut h = d_high.as_device_ptr().as_raw();
                 let mut l = d_low.as_device_ptr().as_raw();
@@ -674,13 +736,13 @@ impl CudaHalftrend {
                     &mut oss as *mut _ as *mut c_void,
                 ];
                 self.stream.launch(&func, grid, block, 0, &mut args)
-                    .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                    .map_err(CudaHalftrendError::from)?;
             }
         }
 
         self.stream
             .synchronize()
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            .map_err(CudaHalftrendError::from)?;
 
         Ok(CudaHalftrendBatch {
             // Keep external shape as [rows, n] to preserve API/tests
@@ -745,12 +807,24 @@ impl CudaHalftrend {
 
         // Host precompute per series (ATR + SMA + rolling extrema) and flatten back to TM
         // Use page-locked buffers to enable true async H->D copies.
-        let len_tm = cols * rows;
-        let mut atr_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut hma_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut lma_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut rhi_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut rlo_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let len_tm = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
+        let mut atr_tm =
+            unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut hma_tm =
+            unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut lma_tm =
+            unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut rhi_tm =
+            unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut rlo_tm =
+            unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                .map_err(CudaHalftrendError::from)?;
         for s in 0..cols {
             let mut h = vec![f64::NAN; rows];
             let mut l = vec![f64::NAN; rows];
@@ -809,82 +883,87 @@ impl CudaHalftrend {
 
         // VRAM estimate: inputs + 5 tm helpers + warms + 6 outputs
         let req = (3 * cols * rows + 5 * cols * rows + cols + 6 * cols * rows)
-            * std::mem::size_of::<f32>()
-            + 64 * 1024 * 1024;
-        if !Self::mem_ok(req, 0) {
-            return Err(CudaHalftrendError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
-        }
-        let req = (3 * cols * rows + 5 * cols * rows + cols + 6 * cols * rows)
-            * std::mem::size_of::<f32>()
-            + 64 * 1024 * 1024;
-        if !Self::mem_ok(req, 0) {
-            return Err(CudaHalftrendError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
+            .checked_mul(std::mem::size_of::<f32>())
+            .and_then(|x| x.checked_add(64 * 1024 * 1024))
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
+        if let Ok((free, _)) = mem_get_info() {
+            if !Self::will_fit(req, 0) {
+                return Err(CudaHalftrendError::OutOfMemory { required: req, free, headroom: 0 });
+            }
         }
 
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let d_low  = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let d_close= unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_atr: DeviceBuffer<f32>  = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_hma: DeviceBuffer<f32>  = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_lma: DeviceBuffer<f32>  = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_rhi: DeviceBuffer<f32>  = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_rlo: DeviceBuffer<f32>  = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let d_high =
+            unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let d_low =
+            unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let d_close =
+            unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_atr: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_hma: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_lma: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_rhi: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_rlo: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
 
         unsafe {
-            d_atr.async_copy_from(&atr_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-            d_hma.async_copy_from(&hma_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-            d_lma.async_copy_from(&lma_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-            d_rhi.async_copy_from(&rhi_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-            d_rlo.async_copy_from(&rlo_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            d_atr
+                .async_copy_from(&atr_tm, &self.stream)
+                .map_err(CudaHalftrendError::from)?;
+            d_hma
+                .async_copy_from(&hma_tm, &self.stream)
+                .map_err(CudaHalftrendError::from)?;
+            d_lma
+                .async_copy_from(&lma_tm, &self.stream)
+                .map_err(CudaHalftrendError::from)?;
+            d_rhi
+                .async_copy_from(&rhi_tm, &self.stream)
+                .map_err(CudaHalftrendError::from)?;
+            d_rlo
+                .async_copy_from(&rlo_tm, &self.stream)
+                .map_err(CudaHalftrendError::from)?;
         }
-        let d_warms= DeviceBuffer::from_slice(&warms).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let d_warms =
+            DeviceBuffer::from_slice(&warms).map_err(CudaHalftrendError::from)?;
 
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
         let mut d_ht: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
         let mut d_tr: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
         let mut d_ah: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
         let mut d_al: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
         let mut d_bs: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
         let mut d_ss: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_ht: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_tr: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_ah: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_al: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_bs: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let mut d_ss: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
 
         // Launch
         let func = self
             .module
             .get_function("halftrend_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaHalftrendError::MissingKernelSymbol { name: "halftrend_many_series_one_param_time_major_f32" })?;
         let block_x = match self.many_policy {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
@@ -914,7 +993,9 @@ impl CudaHalftrend {
             }
         }
         unsafe {
-            let grid: GridSize = (((cols as u32) + block_x - 1) / block_x).max(1).into();
+            let grid_x = (((cols as u32) + block_x - 1) / block_x).max(1);
+            self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
+            let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             let mut h = d_high.as_device_ptr().as_raw();
             let mut l = d_low.as_device_ptr().as_raw();
@@ -926,8 +1007,6 @@ impl CudaHalftrend {
             let mut rl = d_rlo.as_device_ptr().as_raw();
             let mut w = d_warms.as_device_ptr().as_raw();
             let mut ch = channel_deviation as f32;
-            let mut cols_i = cols as i32;
-            let mut rows_i = rows as i32;
             let mut cols_i = cols as i32;
             let mut rows_i = rows as i32;
             let mut oht = d_ht.as_device_ptr().as_raw();
@@ -958,12 +1037,12 @@ impl CudaHalftrend {
             ];
             self.stream
                 .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                .map_err(CudaHalftrendError::from)?;
         }
 
         self.stream
             .synchronize()
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            .map_err(CudaHalftrendError::from)?;
         Ok(CudaHalftrendMany {
             halftrend: DeviceArrayF32 {
                 buf: d_ht,
@@ -1015,7 +1094,9 @@ impl CudaHalftrend {
         let dev = self.halftrend_batch_dev(high, low, close, sweep)?;
         let rows = dev.halftrend.rows;
         let cols = dev.halftrend.cols;
-        let need = rows * cols;
+        let need = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
         if [
             out_ht.len(),
             out_tr.len(),
@@ -1033,12 +1114,12 @@ impl CudaHalftrend {
         }
 
         // Copy from device
-        dev.halftrend.buf.copy_to(out_ht).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        dev.trend.buf.copy_to(out_tr).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        dev.atr_high.buf.copy_to(out_ah).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        dev.atr_low.buf.copy_to(out_al).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        dev.buy.buf.copy_to(out_bs).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        dev.sell.buf.copy_to(out_ss).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        dev.halftrend.buf.copy_to(out_ht).map_err(CudaHalftrendError::from)?;
+        dev.trend.buf.copy_to(out_tr).map_err(CudaHalftrendError::from)?;
+        dev.atr_high.buf.copy_to(out_ah).map_err(CudaHalftrendError::from)?;
+        dev.atr_low.buf.copy_to(out_al).map_err(CudaHalftrendError::from)?;
+        dev.buy.buf.copy_to(out_bs).map_err(CudaHalftrendError::from)?;
+        dev.sell.buf.copy_to(out_ss).map_err(CudaHalftrendError::from)?;
 
         // If the last batch used the time-major kernel, transpose back to row-major for host slices
         let used_time_major = matches!(self.last_batch, Some(BatchKernelSelected::TimeMajor { .. }));
