@@ -27,6 +27,7 @@
 //! - **Streaming**: O(1) per update via small EMA rings; exact and matches batch warmups.
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all four outputs (lines 280-283)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
+//! - **Decision log**: SIMD enabled (AVX2/AVX512); CUDA kernels present for batch + many-series; GPU path used when available but scalar remains the reference for correctness.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -257,10 +258,18 @@ pub enum GatorOscError {
     EmptyInputData,
     #[error("gatorosc: All values are NaN.")]
     AllValuesNaN,
-    #[error("gatorosc: Invalid settings (zero or invalid parameter).")]
-    InvalidSettings,
+    #[error("gatorosc: Invalid period: period={period} data_len={data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
     #[error("gatorosc: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("gatorosc: output length mismatch: expected={expected} got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("gatorosc: invalid range: start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("gatorosc: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
+    #[error("gatorosc: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline(always)]
@@ -929,8 +938,14 @@ fn gatorosc_prepare<'a>(
     let lips_length = input.get_lips_length();
     let lips_shift = input.get_lips_shift();
 
-    if jaws_length == 0 || teeth_length == 0 || lips_length == 0 {
-        return Err(GatorOscError::InvalidSettings);
+    if jaws_length == 0 {
+        return Err(GatorOscError::InvalidPeriod { period: jaws_length, data_len: data.len() });
+    }
+    if teeth_length == 0 {
+        return Err(GatorOscError::InvalidPeriod { period: teeth_length, data_len: data.len() });
+    }
+    if lips_length == 0 {
+        return Err(GatorOscError::InvalidPeriod { period: lips_length, data_len: data.len() });
     }
 
     let needed = jaws_length.max(teeth_length).max(lips_length)
@@ -1070,12 +1085,18 @@ pub fn gatorosc_into_slice(
         chosen,
     ) = gatorosc_prepare(input, kernel)?;
 
-    if upper_dst.len() != data.len()
-        || lower_dst.len() != data.len()
-        || upper_change_dst.len() != data.len()
-        || lower_change_dst.len() != data.len()
-    {
-        return Err(GatorOscError::InvalidSettings);
+    let expected = data.len();
+    if upper_dst.len() != expected {
+        return Err(GatorOscError::OutputLengthMismatch { expected, got: upper_dst.len() });
+    }
+    if lower_dst.len() != expected {
+        return Err(GatorOscError::OutputLengthMismatch { expected, got: lower_dst.len() });
+    }
+    if upper_change_dst.len() != expected {
+        return Err(GatorOscError::OutputLengthMismatch { expected, got: upper_change_dst.len() });
+    }
+    if lower_change_dst.len() != expected {
+        return Err(GatorOscError::OutputLengthMismatch { expected, got: lower_change_dst.len() });
     }
 
     gatorosc_compute_into(
@@ -1212,8 +1233,14 @@ impl GatorOscStream {
         let lips_length = params.lips_length.unwrap_or(5);
         let lips_shift = params.lips_shift.unwrap_or(3);
 
-        if jaws_length == 0 || teeth_length == 0 || lips_length == 0 {
-            return Err(GatorOscError::InvalidSettings);
+        if jaws_length == 0 {
+            return Err(GatorOscError::InvalidPeriod { period: jaws_length, data_len: 0 });
+        }
+        if teeth_length == 0 {
+            return Err(GatorOscError::InvalidPeriod { period: teeth_length, data_len: 0 });
+        }
+        if lips_length == 0 {
+            return Err(GatorOscError::InvalidPeriod { period: lips_length, data_len: 0 });
         }
 
         // EMA alphas
@@ -1438,14 +1465,11 @@ pub fn gatorosc_batch_with_kernel(
     sweep: &GatorOscBatchRange,
     k: Kernel,
 ) -> Result<GatorOscBatchOutput, GatorOscError> {
-    let combos = expand_grid_gatorosc(sweep);
-    if combos.is_empty() {
-        return Err(GatorOscError::InvalidSettings);
-    }
+    let combos = expand_grid_gatorosc(sweep)?;
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(GatorOscError::InvalidSettings),
+        _ => return Err(GatorOscError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1456,29 +1480,91 @@ pub fn gatorosc_batch_with_kernel(
     gatorosc_batch_inner(data, &combos, simd)
 }
 
-fn expand_grid_gatorosc(r: &GatorOscBatchRange) -> Vec<GatorOscParams> {
+fn expand_grid_gatorosc(r: &GatorOscBatchRange) -> Result<Vec<GatorOscParams>, GatorOscError> {
     fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect()
+            return vec![start];
         }
+        if start < end {
+            // ascending, inclusive upper bound
+            return (start..=end).step_by(step.max(1)).collect();
+        }
+        // descending bounds supported
+        let mut v = Vec::new();
+        let mut cur = start;
+        let s = step.max(1);
+        while cur >= end {
+            v.push(cur);
+            if cur < end + s {
+                break;
+            }
+            cur = cur.saturating_sub(s);
+            if cur == usize::MAX {
+                break;
+            }
+        }
+        v
     }
-    let jaws_lengths = axis(r.jaws_length);
-    let jaws_shifts = axis(r.jaws_shift);
-    let teeth_lengths = axis(r.teeth_length);
-    let teeth_shifts = axis(r.teeth_shift);
-    let lips_lengths = axis(r.lips_length);
-    let lips_shifts = axis(r.lips_shift);
 
-    let mut out = Vec::with_capacity(
-        jaws_lengths.len()
-            * jaws_shifts.len()
-            * teeth_lengths.len()
-            * teeth_shifts.len()
-            * lips_lengths.len()
-            * lips_shifts.len(),
-    );
+    let jaws_lengths = axis(r.jaws_length);
+    if jaws_lengths.is_empty() {
+        return Err(GatorOscError::InvalidRange {
+            start: r.jaws_length.0,
+            end: r.jaws_length.1,
+            step: r.jaws_length.2,
+        });
+    }
+    let jaws_shifts = axis(r.jaws_shift);
+    if jaws_shifts.is_empty() {
+        return Err(GatorOscError::InvalidRange {
+            start: r.jaws_shift.0,
+            end: r.jaws_shift.1,
+            step: r.jaws_shift.2,
+        });
+    }
+    let teeth_lengths = axis(r.teeth_length);
+    if teeth_lengths.is_empty() {
+        return Err(GatorOscError::InvalidRange {
+            start: r.teeth_length.0,
+            end: r.teeth_length.1,
+            step: r.teeth_length.2,
+        });
+    }
+    let teeth_shifts = axis(r.teeth_shift);
+    if teeth_shifts.is_empty() {
+        return Err(GatorOscError::InvalidRange {
+            start: r.teeth_shift.0,
+            end: r.teeth_shift.1,
+            step: r.teeth_shift.2,
+        });
+    }
+    let lips_lengths = axis(r.lips_length);
+    if lips_lengths.is_empty() {
+        return Err(GatorOscError::InvalidRange {
+            start: r.lips_length.0,
+            end: r.lips_length.1,
+            step: r.lips_length.2,
+        });
+    }
+    let lips_shifts = axis(r.lips_shift);
+    if lips_shifts.is_empty() {
+        return Err(GatorOscError::InvalidRange {
+            start: r.lips_shift.0,
+            end: r.lips_shift.1,
+            step: r.lips_shift.2,
+        });
+    }
+
+    let cap = jaws_lengths
+        .len()
+        .checked_mul(jaws_shifts.len())
+        .and_then(|v| v.checked_mul(teeth_lengths.len()))
+        .and_then(|v| v.checked_mul(teeth_shifts.len()))
+        .and_then(|v| v.checked_mul(lips_lengths.len()))
+        .and_then(|v| v.checked_mul(lips_shifts.len()))
+        .ok_or_else(|| GatorOscError::InvalidInput("batch sweep size overflow".into()))?;
+
+    let mut out = Vec::with_capacity(cap);
     for &jl in &jaws_lengths {
         for &js in &jaws_shifts {
             for &tl in &teeth_lengths {
@@ -1499,7 +1585,7 @@ fn expand_grid_gatorosc(r: &GatorOscBatchRange) -> Vec<GatorOscParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 fn gatorosc_batch_inner(
@@ -1728,10 +1814,7 @@ pub fn gatorosc_batch_inner_into(
     upper_change_out: &mut [f64],
     lower_change_out: &mut [f64],
 ) -> Result<Vec<GatorOscParams>, GatorOscError> {
-    let combos = expand_grid_gatorosc(sweep);
-    if combos.is_empty() {
-        return Err(GatorOscError::InvalidSettings);
-    }
+    let combos = expand_grid_gatorosc(sweep)?;
 
     // Check for empty data first
     if data.is_empty() {
@@ -1745,13 +1828,20 @@ pub fn gatorosc_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-
-    if upper_out.len() != rows * cols
-        || lower_out.len() != rows * cols
-        || upper_change_out.len() != rows * cols
-        || lower_change_out.len() != rows * cols
-    {
-        return Err(GatorOscError::InvalidSettings);
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| GatorOscError::InvalidInput("rows*cols overflow".into()))?;
+    if upper_out.len() != expected {
+        return Err(GatorOscError::OutputLengthMismatch { expected, got: upper_out.len() });
+    }
+    if lower_out.len() != expected {
+        return Err(GatorOscError::OutputLengthMismatch { expected, got: lower_out.len() });
+    }
+    if upper_change_out.len() != expected {
+        return Err(GatorOscError::OutputLengthMismatch { expected, got: upper_change_out.len() });
+    }
+    if lower_change_out.len() != expected {
+        return Err(GatorOscError::OutputLengthMismatch { expected, got: lower_change_out.len() });
     }
 
     // Initialize NaN prefixes for each row based on warmup periods
@@ -2020,7 +2110,8 @@ pub fn gatorosc_batch_slice(
     sweep: &GatorOscBatchRange,
     kern: Kernel,
 ) -> Result<GatorOscBatchOutput, GatorOscError> {
-    gatorosc_batch_inner(data, &expand_grid_gatorosc(sweep), kern)
+    let combos = expand_grid_gatorosc(sweep)?;
+    gatorosc_batch_inner(data, &combos, kern)
 }
 
 #[inline(always)]
@@ -2029,7 +2120,7 @@ pub fn gatorosc_batch_par_slice(
     sweep: &GatorOscBatchRange,
     kern: Kernel,
 ) -> Result<GatorOscBatchOutput, GatorOscError> {
-    let combos = expand_grid_gatorosc(sweep);
+    let combos = expand_grid_gatorosc(sweep)?;
 
     // Check for empty data first
     if data.is_empty() {
@@ -2448,14 +2539,20 @@ pub fn gatorosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsVal
         lips_shift: config.lips_shift_range,
     };
 
-    // Calculate total combinations
-    let combos = expand_grid_gatorosc(&sweep);
+    // Calculate total combinations (checked)
+    let combos = expand_grid_gatorosc(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let n_combos = combos.len();
     let len = data.len();
 
     // Single allocation for all outputs
-    let total_size = n_combos * len;
-    let mut values = vec![0.0; 4 * total_size];
+    let total_size = n_combos
+        .checked_mul(len)
+        .ok_or_else(|| JsValue::from_str("gatorosc_batch_js: rows*cols overflow"))?;
+    let slots = total_size
+        .checked_mul(4)
+        .ok_or_else(|| JsValue::from_str("gatorosc_batch_js: output size overflow"))?;
+    let mut values = vec![0.0; slots];
 
     // Split into mutable slices for each output
     let (upper_part, rest) = values.split_at_mut(total_size);
@@ -2535,10 +2632,13 @@ pub fn gatorosc_batch_into(
             lips_shift: (lips_shift_start, lips_shift_end, lips_shift_step),
         };
 
-        // Calculate number of combinations
-        let combos = expand_grid_gatorosc(&sweep);
+        // Calculate number of combinations (checked)
+        let combos = expand_grid_gatorosc(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let n_combos = combos.len();
-        let total_size = n_combos * len;
+        let total_size = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("gatorosc_batch_into: rows*cols overflow"))?;
 
         // Create output slices
         let upper_out = std::slice::from_raw_parts_mut(upper_ptr, total_size);
@@ -3754,15 +3854,19 @@ pub fn gatorosc_batch_py<'py>(
         lips_shift: lips_shift_range,
     };
 
-    let combos = expand_grid_gatorosc(&sweep);
+    let combos = expand_grid_gatorosc(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
     // Pre-allocate output arrays for batch operations
-    let upper_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let lower_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let upper_change_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let lower_change_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("gatorosc_batch_py: rows*cols overflow"))?;
+    let upper_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let lower_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let upper_change_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let lower_change_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
 
     let slice_upper = unsafe { upper_arr.as_slice_mut()? };
     let slice_lower = unsafe { lower_arr.as_slice_mut()? };
@@ -3859,7 +3963,156 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::gatorosc_wrapper::CudaGatorOsc;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+// GATOR-specific Python device handle with CAI v3 and DLPack v1.x negotiation
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "GatorDeviceArrayF32", unsendable)]
+pub struct DeviceArrayF32GatorPy {
+    pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
+    _ctx_guard: Arc<Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32GatorPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let item = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * item, item))?;
+        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<pyo3::PyObject> {
+        use std::ffi::{c_char, c_void, CString};
+        use std::ptr::null_mut;
+        use pyo3::ffi as pyffi;
+
+        // Currently we always return a view on the existing allocation.
+        // Respect Array API surface but ignore parameters for now.
+        let _ = stream;
+        let _ = dl_device;
+        let _ = copy;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: usize,
+        }
+        #[repr(C)]
+        struct DLManagedTensor { dl_tensor: DLTensor, manager_ctx: *mut c_void, deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)> }
+        #[repr(C)]
+        struct ManagerCtx { shape: *mut i64, strides: *mut i64, _shape_box: Box<[i64; 2]>, _strides_box: Box<[i64; 2]>, _self_ref: pyo3::PyObject }
+
+        unsafe extern "C" fn deleter(self_ptr: *mut DLManagedTensor) {
+            if self_ptr.is_null() { return; }
+            let mt = Box::from_raw(self_ptr);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() { let _ctx = Box::from_raw(ctx_ptr); }
+            // drop mt after ctx
+        }
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            if capsule.is_null() {
+                return;
+            }
+            let versioned = b"dltensor_versioned\0";
+            let legacy = b"dltensor\0";
+            // Per DLPack Python spec, only call deleter while capsule name is still dltensor[_versioned]
+            let mut ptr = pyffi::PyCapsule_GetPointer(
+                capsule,
+                versioned.as_ptr() as *const c_char,
+            );
+            if ptr.is_null() {
+                ptr = pyffi::PyCapsule_GetPointer(capsule, legacy.as_ptr() as *const c_char);
+            }
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = unsafe { (*mt).deleter } {
+                    unsafe { del(mt) };
+                }
+                unsafe {
+                    pyffi::PyCapsule_SetPointer(capsule, null_mut());
+                }
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr: *mut i64 = shape_box.as_mut_ptr();
+        let strides_ptr: *mut i64 = strides_box.as_mut_ptr();
+
+        // Capsule reuse safety: we tie lifetime to self
+        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx { shape: shape_ptr, strides: strides_ptr, _shape_box: shape_box, _strides_box: strides_box, _self_ref: self_ref });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        // data=NULL for size-zero tensors per DLPack
+        let data_ptr = if rows == 0 || cols == 0 {
+            std::ptr::null_mut()
+        } else {
+            slf.inner.buf.as_device_ptr().as_raw() as *mut c_void
+        };
+
+        let tensor = DLTensor {
+            data: data_ptr,
+            device: DLDevice { device_type: 2, device_id: slf._device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
+        let ptr = Box::into_raw(mt) as *mut c_void;
+
+        let wants_versioned = match max_version { Some((maj, _min)) if maj >= 1 => true, _ => false };
+        let cap_name = if wants_versioned { b"dltensor_versioned\0" } else { b"dltensor\0" };
+        unsafe {
+            let cap = pyffi::PyCapsule_New(
+                ptr,
+                cap_name.as_ptr() as *const c_char,
+                Some(capsule_destructor),
+            );
+            if cap.is_null() {
+                let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "failed to create DLPack capsule",
+                ));
+            }
+            Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+        }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "gatorosc_cuda_batch_dev")]
@@ -3875,10 +4128,10 @@ pub fn gatorosc_cuda_batch_dev_py(
     lips_shift_range: (usize, usize, usize),
     device_id: usize,
 ) -> PyResult<(
-    DeviceArrayF32Py,
-    DeviceArrayF32Py,
-    DeviceArrayF32Py,
-    DeviceArrayF32Py,
+    DeviceArrayF32GatorPy,
+    DeviceArrayF32GatorPy,
+    DeviceArrayF32GatorPy,
+    DeviceArrayF32GatorPy,
 )> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -3893,21 +4146,20 @@ pub fn gatorosc_cuda_batch_dev_py(
         lips_shift: lips_shift_range,
     };
     let (upper, lower, upper_change, lower_change) = py.allow_threads(|| {
-        let cuda =
-            CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev_id = cuda.device_id();
+        let ctx = cuda.ctx();
         let quad = cuda
             .gatorosc_batch_dev(data, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((
-            DeviceArrayF32Py { inner: quad.upper },
-            DeviceArrayF32Py { inner: quad.lower },
-            DeviceArrayF32Py {
-                inner: quad.upper_change,
-            },
-            DeviceArrayF32Py {
-                inner: quad.lower_change,
-            },
-        ))
+        Ok::<_, PyErr>(
+            (
+                DeviceArrayF32GatorPy { inner: quad.upper, _ctx_guard: ctx.clone(), _device_id: dev_id },
+                DeviceArrayF32GatorPy { inner: quad.lower, _ctx_guard: ctx.clone(), _device_id: dev_id },
+                DeviceArrayF32GatorPy { inner: quad.upper_change, _ctx_guard: ctx.clone(), _device_id: dev_id },
+                DeviceArrayF32GatorPy { inner: quad.lower_change, _ctx_guard: ctx, _device_id: dev_id },
+            )
+        )
     })?;
     Ok((upper, lower, upper_change, lower_change))
 }
@@ -3928,10 +4180,10 @@ pub fn gatorosc_cuda_many_series_one_param_dev_py(
     lips_shift: usize,
     device_id: usize,
 ) -> PyResult<(
-    DeviceArrayF32Py,
-    DeviceArrayF32Py,
-    DeviceArrayF32Py,
-    DeviceArrayF32Py,
+    DeviceArrayF32GatorPy,
+    DeviceArrayF32GatorPy,
+    DeviceArrayF32GatorPy,
+    DeviceArrayF32GatorPy,
 )> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -3944,8 +4196,9 @@ pub fn gatorosc_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
     let (upper, lower, upper_change, lower_change) = py.allow_threads(|| {
-        let cuda =
-            CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev_id = cuda.device_id();
+        let ctx = cuda.ctx();
         let quad = cuda
             .gatorosc_many_series_one_param_time_major_dev(
                 prices,
@@ -3959,16 +4212,14 @@ pub fn gatorosc_cuda_many_series_one_param_dev_py(
                 lips_shift,
             )
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((
-            DeviceArrayF32Py { inner: quad.upper },
-            DeviceArrayF32Py { inner: quad.lower },
-            DeviceArrayF32Py {
-                inner: quad.upper_change,
-            },
-            DeviceArrayF32Py {
-                inner: quad.lower_change,
-            },
-        ))
+        Ok::<_, PyErr>(
+            (
+                DeviceArrayF32GatorPy { inner: quad.upper, _ctx_guard: ctx.clone(), _device_id: dev_id },
+                DeviceArrayF32GatorPy { inner: quad.lower, _ctx_guard: ctx.clone(), _device_id: dev_id },
+                DeviceArrayF32GatorPy { inner: quad.upper_change, _ctx_guard: ctx.clone(), _device_id: dev_id },
+                DeviceArrayF32GatorPy { inner: quad.lower_change, _ctx_guard: ctx, _device_id: dev_id },
+            )
+        )
     })?;
     Ok((upper, lower, upper_change, lower_change))
 }

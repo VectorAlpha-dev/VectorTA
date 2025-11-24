@@ -15,7 +15,8 @@ use super::alma_wrapper::DeviceArrayF32;
 use super::{BatchKernelPolicy, ManySeriesKernelPolicy};
 use crate::indicators::otto::{OttoBatchRange, OttoParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -24,23 +25,28 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CudaOttoError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+    #[error("otto: out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("otto: missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("otto: invalid input: {0}")]
     InvalidInput(String),
+    #[error("otto: invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("otto: launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("otto: device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("otto: not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaOttoError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaOttoError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaOttoError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaOttoError {}
 
 #[derive(Clone, Copy, Debug)]
 pub struct CudaOttoPolicy {
@@ -69,7 +75,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaOtto {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaOttoPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -80,10 +86,9 @@ pub struct CudaOtto {
 
 impl CudaOtto {
     pub fn new(device_id: usize) -> Result<Self, CudaOttoError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/otto_kernel.ptx"));
         let jit_opts = &[
@@ -92,16 +97,14 @@ impl CudaOtto {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaOttoPolicy::default(),
             last_batch: None,
@@ -120,6 +123,10 @@ impl CudaOtto {
         Ok(me)
     }
     #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+    #[inline]
     pub fn set_policy(&mut self, policy: CudaOttoPolicy) {
         self.policy = policy;
     }
@@ -137,9 +144,7 @@ impl CudaOtto {
     }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaOttoError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaOttoError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
 
     #[inline]
@@ -154,15 +159,49 @@ impl CudaOtto {
         }
     }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaOttoError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaOttoError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
         } else {
-            true
+            Ok(())
         }
+    }
+
+    #[inline]
+    fn validate_launch(&self, grid: (u32, u32, u32), block: (u32, u32, u32)) -> Result<(), CudaOttoError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
+        if block.0 == 0 || block.1 == 0 || block.2 == 0
+            || grid.0 == 0 || grid.1 == 0 || grid.2 == 0
+            || block.0 > max_bx || block.1 > max_by || block.2 > max_bz
+            || grid.0 > max_gx || grid.1 > max_gy || grid.2 > max_gz
+        {
+            return Err(CudaOttoError::LaunchConfigTooLarge {
+                gx: grid.0,
+                gy: grid.1,
+                gz: grid.2,
+                bx: block.0,
+                by: block.1,
+                bz: block.2,
+            });
+        }
+        Ok(())
     }
 
     // ------- Batch (one series × many params) -------
@@ -174,39 +213,55 @@ impl CudaOtto {
     ) -> Result<(DeviceArrayF32, DeviceArrayF32, Vec<OttoParams>), CudaOttoError> {
         let inputs = Self::prepare_batch_inputs(prices_f32, sweep)?;
 
-        let prices_bytes = inputs.series_len * 4;
-        let cabs_bytes = inputs.series_len * 4;
-        let params_bytes = inputs.combos.len() * (4 + 4 + 4 + 4 + 4); // 5 scalars per row (i32/f32)
-        let out_bytes = inputs.series_len * inputs.combos.len() * 4 * 2; // hott + lott
-        let required = prices_bytes + cabs_bytes + params_bytes + out_bytes;
+        let elem_size = std::mem::size_of::<f32>();
+        let prices_bytes = inputs
+            .series_len
+            .checked_mul(elem_size)
+            .ok_or_else(|| CudaOttoError::InvalidInput("series_len overflow".into()))?;
+        let cabs_bytes = inputs
+            .series_len
+            .checked_mul(elem_size)
+            .ok_or_else(|| CudaOttoError::InvalidInput("series_len overflow".into()))?;
+        let params_scalars = 5usize;
+        let params_bytes = inputs
+            .combos
+            .len()
+            .checked_mul(params_scalars)
+            .and_then(|v| v.checked_mul(elem_size))
+            .ok_or_else(|| CudaOttoError::InvalidInput("params_bytes overflow".into()))?;
+        let elems = inputs
+            .series_len
+            .checked_mul(inputs.combos.len())
+            .and_then(|v| v.checked_mul(2))
+            .ok_or_else(|| CudaOttoError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(elem_size)
+            .ok_or_else(|| CudaOttoError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(cabs_bytes)
+            .and_then(|v| v.checked_add(params_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaOttoError::InvalidInput("total bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024usize;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaOttoError::InvalidInput(
-                "insufficient device memory for OTTO batch".into(),
-            ));
-        }
+        Self::will_fit(required, headroom)?;
 
         // H2D copies (pinned/async for prices + cabs)
         let d_prices = self.htod_copy_f32(prices_f32)?;
         let d_cabs = self.htod_copy_f32(inputs.cabs.as_slice())?;
-        let d_ott_periods = DeviceBuffer::from_slice(&inputs.ott_periods)
-            .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
-        let d_ott_percents = DeviceBuffer::from_slice(&inputs.ott_percents)
-            .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
-        let d_fast = DeviceBuffer::from_slice(&inputs.fast)
-            .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
-        let d_slow = DeviceBuffer::from_slice(&inputs.slow)
-            .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
-        let d_coco = DeviceBuffer::from_slice(&inputs.coco)
-            .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+        let d_ott_periods = DeviceBuffer::from_slice(&inputs.ott_periods).map_err(CudaOttoError::Cuda)?;
+        let d_ott_percents = DeviceBuffer::from_slice(&inputs.ott_percents).map_err(CudaOttoError::Cuda)?;
+        let d_fast = DeviceBuffer::from_slice(&inputs.fast).map_err(CudaOttoError::Cuda)?;
+        let d_slow = DeviceBuffer::from_slice(&inputs.slow).map_err(CudaOttoError::Cuda)?;
+        let d_coco = DeviceBuffer::from_slice(&inputs.coco).map_err(CudaOttoError::Cuda)?;
 
-        let elems = inputs.series_len * inputs.combos.len();
+        let elems = inputs
+            .series_len
+            .checked_mul(inputs.combos.len())
+            .ok_or_else(|| CudaOttoError::InvalidInput("rows*cols overflow".into()))?;
         let mut d_hott: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
-                .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }.map_err(CudaOttoError::Cuda)?;
         let mut d_lott: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
-                .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }.map_err(CudaOttoError::Cuda)?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -223,9 +278,7 @@ impl CudaOtto {
             &mut d_lott,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaOttoError::Cuda)?;
 
         Ok((
             DeviceArrayF32 {
@@ -260,7 +313,7 @@ impl CudaOtto {
         let func = self
             .module
             .get_function("otto_batch_f32")
-            .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaOttoError::MissingKernelSymbol { name: "otto_batch_f32" })?;
 
         unsafe {
             let this = self as *const _ as *mut CudaOtto;
@@ -270,6 +323,7 @@ impl CudaOtto {
 
         const MAX_Y: usize = 65_535;
         let block: BlockSize = (1, 1, 1).into();
+        self.validate_launch((1, 1, 1), (1, 1, 1))?;
         let mut start = 0usize;
         while start < n_combos {
             let chunk = (n_combos - start).min(MAX_Y);
@@ -301,9 +355,7 @@ impl CudaOtto {
                     &mut hott_ptr as *mut _ as *mut c_void,
                     &mut lott_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args).map_err(CudaOttoError::Cuda)?;
             }
             start += chunk;
         }
@@ -319,7 +371,10 @@ impl CudaOtto {
         rows: usize,
         params: &OttoParams,
     ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaOttoError> {
-        if prices_tm_f32.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaOttoError::InvalidInput("cols*rows overflow".into()))?;
+        if prices_tm_f32.len() != expected {
             return Err(CudaOttoError::InvalidInput(
                 "prices_tm length must equal cols*rows".into(),
             ));
@@ -330,22 +385,26 @@ impl CudaOtto {
         let slow = params.slow_vidya_length.unwrap_or(25).max(1);
         let coco = params.correcting_constant.unwrap_or(100000.0) as f32;
 
-        let prices_bytes = cols * rows * 4;
-        let out_bytes = cols * rows * 4 * 2;
-        let required = prices_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaOttoError::InvalidInput(
-                "insufficient device memory for OTTO many-series".into(),
-            ));
-        }
+        let elem_size = std::mem::size_of::<f32>();
+        let prices_bytes = expected
+            .checked_mul(elem_size)
+            .ok_or_else(|| CudaOttoError::InvalidInput("prices bytes overflow".into()))?;
+        let out_elems = expected
+            .checked_mul(2)
+            .ok_or_else(|| CudaOttoError::InvalidInput("output elems overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(elem_size)
+            .ok_or_else(|| CudaOttoError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaOttoError::InvalidInput("total bytes overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
         let d_prices_tm = self.htod_copy_f32(prices_tm_f32)?;
         let mut d_hott_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }.map_err(CudaOttoError::Cuda)?;
         let mut d_lott_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }.map_err(CudaOttoError::Cuda)?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -360,9 +419,7 @@ impl CudaOtto {
             &mut d_lott_tm,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaOttoError::Cuda)?;
 
         Ok((
             DeviceArrayF32 {
@@ -394,15 +451,17 @@ impl CudaOtto {
         let func = self
             .module
             .get_function("otto_many_series_one_param_f32")
-            .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaOttoError::MissingKernelSymbol { name: "otto_many_series_one_param_f32" })?;
         unsafe {
             let this = self as *const _ as *mut CudaOtto;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x: 1 });
         }
         self.maybe_log_many_debug();
 
-        let grid: GridSize = (rows as u32, 1, 1).into();
+        let grid_x = rows as u32;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (1, 1, 1).into();
+        self.validate_launch((grid_x.max(1), 1, 1), (1, 1, 1))?;
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
@@ -426,9 +485,7 @@ impl CudaOtto {
                 &mut hott_ptr as *mut _ as *mut c_void,
                 &mut lott_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args).map_err(CudaOttoError::Cuda)?;
         }
         Ok(())
     }
@@ -437,11 +494,9 @@ impl CudaOtto {
 
     fn htod_copy_f32(&self, host: &[f32]) -> Result<DeviceBuffer<f32>, CudaOttoError> {
         let mut d: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(host.len(), &self.stream) }
-                .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(host.len(), &self.stream) }?;
         unsafe {
-            d.async_copy_from(host, &self.stream)
-                .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
+            d.async_copy_from(host, &self.stream)?;
         }
         Ok(d)
     }
@@ -488,12 +543,13 @@ impl CudaOtto {
         if prices_f32.is_empty() {
             return Err(CudaOttoError::InvalidInput("empty price input".into()));
         }
-        let combos = expand_grid_otto(sweep);
-        if combos.is_empty() {
-            return Err(CudaOttoError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = {
+            let v = expand_grid_otto(sweep);
+            if v.is_empty() {
+                return Err(CudaOttoError::InvalidInput("no parameter combinations".into()));
+            }
+            v
+        };
 
         // First valid (Pine-style nz -> treat NaN as 0.0 for diffs); still detect all-NaN stream
         let first_valid = prices_f32
@@ -532,25 +588,49 @@ impl CudaOtto {
 }
 
 fn expand_grid_otto(r: &OttoBatchRange) -> Vec<OttoParams> {
-    fn axis_usize(a: (usize, usize, usize)) -> Vec<usize> {
-        let (s, e, st) = a;
-        if st == 0 || s == e {
-            return vec![s];
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
         }
-        (s..=e).step_by(st).collect()
+        if start < end {
+            (start..=end).step_by(step).collect()
+        } else {
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                if cur - end < step {
+                    break;
+                }
+                cur -= step;
+            }
+            v
+        }
     }
-    fn axis_f64(a: (f64, f64, f64)) -> Vec<f64> {
-        let (s, e, st) = a;
-        if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
-            return vec![s];
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return vec![start];
         }
-        let mut v = Vec::new();
-        let mut x = s;
-        while x <= e + 1e-12 {
-            v.push(x);
-            x += st;
+        let mut out = Vec::new();
+        if start < end {
+            let st = if step > 0.0 { step } else { -step };
+            let mut x = start;
+            while x <= end + 1e-12 {
+                out.push(x);
+                x += st;
+            }
+        } else {
+            let st = if step > 0.0 { -step } else { step };
+            if st.abs() < 1e-12 {
+                return vec![start];
+            }
+            let mut x = start;
+            while x >= end - 1e-12 {
+                out.push(x);
+                x += st;
+            }
         }
-        v
+        out
     }
     let p = axis_usize(r.ott_period);
     let op = axis_f64(r.ott_percent);

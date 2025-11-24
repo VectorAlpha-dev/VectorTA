@@ -14,10 +14,11 @@
 //! - **`Err(DiError)`** on various error conditions.
 //!
 //! ## Developer Status
-//! - SIMD: AVX2/AVX512 stubs delegate to scalar. Time-axis dependency from Wilder smoothing makes SIMD unhelpful here.
+//! - SIMD: AVX2/AVX512 stubs currently delegate to scalar; Wilder smoothing is strongly sequential so SIMD brings little benefit.
 //! - Scalar: Single-pass, loop-jammed with precomputed constants and `mul_add` (FMA) for Wilder smoothing.
-//! - Batch: Uses shared per-bar precompute (±DM/TR) across rows to reduce redundant work; warmup prefixes preserved.
-//! - Memory: Uses `alloc_with_nan_prefix`, `make_uninit_matrix`, `init_matrix_prefixes` for zero-copy/warmup handling.
+//! - Batch: Shared per-bar precompute (±DM/TR) across rows; warmup prefixes preserved exactly.
+//! - CUDA/Python: CUDA wrapper exists; Python interop returns VRAM handles with CAI v3 + DLPack. Numerical outputs are unchanged.
+//! - Decision log: SIMD disabled by default (sequential dependency); CUDA enabled; performance on GPU verified without changing outputs.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
@@ -193,6 +194,8 @@ impl DiBuilder {
 
 #[derive(Debug, Error)]
 pub enum DiError {
+    #[error("di: Empty input data.")]
+    EmptyInputData,
     #[error("di: Empty data provided for DI.")]
     EmptyData,
     #[error("di: Invalid period: period = {period}, data length = {data_len}")]
@@ -201,6 +204,12 @@ pub enum DiError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("di: All values are NaN.")]
     AllValuesNaN,
+    #[error("di: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("di: Invalid range expansion: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("di: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -224,7 +233,7 @@ fn di_prepare<'a>(
     };
     let n = high.len();
     if n == 0 || low.len() != n || close.len() != n {
-        return Err(DiError::EmptyData);
+        return Err(DiError::EmptyInputData);
     }
     let period = input.get_period();
     if period == 0 || period > n {
@@ -338,9 +347,9 @@ pub fn di_into_slice(
 
     let n = high.len();
     if dst_plus.len() != n || dst_minus.len() != n {
-        return Err(DiError::InvalidPeriod {
-            period: n,
-            data_len: dst_plus.len().min(dst_minus.len()),
+        return Err(DiError::OutputLengthMismatch {
+            expected: n,
+            got: dst_plus.len().min(dst_minus.len()),
         });
     }
 
@@ -370,9 +379,9 @@ pub fn di_into(input: &DiInput, out_plus: &mut [f64], out_minus: &mut [f64]) -> 
 
     let n = high.len();
     if out_plus.len() != n || out_minus.len() != n {
-        return Err(DiError::InvalidPeriod {
-            period: n,
-            data_len: out_plus.len().min(out_minus.len()),
+        return Err(DiError::OutputLengthMismatch {
+            expected: n,
+            got: out_plus.len().min(out_minus.len()),
         });
     }
 
@@ -828,12 +837,7 @@ pub fn di_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(DiError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(DiError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -878,7 +882,19 @@ fn expand_grid(r: &DiBatchRange) -> Vec<DiParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return (start..=end).step_by(step.max(1)).collect();
+        }
+        // Reversed bounds supported: start > end uses descending sequence
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur >= end {
+            v.push(cur);
+            if cur == end { break; }
+            cur = cur.saturating_sub(step.max(1));
+            if cur < end { break; }
+        }
+        v
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -923,14 +939,16 @@ fn di_batch_inner_into(
 ) -> Result<Vec<DiParams>, DiError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(DiError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        let (s, e, st) = sweep.period;
+        return Err(DiError::InvalidRange {
+            start: s,
+            end: e,
+            step: st,
         });
     }
     let n = high.len();
     if n == 0 || low.len() != n || close.len() != n {
-        return Err(DiError::EmptyData);
+        return Err(DiError::EmptyInputData);
     }
     let first = (0..n)
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
@@ -948,17 +966,24 @@ fn di_batch_inner_into(
 
     // Initialize NaN prefixes using helper on MaybeUninit views
     unsafe {
+        let total = rows
+            .checked_mul(cols)
+            .ok_or(DiError::InvalidRange {
+                start: sweep.period.0,
+                end: sweep.period.1,
+                step: sweep.period.2,
+            })?;
         let plus_mu = std::slice::from_raw_parts_mut(
             out_plus.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
-            rows * cols,
+            total,
         );
         let minus_mu = std::slice::from_raw_parts_mut(
             out_minus.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
-            rows * cols,
+            total,
         );
         let warm: Vec<usize> = combos
             .iter()
-            .map(|c| first + c.period.unwrap() - 1)
+            .map(|c| first.saturating_add(c.period.unwrap()).saturating_sub(1))
             .collect();
         init_matrix_prefixes(plus_mu, cols, &warm);
         init_matrix_prefixes(minus_mu, cols, &warm);
@@ -1051,14 +1076,16 @@ fn di_batch_inner(
 ) -> Result<DiBatchOutput, DiError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(DiError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        let (s, e, st) = sweep.period;
+        return Err(DiError::InvalidRange {
+            start: s,
+            end: e,
+            step: st,
         });
     }
     let n = high.len();
     if n == 0 || low.len() != n || close.len() != n {
-        return Err(DiError::EmptyData);
+        return Err(DiError::EmptyInputData);
     }
     let first = (0..n)
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
@@ -1074,10 +1101,17 @@ fn di_batch_inner(
     let rows = combos.len();
     let cols = n;
 
+    // Guard potential overflow in rows * cols before allocation
+    let _ = rows.checked_mul(cols).ok_or(DiError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
+
     // Calculate warmup periods for each parameter combination
     let warmup_periods: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.period.unwrap() - 1)
+        .map(|c| first.saturating_add(c.period.unwrap()).saturating_sub(1))
         .collect();
 
     // Allocate uninitialized matrices
@@ -2362,10 +2396,13 @@ pub fn di_batch_py<'py>(
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = high_slice.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("di: size overflow in rows*cols"))?;
 
     // Allocate two flat NumPy arrays without zeroing. We will init warmups via init_matrix_prefixes.
-    let out_plus = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let out_minus = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_plus = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let out_minus = unsafe { PyArray1::<f64>::new(py, [total], false) };
 
     // Get mutable slices before the closure
     let pl = unsafe { out_plus.as_slice_mut()? };
@@ -2385,11 +2422,11 @@ pub fn di_batch_py<'py>(
     unsafe {
         let plus_mu = std::slice::from_raw_parts_mut(
             pl.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
-            rows * cols,
+            total,
         );
         let minus_mu = std::slice::from_raw_parts_mut(
             mi.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
-            rows * cols,
+            total,
         );
         init_matrix_prefixes(plus_mu, cols, &warm);
         init_matrix_prefixes(minus_mu, cols, &warm);
@@ -2444,7 +2481,213 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaDi;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::exceptions::PyValueError;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::prelude::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::os::raw::c_void;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32DiPy {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32DiPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let itemsize = std::mem::size_of::<f32>();
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * itemsize,
+                itemsize,
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producing stream is synchronized before returning.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<PyObject>,
+        max_version: Option<(u8, u8)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32,
+            _ctx_guard: Arc<Context>,
+            _device_id: u32,
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let versioned = b"dltensor_versioned\0";
+            let legacy = b"dltensor\0";
+            let mut ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                versioned.as_ptr() as *const c_char,
+            );
+            if ptr.is_null() {
+                ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    legacy.as_ptr() as *const c_char,
+                );
+            }
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        // Move VRAM handle into holder and keep Context alive via Arc
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
+
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: if inner.rows == 0 || inner.cols == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+                    },
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [inner.rows as i64, inner.cols as i64],
+            strides: [inner.cols as i64, 1],
+            arr: inner,
+            _ctx_guard: self.ctx.clone(),
+            _device_id: self.device_id,
+        });
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
+        let _ = Box::into_raw(holder);
+
+        let wants_versioned = match max_version {
+            Some((maj, _)) if maj >= 1 => true,
+            _ => false,
+        };
+        let name = if wants_versioned {
+            b"dltensor_versioned\0"
+        } else {
+            b"dltensor\0"
+        };
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut c_void,
+                name.as_ptr() as *const c_char,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe {
+                dl_managed_deleter(mt_ptr);
+            }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "di_cuda_batch_dev")]
@@ -2467,14 +2710,36 @@ pub fn di_cuda_batch_dev_py<'py>(
     let sweep = DiBatchRange {
         period: period_range,
     };
-    let (plus_dev, minus_dev, combos) = py.allow_threads(|| {
+    let (plus_dev, minus_dev, combos, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaDi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.di_batch_dev(h, l, c, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let res = cuda
+            .di_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((res.0, res.1, res.2, cuda.context_arc(), cuda.device_id()))
     })?;
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("plus", Py::new(py, DeviceArrayF32Py { inner: plus_dev })?)?;
-    dict.set_item("minus", Py::new(py, DeviceArrayF32Py { inner: minus_dev })?)?;
+    dict.set_item(
+        "plus",
+        Py::new(
+            py,
+            DeviceArrayF32DiPy {
+                inner: plus_dev,
+                ctx: ctx.clone(),
+                device_id: dev_id,
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "minus",
+        Py::new(
+            py,
+            DeviceArrayF32DiPy {
+                inner: minus_dev,
+                ctx,
+                device_id: dev_id,
+            },
+        )?,
+    )?;
     dict.set_item(
         "periods",
         combos
@@ -2515,16 +2780,35 @@ pub fn di_cuda_many_series_one_param_dev_py<'py>(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let pair = py.allow_threads(|| {
+    let (pair, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaDi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.di_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let p = cuda
+            .di_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((p, cuda.context_arc(), cuda.device_id()))
     })?;
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("plus", Py::new(py, DeviceArrayF32Py { inner: pair.plus })?)?;
+    dict.set_item(
+        "plus",
+        Py::new(
+            py,
+            DeviceArrayF32DiPy {
+                inner: pair.plus,
+                ctx: ctx.clone(),
+                device_id: dev_id,
+            },
+        )?,
+    )?;
     dict.set_item(
         "minus",
-        Py::new(py, DeviceArrayF32Py { inner: pair.minus })?,
+        Py::new(
+            py,
+            DeviceArrayF32DiPy {
+                inner: pair.minus,
+                ctx,
+                device_id: dev_id,
+            },
+        )?,
     )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
@@ -2551,7 +2835,10 @@ pub fn di_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<
     let out = di_with_kernel(&input, crate::utilities::enums::Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let cols = high.len();
-    let mut values = Vec::with_capacity(2 * cols);
+    let total = cols
+        .checked_mul(2)
+        .ok_or_else(|| JsValue::from_str("di_js: size overflow"))?;
+    let mut values = Vec::with_capacity(total);
     values.extend_from_slice(&out.plus);
     values.extend_from_slice(&out.minus);
     let result = DiJsResult {
@@ -2608,9 +2895,12 @@ pub fn di_into(
             di_with_kernel(&input, crate::utilities::enums::Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, 2 * len);
+        let total = len
+            .checked_mul(2)
+            .ok_or_else(|| JsValue::from_str("di_into: size overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         out[..len].copy_from_slice(&plus);
-        out[len..2 * len].copy_from_slice(&minus);
+        out[len..total].copy_from_slice(&minus);
         Ok(())
     }
 }
@@ -2651,10 +2941,16 @@ pub fn di_batch_unified_js(
         crate::utilities::enums::Kernel::Scalar,
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let rows = output.rows * 2;
+    let rows = output
+        .rows
+        .checked_mul(2)
+        .ok_or_else(|| JsValue::from_str("di_batch_unified_js: rows overflow"))?;
     let cols = output.cols;
 
-    let mut values = Vec::with_capacity(rows * cols);
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("di_batch_unified_js: size overflow"))?;
+    let mut values = Vec::with_capacity(total);
     // Interleave per-combo as two rows: plus then minus
     for combo_idx in 0..output.rows {
         let start = combo_idx * cols;
@@ -2709,7 +3005,9 @@ pub fn di_batch_into(
 
         let combos = expand_grid(&sweep);
         let rows = combos.len();
-        let total_size = rows * len;
+        let total_size = rows
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("di_batch_into: size overflow"))?;
 
         let out_plus = std::slice::from_raw_parts_mut(plus_ptr, total_size);
         let out_minus = std::slice::from_raw_parts_mut(minus_ptr, total_size);

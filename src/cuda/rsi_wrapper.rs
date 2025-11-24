@@ -16,25 +16,28 @@ use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffe
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use std::error::Error;
 use std::ffi::c_void;
-use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaRsiError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaRsiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaRsiError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaRsiError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl Error for CudaRsiError {}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CudaRsiPolicy {
@@ -46,16 +49,16 @@ pub struct CudaRsi {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
     policy: CudaRsiPolicy,
     max_grid_x: u32, // device limit for grid.x
 }
 
 impl CudaRsi {
     pub fn new(device_id: usize) -> Result<Self, CudaRsiError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/rsi_kernel.ptx"));
         let jit_opts = &[
@@ -64,10 +67,8 @@ impl CudaRsi {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         // Query device max grid.x and cache (fallback to legacy 65_535)
         let max_grid_x = device
@@ -78,6 +79,7 @@ impl CudaRsi {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
             policy: CudaRsiPolicy::default(),
             max_grid_x,
         })
@@ -85,6 +87,51 @@ impl CudaRsi {
 
     #[inline]
     pub fn set_policy(&mut self, p: CudaRsiPolicy) { self.policy = p; }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaRsiError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Ok((free, _)) = mem_get_info() {
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaRsiError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    fn validate_launch(&self, grid: (u32, u32, u32), block: (u32, u32, u32)) -> Result<(), CudaRsiError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
+        let (gx, gy, gz) = grid;
+        let (bx, by, bz) = block;
+        if bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
+            return Err(CudaRsiError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
+    }
 
     // ---------- Batch (one series × many params) ----------
     pub fn rsi_batch_dev(
@@ -99,48 +146,43 @@ impl CudaRsi {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        // VRAM estimate (best-effort)
-        if let Ok((free, _)) = mem_get_info() {
-            let in_bytes = prices_f32.len() * std::mem::size_of::<f32>();
-            let params_bytes = periods_i32.len() * std::mem::size_of::<i32>();
-            let out_bytes = n_combos
-                .checked_mul(len)
-                .ok_or_else(|| CudaRsiError::InvalidInput("rows*cols overflow".into()))?
-                * std::mem::size_of::<f32>();
-            let headroom = 64usize * 1024 * 1024;
-            let need = in_bytes + params_bytes + out_bytes + headroom;
-            if need > free {
-                return Err(CudaRsiError::InvalidInput(
-                    "estimated device memory exceeds free VRAM".into(),
-                ));
-            }
-        }
+        // VRAM estimate (best-effort) with checked arithmetic
+        let out_elems = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaRsiError::InvalidInput("rows*cols overflow".into()))?;
+        let elem_bytes = std::mem::size_of::<f32>();
+        let param_bytes = std::mem::size_of::<i32>();
+        let in_bytes = prices_f32
+            .len()
+            .checked_mul(elem_bytes)
+            .ok_or_else(|| CudaRsiError::InvalidInput("input bytes overflow".into()))?;
+        let params_bytes = periods_i32
+            .len()
+            .checked_mul(param_bytes)
+            .ok_or_else(|| CudaRsiError::InvalidInput("params bytes overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(elem_bytes)
+            .ok_or_else(|| CudaRsiError::InvalidInput("output bytes overflow".into()))?;
+        let required = in_bytes
+            .checked_add(params_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaRsiError::InvalidInput("total bytes overflow".into()))?;
+        Self::will_fit(required, 64usize * 1024 * 1024)?;
 
         // Allocate device buffers and use pinned host + async copies
-        let mut d_prices: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len)
-                .map_err(|e| CudaRsiError::Cuda(e.to_string()))?
-        };
-        let mut d_periods: DeviceBuffer<i32> = unsafe {
-            DeviceBuffer::uninitialized(n_combos)
-                .map_err(|e| CudaRsiError::Cuda(e.to_string()))?
-        };
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len * n_combos)
-                .map_err(|e| CudaRsiError::Cuda(e.to_string()))?
-        };
+        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len)? };
+        let mut d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(n_combos)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
 
-        let h_prices = LockedBuffer::from_slice(prices_f32)
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
-        let h_periods = LockedBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+        let h_prices = LockedBuffer::from_slice(prices_f32)?;
+        let h_periods = LockedBuffer::from_slice(&periods_i32)?;
         unsafe {
             d_prices
                 .async_copy_from(&h_prices, &self.stream)
-                .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+                ?;
             d_periods
                 .async_copy_from(&h_periods, &self.stream)
-                .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+                ?;
         }
 
         self.launch_batch(
@@ -152,9 +194,7 @@ impl CudaRsi {
             &mut d_out,
         )?;
         // Ensure all work/copies are completed before returning
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -174,7 +214,7 @@ impl CudaRsi {
         let func = self
             .module
             .get_function("rsi_batch_f32")
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaRsiError::MissingKernelSymbol { name: "rsi_batch_f32" })?;
         let block_x: u32 = self.policy.batch_block_x.unwrap_or(256);
         let max_grid_x: u32 = self.max_grid_x.max(1);
         let combos_per_launch: usize = (block_x as usize) * (max_grid_x as usize);
@@ -182,8 +222,11 @@ impl CudaRsi {
         while launched < n_combos {
             let this_chunk = (n_combos - launched).min(combos_per_launch);
             let grid_x = ((this_chunk as u32) + block_x - 1) / block_x;
-            let grid: GridSize = (grid_x.max(1), 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
+            let grid = (grid_x.max(1), 1, 1);
+            let block = (block_x, 1, 1);
+            self.validate_launch(grid, block)?;
+            let grid: GridSize = grid.into();
+            let block: BlockSize = block.into();
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                 let mut periods_ptr = d_periods
@@ -205,9 +248,7 @@ impl CudaRsi {
                     &mut combos_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
             launched += this_chunk;
         }
@@ -232,9 +273,6 @@ impl CudaRsi {
             return Err(CudaRsiError::InvalidInput(
                 "time-major length mismatch".into(),
             ));
-            return Err(CudaRsiError::InvalidInput(
-                "time-major length mismatch".into(),
-            ));
         }
         if period == 0 {
             return Err(CudaRsiError::InvalidInput("period must be > 0".into()));
@@ -250,10 +288,6 @@ impl CudaRsi {
                     fv = t as i32;
                     break;
                 }
-                if !v.is_nan() {
-                    fv = t as i32;
-                    break;
-                }
             }
             if fv < 0 {
                 return Err(CudaRsiError::InvalidInput(format!("series {} all NaN", s)));
@@ -262,31 +296,29 @@ impl CudaRsi {
         }
 
         // VRAM estimate
-        if let Ok((free, _)) = mem_get_info() {
-            let n = expected;
-            let bytes = (2 * n) * std::mem::size_of::<f32>()
-                + cols * std::mem::size_of::<i32>()
-                + 64 * 1024 * 1024;
-            if bytes > free {
-                return Err(CudaRsiError::InvalidInput(
-                    "estimated device memory exceeds free VRAM".into(),
-                ));
-            }
-        }
+        let elem_bytes = std::mem::size_of::<f32>();
+        let first_bytes = std::mem::size_of::<i32>();
+        let two_n = expected
+            .checked_mul(2)
+            .ok_or_else(|| CudaRsiError::InvalidInput("2*n overflow".into()))?;
+        let data_bytes = two_n
+            .checked_mul(elem_bytes)
+            .ok_or_else(|| CudaRsiError::InvalidInput("data bytes overflow".into()))?;
+        let first_valid_bytes = cols
+            .checked_mul(first_bytes)
+            .ok_or_else(|| CudaRsiError::InvalidInput("first_valid bytes overflow".into()))?;
+        let required = data_bytes
+            .checked_add(first_valid_bytes)
+            .ok_or_else(|| CudaRsiError::InvalidInput("total bytes overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
         // Simpler synchronous copies are sufficient here; keep API synchronous
-        let d_prices = DeviceBuffer::from_slice(prices_tm_f32)
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(expected).map_err(|e| CudaRsiError::Cuda(e.to_string()))?
-        };
+        let d_prices = DeviceBuffer::from_slice(prices_tm_f32)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected)? };
 
         self.launch_many_series(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -306,11 +338,14 @@ impl CudaRsi {
         let func = self
             .module
             .get_function("rsi_many_series_one_param_f32")
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaRsiError::MissingKernelSymbol { name: "rsi_many_series_one_param_f32" })?;
         let block_x = self.policy.many_block_x.unwrap_or(256);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        let grid = (grid_x.max(1), 1, 1);
+        let block = (block_x, 1, 1);
+        self.validate_launch(grid, block)?;
+        let grid: GridSize = grid.into();
+        let block: BlockSize = block.into();
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
             let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
@@ -326,9 +361,7 @@ impl CudaRsi {
                 &mut period_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -342,35 +375,37 @@ impl CudaRsi {
         if len == 0 {
             return Err(CudaRsiError::InvalidInput("empty prices".into()));
         }
-        // expand grid
+        // expand grid (mirror CPU semantics: step=0 static, reversed bounds supported)
         let (start, end, step) = sweep.period;
         let mut combos = Vec::new();
         if step == 0 || start == end {
-            combos.push(RsiParams {
-                period: Some(start),
-            });
-            combos.push(RsiParams {
-                period: Some(start),
-            });
+            combos.push(RsiParams { period: Some(start) });
         } else {
-            let mut v = start;
-            while v <= end {
+            let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+            let mut v = lo;
+            loop {
                 combos.push(RsiParams { period: Some(v) });
-                v = v.saturating_add(step);
+                if v == hi {
+                    break;
+                }
+                v = v
+                    .checked_add(step)
+                    .ok_or_else(|| CudaRsiError::InvalidInput("period range overflow".into()))?;
+                if v > hi {
+                    break;
+                }
             }
         }
         if combos.is_empty() {
-            return Err(CudaRsiError::InvalidInput("no period combos".into()));
+            return Err(CudaRsiError::InvalidInput(format!(
+                "invalid period range: start={} end={} step={}",
+                start, end, step
+            )));
         }
 
         let first_valid = (0..len)
             .find(|&i| !prices[i].is_nan())
             .ok_or_else(|| CudaRsiError::InvalidInput("all values NaN".into()))?;
-        let max_p = combos
-            .iter()
-            .map(|c| c.period.unwrap_or(0))
-            .max()
-            .unwrap_or(0);
         let max_p = combos
             .iter()
             .map(|c| c.period.unwrap_or(0))

@@ -14,8 +14,8 @@
 //! ## Developer Notes
 //! - **AVX2/AVX512 Kernels**: Stub implementations that delegate to scalar. Functions exist but just call scalar version. IIR filter nature makes SIMD challenging but could vectorize across multiple parameter sets.
 //! - **Streaming Performance**: Streaming now uses an O(1) predictor update (ring + A/D accumulators), matching the scalar row kernel’s recurrence and Ehlers’ formulation.
-//! - **Memory/Batch**: Uses `alloc_with_nan_prefix` and batch helpers properly.
-//! - **Status (2025-10)**: Scalar and streaming use the same O(1) predictor; SIMD remains stubbed (serial recurrence). Batch remains per-row compute to avoid extra memory copies.
+//! - **Memory/Batch/CUDA**: Uses `alloc_with_nan_prefix` and batch helpers; CUDA wrapper provides typed errors, VRAM checks, and returns VRAM handles for Python.
+//! - **Status (2025-11)**: Scalar and streaming share the same O(1) predictor; SIMD remains stubbed (serial recurrence). Batch remains per-row compute; CUDA wrapper + Python interop use CAI v3 and DLPack v1.x capsules. Numerical outputs are unchanged.
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -41,6 +41,12 @@ use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -220,6 +226,12 @@ pub enum VossError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("voss: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("voss: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("voss: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("voss: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -338,10 +350,16 @@ pub fn voss_into_slice(
 ) -> Result<(), VossError> {
     let (data, period, predict, bandwidth, first, min_index, chosen) = voss_prepare(input, kern)?;
 
-    if voss_dst.len() != data.len() || filt_dst.len() != data.len() {
-        return Err(VossError::InvalidPeriod {
-            period: voss_dst.len(),
-            data_len: data.len(),
+    if voss_dst.len() != data.len() {
+        return Err(VossError::OutputLengthMismatch {
+            expected: data.len(),
+            got: voss_dst.len(),
+        });
+    }
+    if filt_dst.len() != data.len() {
+        return Err(VossError::OutputLengthMismatch {
+            expected: data.len(),
+            got: filt_dst.len(),
         });
     }
 
@@ -753,12 +771,7 @@ pub fn voss_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(VossError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(VossError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -800,29 +813,94 @@ impl VossBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &VossBatchRange) -> Vec<VossParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &VossBatchRange) -> Result<Vec<VossParams>, VossError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, VossError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(next) => {
+                        if next == v {
+                            break;
+                        }
+                        v = next;
+                    }
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start as isize;
+            let end_i = end as isize;
+            let st = (step as isize).max(1);
+            while v >= end_i {
+                out.push(v as usize);
+                v -= st;
+            }
+        }
+        if out.is_empty() {
+            return Err(VossError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(out)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, VossError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(VossError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
         }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
+        let st = step.abs();
+        while x + 1e-12 >= end {
             v.push(x);
-            x += step;
+            x -= st;
         }
-        v
+        if v.is_empty() {
+            return Err(VossError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let predicts = axis_usize(r.predict);
-    let bandwidths = axis_f64(r.bandwidth);
-    let mut out = Vec::with_capacity(periods.len() * predicts.len() * bandwidths.len());
+    let periods = axis_usize(r.period)?;
+    let predicts = axis_usize(r.predict)?;
+    let bandwidths = axis_f64(r.bandwidth)?;
+    let cap = periods
+        .len()
+        .checked_mul(predicts.len())
+        .and_then(|x| x.checked_mul(bandwidths.len()))
+        .ok_or_else(|| VossError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &q in &predicts {
             for &b in &bandwidths {
@@ -834,7 +912,14 @@ fn expand_grid(r: &VossBatchRange) -> Vec<VossParams> {
             }
         }
     }
-    out
+    if out.is_empty() {
+        return Err(VossError::InvalidRange {
+            start: "combos".into(),
+            end: "empty".into(),
+            step: "voss".into(),
+        });
+    }
+    Ok(out)
 }
 
 #[inline(always)]
@@ -864,13 +949,7 @@ pub fn voss_batch_inner_into(
     voss_out: &mut [f64],
     filt_out: &mut [f64],
 ) -> Result<Vec<VossParams>, VossError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(VossError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -879,11 +958,24 @@ pub fn voss_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Validate output buffers
-    if voss_out.len() != rows * cols || filt_out.len() != rows * cols {
-        return Err(VossError::InvalidPeriod {
-            period: voss_out.len(),
-            data_len: rows * cols,
+    // Validate output buffers with checked arithmetic
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| VossError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
+    if voss_out.len() != expected {
+        return Err(VossError::OutputLengthMismatch {
+            expected,
+            got: voss_out.len(),
+        });
+    }
+    if filt_out.len() != expected {
+        return Err(VossError::OutputLengthMismatch {
+            expected,
+            got: filt_out.len(),
         });
     }
 
@@ -980,13 +1072,7 @@ fn voss_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<VossBatchOutput, VossError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(VossError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -1002,6 +1088,13 @@ fn voss_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| VossError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
 
     // Calculate warmup periods for each combination
     let warmup_periods: Vec<usize> = combos
@@ -1346,7 +1439,7 @@ unsafe fn voss_row_avx512_long(
 }
 
 #[inline(always)]
-pub fn expand_grid_voss(r: &VossBatchRange) -> Vec<VossParams> {
+pub fn expand_grid_voss(r: &VossBatchRange) -> Result<Vec<VossParams>, VossError> {
     expand_grid(r)
 }
 
@@ -1356,12 +1449,205 @@ pub fn register_voss_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
     m.add_function(wrap_pyfunction!(voss_py, m)?)?;
     m.add_function(wrap_pyfunction!(voss_batch_py, m)?)?;
     m.add_class::<VossStreamPy>()?;
+    #[cfg(all(feature = "python", feature = "cuda"))]
+    {
+        m.add_class::<VossDeviceArrayF32Py>()?;
+    }
     Ok(())
 }
 
 // ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+// VOSS-specific VRAM-backed Python handle with CAI v3 + DLPack v1.x
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct VossDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl VossDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Producing stream is synchronized before return; omit explicit stream per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (_stream=None, max_version=None, _dl_device=None, _copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            _ctx: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+            device_id: i32,
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let versioned = b"dltensor_versioned\0";
+            let legacy = b"dltensor\0";
+            let mut ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                versioned.as_ptr() as *const c_char,
+            );
+            if ptr.is_null() {
+                ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, legacy.as_ptr() as *const c_char);
+            }
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        // Move VRAM handle into Holder (single-use)
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: if rows == 0 || cols == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+                    },
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [rows, cols],
+            strides: [cols, 1],
+            _ctx: self._ctx.clone(),
+            _buf: buf,
+            device_id: self.device_id as i32,
+        });
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
+        let _ = Box::into_raw(holder);
+
+        let wants_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        let name_versioned = b"dltensor_versioned\0";
+        let name_legacy = b"dltensor\0";
+        let name_ptr = if wants_versioned {
+            name_versioned.as_ptr()
+        } else {
+            name_legacy.as_ptr()
+        };
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut std::ffi::c_void,
+                name_ptr as *const c_char,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe {
+                dl_managed_deleter(mt_ptr);
+            }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "voss_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period=(20,20,0), predict=(3,3,0), bandwidth=(0.25,0.25,0.0), device_id=0))]
@@ -1383,15 +1669,43 @@ pub fn voss_cuda_batch_dev_py<'py>(
         predict,
         bandwidth,
     };
-    let (voss_dev, filt_dev, combos) = py.allow_threads(|| {
+    let (voss_dev, filt_dev, combos, ctx, dev_id) = py.allow_threads(|| -> PyResult<_> {
         let cuda = crate::cuda::CudaVoss::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.voss_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let (voss_dev, filt_dev, combos) = cuda
+            .voss_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((voss_dev, filt_dev, combos, cuda.context_arc(), cuda.device_id()))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item("voss", Py::new(py, DeviceArrayF32Py { inner: voss_dev })?)?;
-    dict.set_item("filt", Py::new(py, DeviceArrayF32Py { inner: filt_dev })?)?;
+    let crate::cuda::moving_averages::DeviceArrayF32 { buf, rows, cols } = voss_dev;
+    dict.set_item(
+        "voss",
+        Py::new(
+            py,
+            VossDeviceArrayF32Py {
+                buf: Some(buf),
+                rows,
+                cols,
+                _ctx: ctx.clone(),
+                device_id: dev_id,
+            },
+        )?,
+    )?;
+    let crate::cuda::moving_averages::DeviceArrayF32 { buf, rows, cols } = filt_dev;
+    dict.set_item(
+        "filt",
+        Py::new(
+            py,
+            VossDeviceArrayF32Py {
+                buf: Some(buf),
+                rows,
+                cols,
+                _ctx: ctx,
+                device_id: dev_id,
+            },
+        )?,
+    )?;
     dict.set_item("rows", combos.len())?;
     dict.set_item("cols", slice_in.len())?;
     use numpy::IntoPyArray;
@@ -1432,7 +1746,7 @@ pub fn voss_cuda_many_series_one_param_dev_py<'py>(
     predict: usize,
     bandwidth: f64,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(VossDeviceArrayF32Py, VossDeviceArrayF32Py)> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -1445,16 +1759,31 @@ pub fn voss_cuda_many_series_one_param_dev_py<'py>(
         predict: Some(predict),
         bandwidth: Some(bandwidth),
     };
-    let (voss_dev, filt_dev) = py.allow_threads(|| {
+    let (voss_dev, filt_dev, ctx, dev_id) = py.allow_threads(|| -> PyResult<_> {
         let cuda = crate::cuda::CudaVoss::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.voss_many_series_one_param_time_major_dev(flat, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let (voss_dev, filt_dev) = cuda
+            .voss_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((voss_dev, filt_dev, cuda.context_arc(), cuda.device_id()))
     })?;
-    Ok((
-        DeviceArrayF32Py { inner: voss_dev },
-        DeviceArrayF32Py { inner: filt_dev },
-    ))
+    let crate::cuda::moving_averages::DeviceArrayF32 { buf, rows, cols } = voss_dev;
+    let voss_py = VossDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        _ctx: ctx.clone(),
+        device_id: dev_id,
+    };
+    let crate::cuda::moving_averages::DeviceArrayF32 { buf, rows, cols } = filt_dev;
+    let filt_py = VossDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        _ctx: ctx,
+        device_id: dev_id,
+    };
+    Ok((voss_py, filt_py))
 }
 
 #[cfg(test)]
@@ -2396,13 +2725,16 @@ pub fn voss_batch_py<'py>(
         bandwidth: bandwidth_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow in voss_batch_py"))?;
 
     // Pre-allocate NumPy outputs
-    let voss_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let filt_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let voss_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let filt_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let voss_slice = unsafe { voss_arr.as_slice_mut()? };
     let filt_slice = unsafe { filt_arr.as_slice_mut()? };
 
@@ -2623,8 +2955,9 @@ pub fn voss_batch_metadata_js(
         bandwidth: (bandwidth_start, bandwidth_end, bandwidth_step),
     };
 
-    let combos = expand_grid(&sweep);
-    let mut metadata = Vec::with_capacity(combos.len() * 3);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let cap = combos.len().checked_mul(3).unwrap_or(0);
+    let mut metadata = Vec::with_capacity(cap);
 
     for combo in combos {
         metadata.push(combo.period.unwrap_or(20) as f64);
@@ -2667,7 +3000,10 @@ pub fn voss_batch_into(
         let output = voss_batch_par_slice(data, &sweep, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        let total_size = output.rows * output.cols;
+        let total_size = output
+            .rows
+            .checked_mul(output.cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow in voss_batch_into"))?;
         if total_size > 0 {
             let voss_out = std::slice::from_raw_parts_mut(voss_ptr, total_size);
             let filt_out = std::slice::from_raw_parts_mut(filt_ptr, total_size);

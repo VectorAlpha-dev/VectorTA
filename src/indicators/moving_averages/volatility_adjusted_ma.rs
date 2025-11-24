@@ -1564,8 +1564,11 @@ pub fn vama_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // Pre-allocate NumPy array and write directly into it
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    // Pre-allocate NumPy array and write directly into it (guard overflow)
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("vama_batch: rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     // Newly allocated 1D array is contiguous; as_slice_mut() must succeed.
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
@@ -1721,7 +1724,15 @@ impl VamaDeviceArrayF32Py {
         (2, self.inner.device_id as i32)
     }
 
-    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        _stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
         use std::ffi::c_void;
 
         #[repr(C)]
@@ -1763,21 +1774,39 @@ impl VamaDeviceArrayF32Py {
 
         extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
             unsafe {
-                let name = b"dltensor\0";
-                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
-                    as *mut DLManagedTensor;
+                // Try versioned first, then legacy
+                let vname = b"dltensor_versioned\0";
+                let lname = b"dltensor\0";
+                let mut ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    vname.as_ptr() as *const _,
+                ) as *mut DLManagedTensor;
+                if ptr.is_null() {
+                    ptr = pyo3::ffi::PyCapsule_GetPointer(
+                        capsule,
+                        lname.as_ptr() as *const _,
+                    ) as *mut DLManagedTensor;
+                }
                 if !ptr.is_null() {
                     if let Some(del) = (*ptr).deleter { del(ptr); }
-                    let used = b"used_dltensor\0";
-                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                    let used = if pyo3::ffi::PyCapsule_GetName(capsule) == vname.as_ptr() as *const _ {
+                        b"used_dltensor_versioned\0"
+                    } else {
+                        b"used_dltensor\0"
+                    };
+                    let _ = pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
                 }
             }
         }
 
-        // Build element-based shape/strides per DLPack
+        // Build element-based shape/strides per DLPack (strides in elements)
         let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
         let strides = Box::new([self.inner.cols as i64, 1i64]);
-        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+        let data_ptr: *mut c_void = if self.inner.rows == 0 || self.inner.cols == 0 {
+            std::ptr::null_mut()
+        } else {
+            self.inner.device_ptr() as usize as *mut c_void
+        };
 
         let guard = Box::new(DlpGuard {
             _shape: shape,
@@ -1801,7 +1830,8 @@ impl VamaDeviceArrayF32Py {
             deleter: Some(managed_deleter),
         });
         let mt_raw = Box::into_raw(mt);
-        let name = b"dltensor\0";
+        let wants_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        let name = if wants_versioned { b"dltensor_versioned\0" } else { b"dltensor\0" };
         let capsule = unsafe {
             pyo3::ffi::PyCapsule_New(
                 mt_raw as *mut c_void,

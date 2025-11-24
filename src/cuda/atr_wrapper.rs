@@ -10,7 +10,7 @@
 
 use crate::indicators::atr::AtrBatchRange;
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -137,29 +137,99 @@ impl CudaAtr {
         Err(CudaAtrError::InvalidInput("all values are NaN".into()))
     }
 
-    fn device_will_fit(bytes: usize, headroom: usize) -> bool {
-        let check = match env::var("CUDA_MEM_CHECK") {
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
             Err(_) => true,
-        };
-        if !check { return true; }
+        }
+    }
+
+    fn device_will_fit(bytes: usize, headroom: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Ok((free, _)) = mem_get_info() {
             return bytes.saturating_add(headroom) <= free;
         }
         true
     }
 
+    fn will_fit(bytes: usize, headroom: usize) -> Result<(), CudaAtrError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Ok((free, _)) = mem_get_info() {
+            if bytes.saturating_add(headroom) > free {
+                return Err(CudaAtrError::OutOfMemory {
+                    required: bytes,
+                    free,
+                    headroom,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaAtrError> {
+        let device = Device::get_device(self.device_id)?;
+        let max_threads = device
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)?
+            .max(1) as u32;
+        let max_grid_x = device
+            .get_attribute(DeviceAttribute::MaxGridDimX)?
+            .max(1) as u32;
+        let max_grid_y = device
+            .get_attribute(DeviceAttribute::MaxGridDimY)?
+            .max(1) as u32;
+        let max_grid_z = device
+            .get_attribute(DeviceAttribute::MaxGridDimZ)?
+            .max(1) as u32;
+
+        let threads_per_block = bx
+            .saturating_mul(by)
+            .saturating_mul(bz);
+        if threads_per_block > max_threads
+            || gx > max_grid_x
+            || gy > max_grid_y
+            || gz > max_grid_z
+        {
+            return Err(CudaAtrError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
+    }
+
     fn chunk_size_for_batch(n_combos: usize, len: usize) -> usize {
         // Inputs: 3×len f32; params per combo (periods i32, alphas f32, warms i32); outputs: combos×len f32.
-        let input_bytes = 3 * len * std::mem::size_of::<f32>();
-        let params_bytes = n_combos * (std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>());
-        let out_per_combo = len * std::mem::size_of::<f32>();
+        let input_bytes = 3usize
+            .saturating_mul(len)
+            .saturating_mul(std::mem::size_of::<f32>());
+        let params_bytes = n_combos
+            .saturating_mul(std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>());
+        let out_per_combo = len.saturating_mul(std::mem::size_of::<f32>());
         let headroom = 64 * 1024 * 1024; // ~64MB
                                          // Start from all combos and shrink until it fits.
                                          // Start from all combos and shrink until it fits.
         let mut chunk = n_combos.max(1);
         while chunk > 1 {
-            let need = input_bytes + params_bytes + chunk * out_per_combo + headroom;
+            let need = input_bytes
+                .saturating_add(params_bytes)
+                .saturating_add(chunk.saturating_mul(out_per_combo))
+                .saturating_add(headroom);
             if Self::device_will_fit(need, 0) {
                 break;
             }
@@ -192,12 +262,16 @@ impl CudaAtr {
         fixed_input_bytes: usize,
     ) -> usize {
         // Params per combo: period i32, alpha f32, warm i32
-        let params_bytes = n_combos * (std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>());
-        let out_per_combo = len * std::mem::size_of::<f32>();
+        let params_bytes = n_combos
+            .saturating_mul(std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>());
+        let out_per_combo = len.saturating_mul(std::mem::size_of::<f32>());
         let headroom = 64 * 1024 * 1024; // ~64MB
         let mut chunk = n_combos.max(1);
         while chunk > 1 {
-            let need = fixed_input_bytes + params_bytes + chunk * out_per_combo + headroom;
+            let need = fixed_input_bytes
+                .saturating_add(params_bytes)
+                .saturating_add(chunk.saturating_mul(out_per_combo))
+                .saturating_add(headroom);
             if Self::device_will_fit(need, 0) {
                 break;
             }
@@ -217,9 +291,6 @@ impl CudaAtr {
             return Err(CudaAtrError::InvalidInput("input length mismatch".into()));
         }
         let len = close.len();
-        if len == 0 {
-            return Err(CudaAtrError::InvalidInput("empty input".into()));
-        }
         if len == 0 {
             return Err(CudaAtrError::InvalidInput("empty input".into()));
         }
@@ -264,6 +335,11 @@ impl CudaAtr {
             .map(|&p| (first_valid + p - 1) as i32)
             .collect();
 
+        let params_bytes = h_periods_i32.len()
+            .checked_mul(std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAtrError::InvalidInput("params size overflow".into()))?;
+        Self::will_fit(params_bytes, 8 * 1024 * 1024)?;
+
         let d_periods = DeviceBuffer::from_slice(&h_periods_i32)?;
         let d_alphas = DeviceBuffer::from_slice(&h_alphas)?;
         let d_warms = DeviceBuffer::from_slice(&h_warms)?;
@@ -272,9 +348,20 @@ impl CudaAtr {
         let plan = Self::choose_seed_plan(&periods, len);
 
         // Upload inputs; may be dropped after TR/prefix build.
-        let mut d_high: Option<DeviceBuffer<f32>> = Some(DeviceBuffer::from_slice(high).map_err(CudaAtrError::Cuda)?);
-        let mut d_low: Option<DeviceBuffer<f32>> = Some(DeviceBuffer::from_slice(low).map_err(CudaAtrError::Cuda)?);
-        let mut d_close: Option<DeviceBuffer<f32>> = Some(DeviceBuffer::from_slice(close).map_err(CudaAtrError::Cuda)?);
+        let input_elems = len
+            .checked_mul(3)
+            .ok_or_else(|| CudaAtrError::InvalidInput("input size overflow".into()))?;
+        let input_bytes = input_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAtrError::InvalidInput("input size overflow".into()))?;
+        Self::will_fit(input_bytes, 8 * 1024 * 1024)?;
+
+        let mut d_high: Option<DeviceBuffer<f32>> =
+            Some(DeviceBuffer::from_slice(high).map_err(CudaAtrError::Cuda)?);
+        let mut d_low: Option<DeviceBuffer<f32>> =
+            Some(DeviceBuffer::from_slice(low).map_err(CudaAtrError::Cuda)?);
+        let mut d_close: Option<DeviceBuffer<f32>> =
+            Some(DeviceBuffer::from_slice(close).map_err(CudaAtrError::Cuda)?);
 
         // Precompute on device as needed
         let mut d_tr: Option<DeviceBuffer<f32>> = None;
@@ -312,7 +399,12 @@ impl CudaAtr {
             // Require TR kernel for these plans; if missing, fall back to on-the-fly
             if let Some(k_tr_f) = k_tr {
                 // Allocate TR
-                let mut db_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+                let tr_bytes = len
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| CudaAtrError::InvalidInput("tr buffer size overflow".into()))?;
+                Self::will_fit(tr_bytes, 8 * 1024 * 1024)?;
+                let mut db_tr: DeviceBuffer<f32> =
+                    unsafe { DeviceBuffer::uninitialized(len) }?;
 
                 // Launch tr_from_hlc_f32
                 let block_tr: BlockSize = (256, 1, 1).into();
@@ -334,13 +426,26 @@ impl CudaAtr {
                         &mut first_i as *mut _ as *mut c_void,
                         &mut tr_ptr as *mut _ as *mut c_void,
                     ];
+                    self.validate_launch(grid_tr_x.max(1), 1, 1, 256, 1, 1)?;
                     self.stream.launch(&k_tr_f, grid_tr, block_tr, 0, args)?;
                 }
 
                 if matches!(plan, SeedPlan::Prefix2) {
                     if let Some(k_pf) = k_prefix {
                         // Exclusive prefix (float2) length len+1
-                        let mut db_pfx: DeviceBuffer<[f32; 2]> = unsafe { DeviceBuffer::uninitialized(len + 1) }?;
+                        let pfx_elems = len
+                            .checked_add(1)
+                            .ok_or_else(|| {
+                                CudaAtrError::InvalidInput("prefix buffer size overflow".into())
+                            })?;
+                        let pfx_bytes = pfx_elems
+                            .checked_mul(std::mem::size_of::<[f32; 2]>())
+                            .ok_or_else(|| {
+                                CudaAtrError::InvalidInput("prefix buffer size overflow".into())
+                            })?;
+                        Self::will_fit(pfx_bytes, 8 * 1024 * 1024)?;
+                        let mut db_pfx: DeviceBuffer<[f32; 2]> =
+                            unsafe { DeviceBuffer::uninitialized(len + 1) }?;
                         let block_pf: BlockSize = (1, 1, 1).into();
                         let grid_pf: GridSize = (1, 1, 1).into();
                         unsafe {
@@ -352,6 +457,7 @@ impl CudaAtr {
                                 &mut len_i as *mut _ as *mut c_void,
                                 &mut prefix_ptr as *mut _ as *mut c_void,
                             ];
+                            self.validate_launch(1, 1, 1, 1, 1, 1)?;
                             self.stream.launch(&k_pf, grid_pf, block_pf, 0, args)?;
                         }
                         // We can drop H/L/C now to free VRAM
@@ -401,12 +507,21 @@ impl CudaAtr {
         let block: BlockSize = (block_x, 1, 1).into();
 
         // Output buffer (n_combos x len)
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }?;
+        let out_elems = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaAtrError::InvalidInput("n_combos*len overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAtrError::InvalidInput("output size overflow".into()))?;
+        Self::will_fit(out_bytes, 16 * 1024 * 1024)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         let mut launched = 0usize;
         while launched < n_combos {
             let cur = (n_combos - launched).min(chunk);
-            let grid: GridSize = (cur as u32, 1, 1).into();
+            let grid_x = cur as u32;
+            let grid: GridSize = (grid_x, 1, 1).into();
 
             unsafe {
                 let mut high_ptr = if d_tr.is_some() {
@@ -468,6 +583,7 @@ impl CudaAtr {
                     &mut cur_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
+                self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
                 self.stream.launch(&k_batch, grid, block, 0, args)?;
             }
 
@@ -508,12 +624,21 @@ impl CudaAtr {
             BatchKernelPolicy::Auto => 256,
         };
         let block: BlockSize = (block_x, 1, 1).into();
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }?;
+        let out_elems = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaAtrError::InvalidInput("n_combos*len overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAtrError::InvalidInput("output size overflow".into()))?;
+        Self::will_fit(out_bytes, 16 * 1024 * 1024)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         let mut launched = 0usize;
         while launched < n_combos {
             let cur = (n_combos - launched).min(chunk);
-            let grid: GridSize = (cur as u32, 1, 1).into();
+            let grid_x = cur as u32;
+            let grid: GridSize = (grid_x, 1, 1).into();
             unsafe {
                 let mut high_ptr = d_high.as_mut().unwrap().as_device_ptr().as_raw();
                 let mut low_ptr = d_low.as_mut().unwrap().as_device_ptr().as_raw();
@@ -549,6 +674,7 @@ impl CudaAtr {
                     &mut cur_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
+                self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
                 self.stream.launch(&func, grid, block, 0, args)?;
             }
             launched += cur;
@@ -563,9 +689,6 @@ impl CudaAtr {
         cols: usize,
         rows: usize,
     ) -> Result<Vec<i32>, CudaAtrError> {
-        let n = cols
-            .checked_mul(rows)
-            .ok_or_else(|| CudaAtrError::InvalidInput("rows*cols overflow".into()))?;
         let n = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaAtrError::InvalidInput("rows*cols overflow".into()))?;
@@ -617,11 +740,31 @@ impl CudaAtr {
             ));
         }
 
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAtrError::InvalidInput("rows*cols overflow".into()))?;
+        let inputs_bytes = elems
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaAtrError::InvalidInput("input size overflow".into()))?;
+        let fv_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaAtrError::InvalidInput("first_valids size overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAtrError::InvalidInput("output size overflow".into()))?;
+        let total_bytes = inputs_bytes
+            .checked_add(fv_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaAtrError::InvalidInput("total size overflow".into()))?;
+        Self::will_fit(total_bytes, 16 * 1024 * 1024)?;
+
         let mut d_high = DeviceBuffer::from_slice(high_tm)?;
         let mut d_low = DeviceBuffer::from_slice(low_tm)?;
         let mut d_close = DeviceBuffer::from_slice(close_tm)?;
         let d_fv = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         // Prefer coalesced time-major kernel name if present, else fallback to legacy symbol.
         let func = match self.module.get_function("atr_many_series_one_param_f32_tm_coalesced") {
@@ -664,6 +807,7 @@ impl CudaAtr {
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
+            self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
             self.stream.launch(&func, grid, block, 0, args)?;
         }
 

@@ -32,6 +32,8 @@
 //!   prefix sums (S, SS) across rows; not implemented in this pass to keep scope minimal.
 //! - Streaming: O(1) per-bar kernel integrated. Uses counter-based ATR seeding, branch ring-wraps,
 //!   precomputed reciprocals, and a single-sqrt std-ratio; matches scalar outputs.
+//! - CUDA/Python: CUDA wrappers return VRAM-backed handles with CAI v3 and DLPack v1.x; outputs are
+//!   kept bit-compatible with the scalar path (tests unchanged).
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -46,8 +48,6 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
 
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -275,6 +275,8 @@ impl DamianiVolatmeterBuilder {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum DamianiVolatmeterError {
+    #[error("damiani_volatmeter: empty input data")]
+    EmptyInputData,
     #[error("damiani_volatmeter: All values are NaN.")]
     AllValuesNaN,
     #[error("damiani_volatmeter: Invalid period: data length = {data_len}, vis_atr = {vis_atr}, vis_std = {vis_std}, sed_atr = {sed_atr}, sed_std = {sed_std}")]
@@ -287,10 +289,16 @@ pub enum DamianiVolatmeterError {
     },
     #[error("damiani_volatmeter: Not enough valid data after first non-NaN index. needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("damiani_volatmeter: output length mismatch. expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("damiani_volatmeter: invalid range: start={start} end={end} step={step}")]
+    InvalidRange { start: i64, end: i64, step: i64 },
     #[error("damiani_volatmeter: Empty data provided.")]
     EmptyData,
     #[error("damiani_volatmeter: Non-batch kernel '{kernel:?}' cannot be used with batch API. Use one of: Auto, Scalar, Avx2Batch, Avx512Batch.")]
     NonBatchKernel { kernel: Kernel },
+    #[error("damiani_volatmeter: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -449,14 +457,11 @@ pub fn damiani_volatmeter_into_slice(
     let len = close.len();
 
     // Validate destination slices have correct length
-    if vol_dst.len() != len || anti_dst.len() != len {
-        return Err(DamianiVolatmeterError::InvalidPeriod {
-            data_len: len,
-            vis_atr: vol_dst.len(),
-            vis_std: anti_dst.len(),
-            sed_atr: 0,
-            sed_std: 0,
-        });
+    if vol_dst.len() != len {
+        return Err(DamianiVolatmeterError::OutputLengthMismatch { expected: len, got: vol_dst.len() });
+    }
+    if anti_dst.len() != len {
+        return Err(DamianiVolatmeterError::OutputLengthMismatch { expected: len, got: anti_dst.len() });
     }
 
     unsafe {
@@ -729,7 +734,7 @@ pub fn damiani_volatmeter_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        other => return Err(DamianiVolatmeterError::NonBatchKernel { kernel: other }),
+        other => return Err(DamianiVolatmeterError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -857,33 +862,68 @@ pub fn damiani_volatmeter_batch_par_slice(
 ) -> Result<DamianiVolatmeterBatchOutput, DamianiVolatmeterError> {
     damiani_volatmeter_batch_inner(data, sweep, kern, true)
 }
-fn expand_grid(r: &DamianiVolatmeterBatchRange) -> Vec<DamianiVolatmeterParams> {
-    fn axis_usize((s, e, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &DamianiVolatmeterBatchRange) -> Result<Vec<DamianiVolatmeterParams>, DamianiVolatmeterError> {
+    fn axis_usize((s, e, step): (usize, usize, usize)) -> Result<Vec<usize>, DamianiVolatmeterError> {
         if step == 0 || s == e {
-            return vec![s];
+            return Ok(vec![s]);
         }
-        (s..=e).step_by(step).collect()
+        let mut out = Vec::new();
+        if s < e {
+            if step == 0 { return Ok(vec![s]); }
+            let mut x = s;
+            while x <= e {
+                out.push(x);
+                match x.checked_add(step) { Some(nx) => x = nx, None => break }
+            }
+        } else {
+            let mut x = s as i64;
+            let step_i = step as i64;
+            while x >= e as i64 {
+                out.push(x as usize);
+                x -= step_i;
+            }
+        }
+        if out.is_empty() { return Err(DamianiVolatmeterError::InvalidRange { start: s as i64, end: e as i64, step: step as i64 }); }
+        Ok(out)
     }
-    fn axis_f64((s, e, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (s - e).abs() < 1e-12 {
-            return vec![s];
+    fn axis_f64((s, e, step): (f64, f64, f64)) -> Result<Vec<f64>, DamianiVolatmeterError> {
+        if step == 0.0 || (s - e).abs() < 1e-12 {
+            return Ok(vec![s]);
         }
-        let mut v = Vec::new();
-        let mut x = s;
-        while x <= e + 1e-12 {
-            v.push(x);
-            x += step;
+        let mut out = Vec::new();
+        let eps = 1e-12;
+        if s < e {
+            if step <= 0.0 { return Err(DamianiVolatmeterError::InvalidRange { start: s as i64, end: e as i64, step: step as i64 }); }
+            let mut x = s;
+            while x <= e + eps {
+                out.push(x);
+                x += step;
+            }
+        } else {
+            if step <= 0.0 { return Err(DamianiVolatmeterError::InvalidRange { start: s as i64, end: e as i64, step: step as i64 }); }
+            let mut x = s;
+            while x >= e - eps {
+                out.push(x);
+                x -= step;
+            }
         }
-        v
+        if out.is_empty() { return Err(DamianiVolatmeterError::InvalidRange { start: s as i64, end: e as i64, step: step as i64 }); }
+        Ok(out)
     }
-    let vis_atrs = axis_usize(r.vis_atr);
-    let vis_stds = axis_usize(r.vis_std);
-    let sed_atrs = axis_usize(r.sed_atr);
-    let sed_stds = axis_usize(r.sed_std);
-    let thresholds = axis_f64(r.threshold);
-    let mut out = Vec::with_capacity(
-        vis_atrs.len() * vis_stds.len() * sed_atrs.len() * sed_stds.len() * thresholds.len(),
-    );
+
+    let vis_atrs = axis_usize(r.vis_atr)?;
+    let vis_stds = axis_usize(r.vis_std)?;
+    let sed_atrs = axis_usize(r.sed_atr)?;
+    let sed_stds = axis_usize(r.sed_std)?;
+    let thresholds = axis_f64(r.threshold)?;
+
+    let cap_mul = vis_atrs.len()
+        .checked_mul(vis_stds.len())
+        .and_then(|v| v.checked_mul(sed_atrs.len()))
+        .and_then(|v| v.checked_mul(sed_stds.len()))
+        .and_then(|v| v.checked_mul(thresholds.len()))
+        .ok_or(DamianiVolatmeterError::InvalidRange { start: 0, end: 0, step: 0 })?;
+    let mut out = Vec::with_capacity(cap_mul);
     for &va in &vis_atrs {
         for &vs in &vis_stds {
             for &sa in &sed_atrs {
@@ -901,7 +941,10 @@ fn expand_grid(r: &DamianiVolatmeterBatchRange) -> Vec<DamianiVolatmeterParams> 
             }
         }
     }
-    out
+    if out.is_empty() {
+        return Err(DamianiVolatmeterError::InvalidRange { start: 0, end: 0, step: 0 });
+    }
+    Ok(out)
 }
 #[inline(always)]
 fn damiani_volatmeter_batch_inner(
@@ -910,15 +953,9 @@ fn damiani_volatmeter_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<DamianiVolatmeterBatchOutput, DamianiVolatmeterError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(DamianiVolatmeterError::InvalidPeriod {
-            data_len: 0,
-            vis_atr: 0,
-            vis_std: 0,
-            sed_atr: 0,
-            sed_std: 0,
-        });
+        return Err(DamianiVolatmeterError::InvalidRange { start: 0, end: 0, step: 0 });
     }
     let first = data
         .iter()
@@ -947,6 +984,9 @@ fn damiani_volatmeter_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(DamianiVolatmeterError::InvalidRange { start: rows as i64, end: cols as i64, step: 0 })?;
 
     // Allocate uninitialized matrices
     let mut vol_mu = make_uninit_matrix(rows, cols);
@@ -1113,15 +1153,9 @@ fn damiani_volatmeter_batch_inner_into(
     vol_out: &mut [f64],
     anti_out: &mut [f64],
 ) -> Result<Vec<DamianiVolatmeterParams>, DamianiVolatmeterError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(DamianiVolatmeterError::InvalidPeriod {
-            data_len: 0,
-            vis_atr: 0,
-            vis_std: 0,
-            sed_atr: 0,
-            sed_std: 0,
-        });
+        return Err(DamianiVolatmeterError::InvalidRange { start: 0, end: 0, step: 0 });
     }
     let first = data
         .iter()
@@ -1148,17 +1182,16 @@ fn damiani_volatmeter_batch_inner_into(
     }
     let rows = combos.len();
     let cols = data.len();
-    let total_size = rows * cols;
+    let total_size = rows
+        .checked_mul(cols)
+        .ok_or(DamianiVolatmeterError::InvalidRange { start: rows as i64, end: cols as i64, step: 0 })?;
 
     // Ensure output slices have the correct size
-    if vol_out.len() != total_size || anti_out.len() != total_size {
-        return Err(DamianiVolatmeterError::InvalidPeriod {
-            data_len: data.len(),
-            vis_atr: 0,
-            vis_std: 0,
-            sed_atr: 0,
-            sed_std: 0,
-        });
+    if vol_out.len() != total_size {
+        return Err(DamianiVolatmeterError::OutputLengthMismatch { expected: total_size, got: vol_out.len() });
+    }
+    if anti_out.len() != total_size {
+        return Err(DamianiVolatmeterError::OutputLengthMismatch { expected: total_size, got: anti_out.len() });
     }
 
     let do_row = |row: usize, out_vol: &mut [f64], out_anti: &mut [f64]| {
@@ -3524,13 +3557,16 @@ pub fn damiani_batch_py<'py>(
     };
 
     // Compute combos first
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
     // Allocate NumPy arrays
-    let vol_np = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let anti_np = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let vol_np = unsafe { PyArray1::<f64>::new(py, [expected], false) };
+    let anti_np = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let vol_sl = unsafe { vol_np.as_slice_mut()? };
     let anti_sl = unsafe { anti_np.as_slice_mut()? };
 
@@ -3601,6 +3637,224 @@ pub fn damiani_batch_py<'py>(
 
 // ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32DamianiPy {
+    pub(crate) inner: crate::cuda::damiani_volatmeter_wrapper::DeviceArrayF32Damiani,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32DamianiPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producing CUDA stream is synchronized before return
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA per DLPack
+        (2, self.inner.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        let _ = dl_device;
+        let _ = copy;
+
+        // Producer synchronizes its CUDA stream before returning; reject stream==0 per Array API.
+        if let Some(obj) = &stream {
+            if let Ok(i) = obj.extract::<i64>(py) {
+                if i == 0 {
+                    return Err(PyValueError::new_err(
+                        "__dlpack__: stream 0 is disallowed for CUDA",
+                    ));
+                }
+            }
+        }
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLPackVersion { major: u32, minor: u32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: std::sync::Arc<cust::context::Context>,
+        }
+
+        extern "C" fn legacy_managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() { return; }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+        extern "C" fn versioned_managed_deleter(p: *mut DLManagedTensorVersioned) {
+            unsafe {
+                if p.is_null() { return; }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        // Capsule destructors honor rename-to-"used_*" per DLPack Python protocol.
+        unsafe extern "C" fn legacy_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const _,
+            ) as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter { del(ptr); }
+                let used = b"used_dltensor\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+        unsafe extern "C" fn versioned_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const _,
+            ) as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter { del(ptr); }
+                let used = b"used_dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        let rows = self.inner.rows as i64;
+        let cols = self.inner.cols as i64;
+        let len = (rows as i128) * (cols as i128);
+        let data_ptr: *mut c_void = if len == 0 {
+            std::ptr::null_mut()
+        } else {
+            (self.inner.device_ptr() as usize) as *mut c_void
+        };
+
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1i64]); // strides are in elements for DLPack
+        let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _ctx: self.inner.ctx.clone() });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        let want_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        if want_versioned {
+            let mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 0 },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(versioned_managed_deleter),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+            });
+            let raw = Box::into_raw(mt) as *mut c_void;
+            let name = b"dltensor_versioned\0";
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    raw,
+                    name.as_ptr() as *const _,
+                    Some(versioned_capsule_destructor),
+                )
+            };
+            if cap.is_null() {
+                unsafe { versioned_managed_deleter(raw as *mut DLManagedTensorVersioned); }
+                return Err(PyValueError::new_err("failed to create DLPack v1.x capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(legacy_managed_deleter),
+            });
+            let raw = Box::into_raw(mt) as *mut c_void;
+            let name = b"dltensor\0";
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    raw,
+                    name.as_ptr() as *const _,
+                    Some(legacy_capsule_destructor),
+                )
+            };
+            if cap.is_null() {
+                unsafe { legacy_managed_deleter(raw as *mut DLManagedTensor); }
+                return Err(PyValueError::new_err("failed to create legacy DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "damiani_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, vis_atr_range, vis_std_range, sed_atr_range, sed_std_range, threshold_range, device_id=0))]
 pub fn damiani_cuda_batch_dev_py<'py>(
@@ -3612,7 +3866,7 @@ pub fn damiani_cuda_batch_dev_py<'py>(
     sed_std_range: (usize, usize, usize),
     threshold_range: (f64, f64, f64),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32DamianiPy> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -3634,7 +3888,7 @@ pub fn damiani_cuda_batch_dev_py<'py>(
         Ok::<_, pyo3::PyErr>(arr)
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32DamianiPy { inner })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3653,7 +3907,7 @@ pub fn damiani_cuda_many_series_one_param_dev_py<'py>(
     sed_std: usize,
     threshold: f64,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32DamianiPy> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -3661,6 +3915,12 @@ pub fn damiani_cuda_many_series_one_param_dev_py<'py>(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if h.len() != expected || l.len() != expected || c.len() != expected {
+        return Err(PyValueError::new_err("time-major input lengths mismatch"));
+    }
     let params = DamianiVolatmeterParams {
         vis_atr: Some(vis_atr),
         vis_std: Some(vis_std),
@@ -3674,7 +3934,7 @@ pub fn damiani_cuda_many_series_one_param_dev_py<'py>(
         cuda.damiani_volatmeter_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32DamianiPy { inner })
 }
 
 #[cfg(feature = "python")]
@@ -3894,7 +4154,7 @@ pub fn damiani_volatmeter_batch_into(
             threshold: (threshold_start, threshold_end, threshold_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 

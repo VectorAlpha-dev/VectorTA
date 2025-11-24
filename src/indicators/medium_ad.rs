@@ -14,6 +14,7 @@
 //!
 //! ## Developer Notes
 //! - SIMD enabled: AVX2/AVX512 accelerate copy/NaN-scan and |x−median|; selection remains scalar. Gains are period-dependent (>5% for larger windows).
+//! - Decision log: SIMD enabled (AVX2/AVX512) for scalar/batch paths with AVX512 currently routed to scalar for exactness; CUDA wrappers present for batch and many-series; Python interop exposes CUDA Array Interface v3 and DLPack v1.x with legacy fallback. Numerical outputs remain identical to the scalar CPU implementation.
 //! - Streaming: exact via order-statistics treap — O(log p) insert/remove; MAD computed exactly via full-scan median over |x−median| for now (matches batch); deterministic. Future work: O(log^2 p) MAD selection.
 //! - Zero-copy memory: uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batch operations.
 
@@ -160,14 +161,26 @@ impl MediumAdBuilder {
 
 #[derive(Debug, Error)]
 pub enum MediumAdError {
+    #[error("medium_ad: Empty input data slice.")]
+    EmptyInputData,
+
     #[error("medium_ad: All values are NaN.")]
     AllValuesNaN,
-    #[error("medium_ad: Empty data provided for MEDIUM_AD.")]
-    EmptyData,
+
     #[error("medium_ad: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
+
     #[error("medium_ad: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+
+    #[error("medium_ad: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("medium_ad: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+
+    #[error("medium_ad: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -185,7 +198,7 @@ pub fn medium_ad_with_kernel(
     };
 
     if data.is_empty() {
-        return Err(MediumAdError::EmptyData);
+        return Err(MediumAdError::EmptyInputData);
     }
 
     let first = data
@@ -255,7 +268,7 @@ pub fn medium_ad_into(input: &MediumAdInput, out: &mut [f64]) -> Result<(), Medi
 
     let len = data.len();
     if len == 0 {
-        return Err(MediumAdError::EmptyData);
+        return Err(MediumAdError::EmptyInputData);
     }
 
     // Find first non-NaN and validate
@@ -276,10 +289,9 @@ pub fn medium_ad_into(input: &MediumAdInput, out: &mut [f64]) -> Result<(), Medi
     }
 
     if out.len() != len {
-        // Reuse module's existing length-style error (matches into_slice behavior)
-        return Err(MediumAdError::InvalidPeriod {
-            period: out.len(),
-            data_len: len,
+        return Err(MediumAdError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
         });
     }
 
@@ -662,12 +674,7 @@ pub fn medium_ad_batch_with_kernel(
             }
         }
         other if other.is_batch() => other,
-        _ => {
-            return Err(MediumAdError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(MediumAdError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -758,29 +765,60 @@ impl MediumAdBatchOutput {
     }
 
     pub fn values_for(&self, p: &MediumAdParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| {
-            let start = row * self.cols;
-            &self.values[start..start + self.cols]
+        self.row_for_params(p).and_then(|row| {
+            let start = row.checked_mul(self.cols)?;
+            let end = start.checked_add(self.cols)?;
+            self.values.get(start..end)
         })
     }
 }
 
 #[inline(always)]
-fn expand_grid(r: &MediumAdBatchRange) -> Vec<MediumAdParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &MediumAdBatchRange) -> Result<Vec<MediumAdParams>, MediumAdError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, MediumAdError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
+        }
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x = x.saturating_sub(st);
+            if x < 0 {
+                break;
+            }
+        }
+        if v.is_empty() {
+            return Err(MediumAdError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
 
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
+    if periods.is_empty() {
+        return Err(MediumAdError::InvalidRange {
+            start: r.period.0.to_string(),
+            end: r.period.1.to_string(),
+            step: r.period.2.to_string(),
+        });
+    }
 
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(MediumAdParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -808,13 +846,7 @@ fn medium_ad_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<MediumAdBatchOutput, MediumAdError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(MediumAdError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let cols = data.len();
     if cols == 0 {
@@ -836,6 +868,13 @@ fn medium_ad_batch_inner(
     let rows = combos.len();
 
     // rows×cols uninit matrix + warm prefixes
+    let _total_elems = rows
+        .checked_mul(cols)
+        .ok_or(MediumAdError::InvalidRange {
+            start: sweep.period.0.to_string(),
+            end: sweep.period.1.to_string(),
+            step: sweep.period.2.to_string(),
+        })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos
         .iter()
@@ -912,13 +951,7 @@ fn medium_ad_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<MediumAdParams>, MediumAdError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(MediumAdError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -934,10 +967,28 @@ fn medium_ad_batch_inner_into(
 
     let cols = data.len();
 
+    let _total_elems = combos
+        .len()
+        .checked_mul(cols)
+        .ok_or(MediumAdError::InvalidRange {
+            start: sweep.period.0.to_string(),
+            end: sweep.period.1.to_string(),
+            step: sweep.period.2.to_string(),
+        })?;
+
     // Initialize warmup periods with NaN for each row
     for (row, combo) in combos.iter().enumerate() {
         let warmup = first + combo.period.unwrap() - 1;
-        let row_start = row * cols;
+        let row_start = match row.checked_mul(cols) {
+            Some(v) => v,
+            None => {
+                return Err(MediumAdError::InvalidRange {
+                    start: sweep.period.0.to_string(),
+                    end: sweep.period.1.to_string(),
+                    step: sweep.period.2.to_string(),
+                })
+            }
+        };
         for i in 0..warmup.min(cols) {
             out[row_start + i] = f64::NAN;
         }
@@ -2137,7 +2188,7 @@ mod tests {
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyBufferError, PyValueError};
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
@@ -2210,11 +2261,14 @@ pub fn medium_ad_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("medium_ad: batch output size overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
@@ -2251,7 +2305,315 @@ pub fn medium_ad_batch_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::medium_ad_wrapper::CudaMediumAd;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct MediumAdDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    ctx: Arc<Context>,
+    device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl MediumAdDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = &self.inner;
+        let d = PyDict::new(py);
+        // shape: (rows, cols)
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        // typestr: little-endian float32
+        d.set_item("typestr", "<f4")?;
+        // Explicit strides for row-major FP32: (row stride in bytes, item stride in bytes)
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr_val = if inner.rows == 0 || inner.cols == 0 {
+            0usize
+        } else {
+            inner.device_ptr() as usize
+        };
+        d.set_item("data", (ptr_val, false))?;
+        // Stream is omitted because producing kernels synchronize before returning
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        Ok((2, self.device_id as i32))
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+        use std::os::raw::c_char;
+
+        // Stream semantics: producer is synchronized; only reject explicitly
+        // disallowed stream==0 per Array API spec.
+        if let Some(obj) = &stream {
+            if let Ok(i) = obj.extract::<i64>(py) {
+                if i == 0 {
+                    return Err(PyValueError::new_err(
+                        "__dlpack__: stream 0 is disallowed for CUDA",
+                    ));
+                }
+            }
+        }
+
+        // Device / copy negotiation (no cross-device copies supported here).
+        if let Some((dev_type, dev_id)) = dl_device {
+            if dev_type != 2 || dev_id != self.device_id as i32 {
+                return Err(PyBufferError::new_err(
+                    "__dlpack__: requested device does not match allocation device",
+                ));
+            }
+        }
+        if matches!(copy, Some(true)) {
+            return Err(PyBufferError::new_err(
+                "__dlpack__: copy semantics are not supported for medium_ad",
+            ));
+        }
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLPackVersion {
+            major: u32,
+            minor: u32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: Arc<Context>,
+            _arr: DeviceArrayF32,
+        }
+
+        extern "C" fn legacy_managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn versioned_managed_deleter(p: *mut DLManagedTensorVersioned) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        // Capsule destructors honour rename-to-"used_*" per DLPack Python protocol.
+        unsafe extern "C" fn legacy_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let used = b"used_dltensor\0";
+            if pyo3::ffi::PyCapsule_IsValid(capsule, used.as_ptr() as *const c_char) == 1 {
+                return;
+            }
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+            }
+        }
+
+        unsafe extern "C" fn versioned_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let used = b"used_dltensor_versioned\0";
+            if pyo3::ffi::PyCapsule_IsValid(capsule, used.as_ptr() as *const c_char) == 1 {
+                return;
+            }
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+            }
+        }
+
+        // Move VRAM handle into guard so the DLManagedTensor owns the buffer.
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let len = (rows as i128) * (cols as i128);
+        let data_ptr: *mut c_void = if len == 0 {
+            std::ptr::null_mut()
+        } else {
+            inner.device_ptr() as usize as *mut c_void
+        };
+
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1i64]); // strides are in elements
+        let guard = Box::new(DlpGuard {
+            _shape: shape,
+            _strides: strides,
+            _ctx: self.ctx.clone(),
+            _arr: inner,
+        });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        let wants_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        if wants_versioned {
+            let mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 0 },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(versioned_managed_deleter),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+            });
+            let raw = Box::into_raw(mt) as *mut c_void;
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    raw,
+                    name.as_ptr() as *const c_char,
+                    Some(versioned_capsule_destructor),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { versioned_managed_deleter(raw as *mut DLManagedTensorVersioned) };
+                return Err(PyValueError::new_err(
+                    "failed to create DLPack v1.x capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(legacy_managed_deleter),
+            });
+            let raw = Box::into_raw(mt) as *mut c_void;
+            let name = b"dltensor\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    raw,
+                    name.as_ptr() as *const c_char,
+                    Some(legacy_capsule_destructor),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { legacy_managed_deleter(raw as *mut DLManagedTensor) };
+                return Err(PyValueError::new_err(
+                    "failed to create legacy DLPack capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "medium_ad_cuda_batch_dev")]
@@ -2261,7 +2623,7 @@ pub fn medium_ad_cuda_batch_dev_py(
     data_f32: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<MediumAdDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2270,13 +2632,21 @@ pub fn medium_ad_cuda_batch_dev_py(
     let sweep = MediumAdBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.medium_ad_batch_dev(slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .medium_ad_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(MediumAdDeviceArrayF32Py {
+        inner,
+        ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2289,19 +2659,27 @@ pub fn medium_ad_cuda_many_series_one_param_dev_py(
     rows: usize,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<MediumAdDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = data_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.medium_ad_many_series_one_param_time_major_dev(slice, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .medium_ad_many_series_one_param_time_major_dev(slice, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(MediumAdDeviceArrayF32Py {
+        inner,
+        ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(feature = "wasm")]
@@ -2329,9 +2707,9 @@ pub fn medium_ad_into_slice(
     }
 
     if dst.len() != data.len() {
-        return Err(MediumAdError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(MediumAdError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -2499,11 +2877,21 @@ pub fn medium_ad_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = match rows.checked_mul(cols) {
+            Some(v) => v,
+            None => {
+                return Err(JsValue::from_str(
+                    "medium_ad_batch_into: rows*cols overflow in output size",
+                ))
+            }
+        };
+
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         medium_ad_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

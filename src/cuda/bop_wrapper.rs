@@ -14,28 +14,33 @@ use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
-use cust::module::{Module, ModuleJitOption};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CudaBopError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaBopError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaBopError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaBopError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaBopError {}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CudaBopPolicy {
@@ -55,7 +60,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaBop {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaBopPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -71,52 +77,58 @@ impl CudaBop {
         src: &[f32],
     ) -> Result<(DeviceBuffer<f32>, Option<LockedBuffer<f32>>), CudaBopError> {
         const ASYNC_PIN_THRESHOLD_BYTES: usize = 1 << 20; // 1 MiB
-        let bytes = src.len() * std::mem::size_of::<f32>();
+        let bytes = src
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?;
         if bytes >= ASYNC_PIN_THRESHOLD_BYTES {
-            let h_locked =
-                LockedBuffer::from_slice(src).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+            let h_locked = LockedBuffer::from_slice(src).map_err(CudaBopError::Cuda)?;
             let mut d = unsafe {
                 DeviceBuffer::uninitialized_async(src.len(), &self.stream)
-                    .map_err(|e| CudaBopError::Cuda(e.to_string()))?
+                    .map_err(CudaBopError::Cuda)?
             };
             unsafe {
-                d.async_copy_from(&h_locked, &self.stream)
-                    .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+                d.async_copy_from(&h_locked, &self.stream).map_err(CudaBopError::Cuda)?;
             }
             Ok((d, Some(h_locked)))
         } else {
             DeviceBuffer::from_slice(src)
                 .map(|d| (d, None))
-                .map_err(|e| CudaBopError::Cuda(e.to_string()))
+                .map_err(CudaBopError::Cuda)
         }
     }
     pub fn new(device_id: usize) -> Result<Self, CudaBopError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         // SM count for light grid clamping
         let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaBopError::Cuda(e.to_string()))? as u32;
+            .get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/bop_kernel.ptx"));
-        // Keep target-from-context; default JIT OptLevel is O4 (max optimised)
-        let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+        // Target from current context, moderate JIT opt for stability
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
+            }
+        };
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaBopPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -125,6 +137,21 @@ impl CudaBop {
             sm_count,
         })
     }
+
+    #[inline]
+    fn will_fit(required: usize, headroom: usize) -> Result<bool, CudaBopError> {
+        let total = required
+            .checked_add(headroom)
+            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?;
+        if let Ok((free, _)) = mem_get_info() {
+            Ok(total <= free)
+        } else {
+            Ok(true)
+        }
+    }
+
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     #[inline]
     pub fn set_policy(&mut self, p: CudaBopPolicy) {
@@ -140,15 +167,19 @@ impl CudaBop {
         close: &[f32],
     ) -> Result<DeviceArrayF32, CudaBopError> {
         let (first_valid, len) = Self::validate_ohlc_slices(open, high, low, close)?;
-
         // VRAM estimate and check (best-effort)
-        if let Ok((free, _)) = mem_get_info() {
-            let bytes = (5 * len) * std::mem::size_of::<f32>(); // 4 inputs + 1 output
-            let headroom = 64usize * 1024 * 1024;
-            if bytes.saturating_add(headroom) > free {
-                return Err(CudaBopError::InvalidInput(
-                    "estimated device memory exceeds free VRAM".into(),
-                ));
+        let elems = 5usize
+            .checked_mul(len)
+            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?; // 4 inputs + 1 output
+        let bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?;
+        let headroom = 64usize * 1024 * 1024;
+        if !Self::will_fit(bytes, headroom)? {
+            if let Ok((free, _)) = mem_get_info() {
+                return Err(CudaBopError::OutOfMemory { required: bytes, free, headroom });
+            } else {
+                return Err(CudaBopError::InvalidInput("insufficient device memory".into()));
             }
         }
 
@@ -158,8 +189,7 @@ impl CudaBop {
         let (d_low,  p2) = self.copy_h2d_maybe_async_f32(low)?;   if let Some(h) = p2 { _pinned_guards.push(h); }
         let (d_close,p3) = self.copy_h2d_maybe_async_f32(close)?; if let Some(h) = p3 { _pinned_guards.push(h); }
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }
-                .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }.map_err(CudaBopError::Cuda)?;
 
         self.launch_batch(
             &d_open,
@@ -199,7 +229,7 @@ impl CudaBop {
         let func = self
             .module
             .get_function("bop_batch_f32")
-            .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaBopError::MissingKernelSymbol { name: "bop_batch_f32" })?;
 
         let block_x = self.policy.batch_block_x.unwrap_or(256);
         // Match kernel ILP (4 items per thread) to size grid tightly.
@@ -208,6 +238,10 @@ impl CudaBop {
         // Clamp grid to a conservative multiple of SMs to avoid oversubscription on huge inputs
         let max_grid = (self.sm_count.max(1)) * 32;
         let grid_x = work.min(max_grid).max(1);
+        let max_threads_per_block = Device::get_device(self.device_id)?.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        if block_x > max_threads_per_block {
+            return Err(CudaBopError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -230,16 +264,14 @@ impl CudaBop {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+                .map_err(CudaBopError::Cuda)?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaBop)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaBopError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaBopError::Cuda)
     }
 
     // ---------- Many-series × one-param (time-major) ----------
@@ -287,14 +319,29 @@ impl CudaBop {
         }
 
         // VRAM estimate and check (best-effort)
-        if let Ok((free, _)) = mem_get_info() {
-            let n = expected;
-            let bytes = (5 * n) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>();
-            let headroom = 64usize * 1024 * 1024;
-            if bytes.saturating_add(headroom) > free {
-                return Err(CudaBopError::InvalidInput(
-                    "estimated device memory exceeds free VRAM".into(),
-                ));
+        let n = expected;
+        let in_elems = 4usize
+            .checked_mul(n)
+            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?;
+        let in_bytes = in_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?;
+        let out_bytes = n
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?;
+        let bytes = in_bytes
+            .checked_add(out_bytes)
+            .and_then(|b| b.checked_add(first_bytes))
+            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?;
+        let headroom = 64usize * 1024 * 1024;
+        if !Self::will_fit(bytes, headroom)? {
+            if let Ok((free, _)) = mem_get_info() {
+                return Err(CudaBopError::OutOfMemory { required: bytes, free, headroom });
+            } else {
+                return Err(CudaBopError::InvalidInput("insufficient device memory".into()));
             }
         }
 
@@ -303,11 +350,9 @@ impl CudaBop {
         let (d_high,  p1) = self.copy_h2d_maybe_async_f32(high_tm)?;  if let Some(h) = p1 { _pinned_guards.push(h); }
         let (d_low,   p2) = self.copy_h2d_maybe_async_f32(low_tm)?;   if let Some(h) = p2 { _pinned_guards.push(h); }
         let (d_close, p3) = self.copy_h2d_maybe_async_f32(close_tm)?; if let Some(h) = p3 { _pinned_guards.push(h); }
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(CudaBopError::Cuda)?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(expected, &self.stream) }
-                .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(expected, &self.stream) }.map_err(CudaBopError::Cuda)?;
 
         self.launch_many_series(
             &d_open, &d_high, &d_low, &d_close, &d_first, cols, rows, &mut d_out,
@@ -336,9 +381,13 @@ impl CudaBop {
         let func = self
             .module
             .get_function("bop_many_series_one_param_f32")
-            .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaBopError::MissingKernelSymbol { name: "bop_many_series_one_param_f32" })?;
         let block_x = self.policy.many_block_x.unwrap_or(256);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let max_threads_per_block = Device::get_device(self.device_id)?.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        if block_x > max_threads_per_block {
+            return Err(CudaBopError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
@@ -362,16 +411,14 @@ impl CudaBop {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+                .map_err(CudaBopError::Cuda)?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaBop)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
         self.maybe_log_many_debug();
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaBopError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaBopError::Cuda)
     }
 
     fn maybe_log_batch_debug(&self) {

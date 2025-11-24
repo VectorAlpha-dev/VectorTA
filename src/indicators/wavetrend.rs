@@ -20,15 +20,16 @@
 //! ## Developer Notes
 //! - **SIMD status (single-series)**: SIMD underperforms scalar due to sequential EMA dependencies. Runtime selection short-circuits AVX2/AVX512 to the scalar fast path to preserve best performance. SIMD code remains for future evolution.
 //! - **SIMD status (batch)**: SIMD-across-rows currently disabled by default (short-circuited to scalar batch) because it underperforms for typical grids; revisit with shared-stage execution if needed.
+//! - **CUDA status**: FP32 CUDA kernels are enabled for one-series × many-params and many-series × one-param. VRAM handles are exposed to Python with CUDA Array Interface v3 and DLPack v1.x; context lifetime is managed via primary-context RAII and wrapper-owned context guards so frees occur on a valid device context.
 //! - **Streaming update**: O(1) and mirrors batch semantics by inserting one value per bar into the WT2 SMA window (finite or NaN) and emitting only when the last `ma_length` positions are all finite.
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - **Note**: Streaming implementation maintains separate state for each calculation stage
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::wavetrend::CudaWavetrend;
+use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::wavetrend::CudaWavetrend;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 #[cfg(feature = "python")]
@@ -240,6 +241,8 @@ impl WavetrendBuilder {
 #[derive(Debug, Error)]
 pub enum WavetrendError {
     #[error("wavetrend: Empty data provided.")]
+    EmptyInputData,
+    #[error("wavetrend: Empty data provided.")]
     EmptyData,
     #[error("wavetrend: All values are NaN.")]
     AllValuesNaN,
@@ -257,8 +260,14 @@ pub enum WavetrendError {
     InvalidMaLen { ma_length: usize, data_len: usize },
     #[error("wavetrend: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("wavetrend: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
     #[error("wavetrend: Output slice length mismatch: expected = {expected}, got = {got}")]
     OutputSliceLengthMismatch { expected: usize, got: usize },
+    #[error("wavetrend: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("wavetrend: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
     #[error("wavetrend: EMA error {0}")]
     EmaError(#[from] EmaError),
     #[error("wavetrend: SMA error {0}")]
@@ -276,7 +285,7 @@ pub fn wavetrend_with_kernel(
 ) -> Result<WavetrendOutput, WavetrendError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
-        return Err(WavetrendError::EmptyData);
+        return Err(WavetrendError::EmptyInputData);
     }
     let channel_len = input.get_channel_length();
     let average_len = input.get_average_length();
@@ -614,7 +623,7 @@ fn wavetrend_prepare<'a>(
 ) -> Result<(&'a [f64], usize, usize, usize, f64, usize, usize), WavetrendError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
-        return Err(WavetrendError::EmptyData);
+        return Err(WavetrendError::EmptyInputData);
     }
 
     let first = data
@@ -1208,19 +1217,19 @@ pub fn wavetrend_into_slice(
 
     // Validate output slice lengths
     if dst_wt1.len() != data.len() {
-        return Err(WavetrendError::OutputSliceLengthMismatch {
+        return Err(WavetrendError::OutputLengthMismatch {
             expected: data.len(),
             got: dst_wt1.len(),
         });
     }
     if dst_wt2.len() != data.len() {
-        return Err(WavetrendError::OutputSliceLengthMismatch {
+        return Err(WavetrendError::OutputLengthMismatch {
             expected: data.len(),
             got: dst_wt2.len(),
         });
     }
     if dst_wt_diff.len() != data.len() {
-        return Err(WavetrendError::OutputSliceLengthMismatch {
+        return Err(WavetrendError::OutputLengthMismatch {
             expected: data.len(),
             got: dst_wt_diff.len(),
         });
@@ -1466,6 +1475,318 @@ fn fast_abs_f64(x: f64) -> f64 {
     f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
 }
 
+// ---------------- CUDA Python VRAM handle (CAI v3 + DLPack v1.x) ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "WavetrendDeviceArrayF32", unsendable)]
+pub struct WavetrendDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl WavetrendDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Producer kernels synchronize before returning, so no stream key is required.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (_stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        mut slf: pyo3::PyRefMut<'py, Self>,
+        py: Python<'py>,
+        _stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi;
+        use std::ffi::{CStr, CString};
+        use std::os::raw::{c_char, c_void};
+        use std::ptr::null_mut;
+
+        if let Some((dev_type, dev_id)) = dl_device {
+            if dev_type != 2 || dev_id != slf.device_id as i32 {
+                return Err(PyValueError::new_err(
+                    "dl_device mismatch for Wavetrend buffer",
+                ));
+            }
+        }
+        if matches!(copy, Some(true)) {
+            return Err(PyValueError::new_err(
+                "copy=True not supported for Wavetrend DLPack export",
+            ));
+        }
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLPackVersion {
+            major: u32,
+            minor: u32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+
+        struct HolderV0 {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32,
+            _ctx: Arc<Context>,
+            device_id: u32,
+        }
+
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32,
+            _ctx: Arc<Context>,
+            device_id: u32,
+        }
+
+        extern "C" fn deleter_v0(mt: *mut DLManagedTensor) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut HolderV0;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        extern "C" fn deleter_v1(mt: *mut DLManagedTensorVersioned) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut HolderV1;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut ffi::PyObject) {
+            if capsule.is_null() {
+                return;
+            }
+            let name_ptr = ffi::PyCapsule_GetName(capsule);
+            if name_ptr.is_null() {
+                return;
+            }
+            let name = CStr::from_ptr(name_ptr);
+            let (symbol, versioned) = if name.to_bytes() == b"dltensor_versioned" {
+                (b"dltensor_versioned\0".as_ptr() as *const c_char, true)
+            } else if name.to_bytes() == b"dltensor" {
+                (b"dltensor\0".as_ptr() as *const c_char, false)
+            } else {
+                return;
+            };
+
+            let ptr = ffi::PyCapsule_GetPointer(capsule, symbol);
+            if ptr.is_null() {
+                return;
+            }
+            if versioned {
+                let mt = ptr as *mut DLManagedTensorVersioned;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+            } else {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+            }
+            ffi::PyCapsule_SetPointer(capsule, null_mut());
+        }
+
+        let wants_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+
+        // Move VRAM handle into the holder to avoid double free on drop.
+        let dummy = cust::memory::DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut slf.inner,
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
+
+        let data_ptr = if inner.rows == 0 || inner.cols == 0 {
+            std::ptr::null_mut()
+        } else {
+            inner.buf.as_device_ptr().as_raw() as *mut c_void
+        };
+
+        if wants_versioned {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    version: DLPackVersion { major: 1, minor: 0 },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_v1),
+                    flags: 0,
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: slf.device_id as i32,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                },
+                shape: [inner.rows as i64, inner.cols as i64],
+                strides: [inner.cols as i64, 1],
+                arr: inner,
+                _ctx: slf._ctx.clone(),
+                device_id: slf.device_id,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            holder.managed.manager_ctx =
+                &mut *holder as *mut HolderV1 as *mut c_void;
+            let _ = Box::into_raw(holder);
+
+            let name = CString::new("dltensor_versioned").unwrap();
+            let capsule = unsafe {
+                ffi::PyCapsule_New(
+                    mt_ptr as *mut c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { deleter_v1(mt_ptr) };
+                return Err(PyValueError::new_err(
+                    "failed to create DLPack capsule (versioned)",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mut holder = Box::new(HolderV0 {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: slf.device_id as i32,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_v0),
+                },
+                shape: [inner.rows as i64, inner.cols as i64],
+                strides: [inner.cols as i64, 1],
+                arr: inner,
+                _ctx: slf._ctx.clone(),
+                device_id: slf.device_id,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            holder.managed.manager_ctx =
+                &mut *holder as *mut HolderV0 as *mut c_void;
+            let _ = Box::into_raw(holder);
+
+            let name = CString::new("dltensor").unwrap();
+            let capsule = unsafe {
+                ffi::PyCapsule_New(
+                    mt_ptr as *mut c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { deleter_v0(mt_ptr) };
+                return Err(PyValueError::new_err(
+                    "failed to create DLPack capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct WavetrendBatchRange {
     pub channel_length: (usize, usize, usize),
@@ -1567,10 +1888,7 @@ pub fn wavetrend_batch_with_kernel(
         Kernel::Avx2Batch | Kernel::Avx512Batch => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
-            return Err(WavetrendError::InvalidChannelLen {
-                channel_length: 0,
-                data_len: 0,
-            })
+            return Err(WavetrendError::InvalidKernelForBatch(k));
         }
     };
     let simd = match kernel {
@@ -1613,30 +1931,90 @@ impl WavetrendBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &WavetrendBatchRange) -> Vec<WavetrendParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &WavetrendBatchRange) -> Result<Vec<WavetrendParams>, WavetrendError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, WavetrendError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let st = step.max(1);
+            return Ok((start..=end).step_by(st).collect());
+        }
+        // reversed bounds
+        let st = step.max(1) as isize;
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(WavetrendError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, WavetrendError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(WavetrendError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
         }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
+        let st = step.abs();
+        while x + 1e-12 >= end {
             v.push(x);
-            x += step;
+            x -= st;
         }
-        v
+        if v.is_empty() {
+            return Err(WavetrendError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let chs = axis_usize(r.channel_length);
-    let avgs = axis_usize(r.average_length);
-    let mas = axis_usize(r.ma_length);
-    let factors = axis_f64(r.factor);
-    let mut out = Vec::with_capacity(chs.len() * avgs.len() * mas.len() * factors.len());
+
+    let chs = axis_usize(r.channel_length)?;
+    let avgs = axis_usize(r.average_length)?;
+    let mas = axis_usize(r.ma_length)?;
+    let factors = axis_f64(r.factor)?;
+
+    let cap = chs
+        .len()
+        .checked_mul(avgs.len())
+        .and_then(|x| x.checked_mul(mas.len()))
+        .and_then(|x| x.checked_mul(factors.len()))
+        .ok_or_else(|| WavetrendError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &c in &chs {
         for &a in &avgs {
             for &m in &mas {
@@ -1651,7 +2029,7 @@ fn expand_grid(r: &WavetrendBatchRange) -> Vec<WavetrendParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1678,11 +2056,12 @@ fn wavetrend_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<WavetrendBatchOutput, WavetrendError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(WavetrendError::InvalidChannelLen {
-            channel_length: 0,
-            data_len: 0,
+        return Err(WavetrendError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
         });
     }
     let first = data
@@ -1709,6 +2088,12 @@ fn wavetrend_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+
+    let _ = rows.checked_mul(cols).ok_or_else(|| WavetrendError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
 
     // Calculate warmup periods for each parameter combination
     let warmup_periods: Vec<usize> = combos
@@ -1864,11 +2249,12 @@ fn wavetrend_batch_inner_into(
     out_wt2: &mut [f64],
     out_wt_diff: &mut [f64],
 ) -> Result<Vec<WavetrendParams>, WavetrendError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(WavetrendError::InvalidChannelLen {
-            channel_length: 0,
-            data_len: 0,
+        return Err(WavetrendError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
         });
     }
     let first = data
@@ -1895,6 +2281,12 @@ fn wavetrend_batch_inner_into(
     }
     let rows = combos.len();
     let cols = data.len();
+
+    let _ = rows.checked_mul(cols).ok_or_else(|| WavetrendError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
 
     // Initialize NaN prefixes for each row based on warmup period
     // Since _batch_inner_into receives external buffers, we must manually initialize
@@ -3421,14 +3813,18 @@ pub fn wavetrend_batch_py<'py>(
         factor: factor_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
     // Allocate three arrays for the three outputs
-    let wt1_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let wt2_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let wt_diff_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow for wavetrend_batch"))?;
+    let wt1_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let wt2_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let wt_diff_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
 
     let slice_wt1 = unsafe { wt1_arr.as_slice_mut()? };
     let slice_wt2 = unsafe { wt2_arr.as_slice_mut()? };
@@ -3524,22 +3920,47 @@ pub fn wavetrend_cuda_batch_dev_py<'py>(
         factor: factor_range,
     };
 
-    let batch = py.allow_threads(|| {
+    let (batch, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaWavetrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.wavetrend_batch_dev(slice_in, &sweep)
+            .map(|b| (b, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let dict = PyDict::new(py);
-    dict.set_item("wt1", Py::new(py, DeviceArrayF32Py { inner: batch.wt1 })?)?;
-    dict.set_item("wt2", Py::new(py, DeviceArrayF32Py { inner: batch.wt2 })?)?;
+    dict.set_item(
+        "wt1",
+        Py::new(
+            py,
+            WavetrendDeviceArrayF32Py {
+                inner: batch.wt1,
+                _ctx: ctx.clone(),
+                device_id: dev_id,
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "wt2",
+        Py::new(
+            py,
+            WavetrendDeviceArrayF32Py {
+                inner: batch.wt2,
+                _ctx: ctx.clone(),
+                device_id: dev_id,
+            },
+        )?,
+    )?;
     dict.set_item(
         "wt_diff",
         Py::new(
             py,
-            DeviceArrayF32Py {
+            WavetrendDeviceArrayF32Py {
                 inner: batch.wt_diff,
+                _ctx: ctx,
+                device_id: dev_id,
             },
         )?,
     )?;
@@ -3616,17 +4037,50 @@ pub fn wavetrend_cuda_many_series_one_param_dev_py<'py>(
         factor: Some(factor),
     };
 
-    let (wt1, wt2, wt_diff) = py.allow_threads(|| {
+    let (wt1, wt2, wt_diff, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaWavetrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.wavetrend_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map(|(a, b, c)| (a, b, c, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let dict = PyDict::new(py);
-    dict.set_item("wt1", Py::new(py, DeviceArrayF32Py { inner: wt1 })?)?;
-    dict.set_item("wt2", Py::new(py, DeviceArrayF32Py { inner: wt2 })?)?;
-    dict.set_item("wt_diff", Py::new(py, DeviceArrayF32Py { inner: wt_diff })?)?;
+    dict.set_item(
+        "wt1",
+        Py::new(
+            py,
+            WavetrendDeviceArrayF32Py {
+                inner: wt1,
+                _ctx: ctx.clone(),
+                device_id: dev_id,
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "wt2",
+        Py::new(
+            py,
+            WavetrendDeviceArrayF32Py {
+                inner: wt2,
+                _ctx: ctx.clone(),
+                device_id: dev_id,
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "wt_diff",
+        Py::new(
+            py,
+            WavetrendDeviceArrayF32Py {
+                inner: wt_diff,
+                _ctx: ctx,
+                device_id: dev_id,
+            },
+        )?,
+    )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     dict.set_item("channel_length", channel_length)?;

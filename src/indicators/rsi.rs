@@ -20,6 +20,8 @@
 //! rectified deltas via prefix sums to avoid per-row recomputation.
 //! **Streaming**: O(1) - Exponential smoothing with state
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
+//! **CUDA/Python**: CUDA wrapper with typed errors + VRAM/launch checks; Python GPU handles reuse
+//! ALMA `DeviceArrayF32Py` for CAI v3 and DLPack v1.x without changing numerical outputs.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -187,10 +189,12 @@ pub enum RsiError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("rsi: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("rsi: Length mismatch: destination length = {dst}, source length = {src}")]
-    LengthMismatch { dst: usize, src: usize },
-    #[error("rsi: Unsupported kernel type for batch operation")]
-    UnsupportedKernel,
+    #[error("rsi: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("rsi: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("rsi: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -322,9 +326,9 @@ pub fn rsi_into_slice(dst: &mut [f64], input: &RsiInput, kern: Kernel) -> Result
     }
 
     if dst.len() != data.len() {
-        return Err(RsiError::LengthMismatch {
-            dst: dst.len(),
-            src: data.len(),
+        return Err(RsiError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -501,8 +505,13 @@ pub fn rsi_batch_with_kernel(
 ) -> Result<RsiBatchOutput, RsiError> {
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
-        other if other.is_batch() => other,
-        _ => return Err(RsiError::UnsupportedKernel),
+        other => {
+            if other.is_batch() {
+                other
+            } else {
+                return Err(RsiError::InvalidKernelForBatch(other));
+            }
+        }
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -535,19 +544,48 @@ impl RsiBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &RsiBatchRange) -> Vec<RsiParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &RsiBatchRange) -> Result<Vec<RsiParams>, RsiError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, RsiError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let mut out = Vec::new();
+        let mut v = lo;
+        loop {
+            out.push(v);
+            if v == hi {
+                break;
+            }
+            v = match v.checked_add(step) {
+                Some(next) => next,
+                None => {
+                    return Err(RsiError::InvalidRange {
+                        start,
+                        end,
+                        step,
+                    })
+                }
+            };
+            if v > hi {
+                break;
+            }
+        }
+        if out.is_empty() {
+            return Err(RsiError::InvalidRange {
+                start,
+                end,
+                step,
+            });
+        }
+        Ok(out)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(RsiParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -577,13 +615,7 @@ fn rsi_batch_inner(
     if data.is_empty() {
         return Err(RsiError::EmptyInputData);
     }
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(RsiError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -597,6 +629,13 @@ fn rsi_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    let _expected = rows
+        .checked_mul(cols)
+        .ok_or(RsiError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 1,
+        })?;
 
     // Use uninitialized memory for performance
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -757,13 +796,7 @@ pub fn rsi_batch_inner_into(
     if data.is_empty() {
         return Err(RsiError::EmptyInputData);
     }
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(RsiError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -778,10 +811,17 @@ pub fn rsi_batch_inner_into(
             valid: cols - first,
         });
     }
-    if out.len() != rows * cols {
-        return Err(RsiError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(RsiError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 1,
+        })?;
+    if out.len() != expected {
+        return Err(RsiError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
         });
     }
 
@@ -1693,32 +1733,32 @@ mod tests {
     fn check_rsi_error_variants(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Test LengthMismatch error
+        // Test OutputLengthMismatch error
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let mut dst = vec![0.0; 3]; // Wrong size
         let params = RsiParams { period: Some(2) };
         let input = RsiInput::from_slice(&data, params);
 
         match rsi_into_slice(&mut dst, &input, kernel) {
-            Err(RsiError::LengthMismatch { dst: 3, src: 5 }) => {
+            Err(RsiError::OutputLengthMismatch { expected: 5, got: 3 }) => {
                 // Expected error
             }
             other => panic!(
-                "[{}] Expected LengthMismatch error, got {:?}",
+                "[{}] Expected OutputLengthMismatch error, got {:?}",
                 test_name, other
             ),
         }
 
-        // Test UnsupportedKernel error for batch operations
+        // Test InvalidKernelForBatch error for batch operations
         let sweep = RsiBatchRange {
             period: (14, 14, 0),
         };
         match rsi_batch_with_kernel(&data, &sweep, Kernel::Scalar) {
-            Err(RsiError::UnsupportedKernel) => {
+            Err(RsiError::InvalidKernelForBatch(Kernel::Scalar)) => {
                 // Expected error
             }
             other => panic!(
-                "[{}] Expected UnsupportedKernel error, got {:?}",
+                "[{}] Expected InvalidKernelForBatch error, got {:?}",
                 test_name, other
             ),
         }
@@ -1990,11 +2030,15 @@ pub fn rsi_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow in rsi_batch_py"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py

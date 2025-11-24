@@ -17,33 +17,38 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::medium_ad::MediumAdBatchRange;
 use cust::context::{CacheConfig, Context};
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize, Function};
 use cust::launch;
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use std::error::Error;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
 const MEDIUM_AD_MAX_PERIOD: usize = 512; // must match kernels/cuda/medium_ad_kernel.cu
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaMediumAdError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Launch configuration too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device mismatch: buffer on {buf}, current device {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaMediumAdError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Cuda(e) => write!(f, "CUDA error: {}", e),
-            Self::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl Error for CudaMediumAdError {}
 
 #[derive(Clone, Debug)]
 struct MediumAdCombo {
@@ -53,29 +58,42 @@ struct MediumAdCombo {
 pub struct CudaMediumAd {
     module: Module,
     stream: Stream,
-    _ctx: Context,
+    context: Arc<Context>,
+    device_id: u32,
 }
 
 impl CudaMediumAd {
     pub fn new(device_id: usize) -> Result<Self, CudaMediumAdError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        let ctx = Context::new(device).map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/medium_ad_kernel.ptx"));
-        // DetermineTargetFromContext lets the driver JIT for the active GPU; default JIT level is O4.
-        let module = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _ctx: ctx,
+            context,
+            device_id: device_id as u32,
         })
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     #[inline]
@@ -87,25 +105,104 @@ impl CudaMediumAd {
     }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaMediumAdError> {
         if let Ok((free, _)) = mem_get_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaMediumAdError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
         }
+        Ok(())
     }
 
-    fn expand_grid(range: &MediumAdBatchRange) -> Vec<MediumAdCombo> {
-        let (start, end, step) = range.period;
-        let periods: Vec<usize> = if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect()
-        };
-        periods
+    fn expand_grid(range: &MediumAdBatchRange) -> Result<Vec<MediumAdCombo>, CudaMediumAdError> {
+        fn axis_usize(
+            (start, end, step): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaMediumAdError> {
+            if step == 0 || start == end {
+                return Ok(vec![start]);
+            }
+            if start < end {
+                return Ok((start..=end).step_by(step.max(1)).collect());
+            }
+            let mut v = Vec::new();
+            let mut x = start as isize;
+            let end_i = end as isize;
+            let st = (step as isize).max(1);
+            while x >= end_i {
+                v.push(x as usize);
+                x = x.saturating_sub(st);
+                if x < 0 {
+                    break;
+                }
+            }
+            if v.is_empty() {
+                return Err(CudaMediumAdError::InvalidInput(format!(
+                    "invalid period range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            Ok(v)
+        }
+
+        let periods = axis_usize(range.period)?;
+        if periods.is_empty() {
+            return Err(CudaMediumAdError::InvalidInput(format!(
+                "invalid period range: start={}, end={}, step={}",
+                range.period.0, range.period.1, range.period.2
+            )));
+        }
+
+        Ok(periods
             .into_iter()
             .map(|p| MediumAdCombo { period: p as i32 })
-            .collect()
+            .collect())
+    }
+
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaMediumAdError> {
+        let device = Device::get_device(self.device_id)?;
+        let max_threads = device
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)?
+            .max(1) as u32;
+        let max_grid_x = device
+            .get_attribute(DeviceAttribute::MaxGridDimX)?
+            .max(1) as u32;
+        let max_grid_y = device
+            .get_attribute(DeviceAttribute::MaxGridDimY)?
+            .max(1) as u32;
+        let max_grid_z = device
+            .get_attribute(DeviceAttribute::MaxGridDimZ)?
+            .max(1) as u32;
+
+        let threads_per_block = bx
+            .saturating_mul(by)
+            .saturating_mul(bz);
+        if threads_per_block > max_threads
+            || gx > max_grid_x
+            || gy > max_grid_y
+            || gz > max_grid_z
+        {
+            return Err(CudaMediumAdError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
     }
 
     fn prepare_batch_inputs(
@@ -120,15 +217,7 @@ impl CudaMediumAd {
             .iter()
             .position(|v| v.is_finite())
             .ok_or_else(|| CudaMediumAdError::InvalidInput("all NaN/INF".into()))?;
-        let combos = Self::expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaMediumAdError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-            return Err(CudaMediumAdError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = Self::expand_grid(sweep)?;
         for c in &combos {
             let p = c.period as usize;
             if p == 0 || p > len {
@@ -166,7 +255,9 @@ impl CudaMediumAd {
         let mut func = self
             .module
             .get_function("medium_ad_batch_f32")
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMediumAdError::MissingKernelSymbol {
+                name: "medium_ad_batch_f32",
+            })?;
 
         // Prefer L1 cache and pick launch size via occupancy
         let _ = func.set_cache_config(CacheConfig::PreferL1);
@@ -179,22 +270,47 @@ impl CudaMediumAd {
         let mut launched = 0usize;
         while launched < n_combos {
             let cur = (n_combos - launched).min(chunk_rows);
-            let grid: GridSize = (grid_x.max(1), cur as u32, 1).into();
+            let gx = grid_x.max(1);
+            let gy = cur as u32;
+            let gz = 1u32;
+            self.validate_launch(gx, gy, gz, block_x, 1, 1)?;
+            let grid: GridSize = (gx, gy, gz).into();
             let block: BlockSize = (block_x, 1, 1).into();
 
             unsafe {
                 let mut data_ptr = d_data.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut fv_i = first_valid as i32;
+                let periods_byte_offset = launched
+                    .checked_mul(std::mem::size_of::<i32>())
+                    .ok_or_else(|| {
+                        CudaMediumAdError::InvalidInput(
+                            "periods offset overflow in medium_ad batch kernel".into(),
+                        )
+                    })? as u64;
                 let mut periods_ptr = d_periods
                     .as_device_ptr()
                     .as_raw()
-                    .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
+                    .wrapping_add(periods_byte_offset);
                 let mut ncomb_i = cur as i32;
+                let out_elem_offset = launched
+                    .checked_mul(len)
+                    .ok_or_else(|| {
+                        CudaMediumAdError::InvalidInput(
+                            "output offset overflow in medium_ad batch kernel".into(),
+                        )
+                    })?;
+                let out_byte_offset = out_elem_offset
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| {
+                        CudaMediumAdError::InvalidInput(
+                            "output byte offset overflow in medium_ad batch kernel".into(),
+                        )
+                    })? as u64;
                 let mut out_ptr = d_out
                     .as_device_ptr()
                     .as_raw()
-                    .wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
+                    .wrapping_add(out_byte_offset);
 
                 let args: &mut [*mut c_void] = &mut [
                     &mut data_ptr as *mut _ as *mut c_void,
@@ -205,9 +321,7 @@ impl CudaMediumAd {
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
 
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
 
             launched += cur;
@@ -223,39 +337,45 @@ impl CudaMediumAd {
         first_valid: usize,
     ) -> Result<DeviceArrayF32, CudaMediumAdError> {
         let len = data_f32.len();
-        let out_bytes = combos.len() * len * std::mem::size_of::<f32>();
-        let in_bytes = len * std::mem::size_of::<f32>();
-        let will_fit = Self::will_fit(in_bytes + out_bytes, 64 << 20);
-        if !will_fit {
-            return Err(CudaMediumAdError::InvalidInput(
-                "insufficient VRAM for requested launch".into(),
-            ));
-        }
+        let elem_size = std::mem::size_of::<f32>();
+        let n_elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| {
+                CudaMediumAdError::InvalidInput("rows*cols overflow in medium_ad batch".into())
+            })?;
+        let out_bytes = n_elems
+            .checked_mul(elem_size)
+            .ok_or_else(|| {
+                CudaMediumAdError::InvalidInput("output bytes overflow in medium_ad batch".into())
+            })?;
+        let in_bytes = len
+            .checked_mul(elem_size)
+            .ok_or_else(|| {
+                CudaMediumAdError::InvalidInput("input bytes overflow in medium_ad batch".into())
+            })?;
+        let total_bytes = in_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| {
+                CudaMediumAdError::InvalidInput("total bytes overflow in medium_ad batch".into())
+            })?;
+        Self::will_fit(total_bytes, 64 << 20)?;
 
         // Prefer async copies
-        let h_data = LockedBuffer::from_slice(data_f32)
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        unsafe { d_data.async_copy_from(&h_data, &self.stream) }
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        let h_data = LockedBuffer::from_slice(data_f32)?;
+        let mut d_data =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
+        unsafe { d_data.async_copy_from(&h_data, &self.stream) }?;
 
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
         // Pinned host memory + async copy for the smaller params vector too
-        let h_periods = LockedBuffer::from_slice(&periods)
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        let mut d_periods = unsafe {
-            DeviceBuffer::<i32>::uninitialized_async(periods.len(), &self.stream)
-        }
-        .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        unsafe { d_periods.async_copy_from(&h_periods, &self.stream) }
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        let h_periods = LockedBuffer::from_slice(&periods)?;
+        let mut d_periods =
+            unsafe { DeviceBuffer::<i32>::uninitialized_async(periods.len(), &self.stream) }?;
+        unsafe { d_periods.async_copy_from(&h_periods, &self.stream) }?;
 
         let mut d_out =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(combos.len() * len, &self.stream) }
-                .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(n_elems, &self.stream) }?;
 
         self.launch_batch_kernel(
             &d_data,
@@ -265,17 +385,7 @@ impl CudaMediumAd {
             combos.len(),
             &mut d_out,
         )?;
-        self.launch_batch_kernel(
-            &d_data,
-            len,
-            first_valid,
-            &d_periods,
-            combos.len(),
-            &mut d_out,
-        )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -306,10 +416,14 @@ impl CudaMediumAd {
                 "series dimensions must be positive".into(),
             ));
         }
-        if data_tm_f32.len() != cols * rows {
+        if cols
+            .checked_mul(rows)
+            .map(|n| n != data_tm_f32.len())
+            .unwrap_or(true)
+        {
             return Err(CudaMediumAdError::InvalidInput(format!(
                 "data length mismatch: expected {}, got {}",
-                cols * rows,
+                cols.checked_mul(rows).unwrap_or(usize::MAX),
                 data_tm_f32.len()
             )));
         }
@@ -352,12 +466,18 @@ impl CudaMediumAd {
         let mut func = self
             .module
             .get_function("medium_ad_many_series_one_param_f32")
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMediumAdError::MissingKernelSymbol {
+                name: "medium_ad_many_series_one_param_f32",
+            })?;
 
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let block_x: u32 = Self::pick_block_x_from_occupancy(&func);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let gx = grid_x.max(1);
+        let gy = 1u32;
+        let gz = 1u32;
+        self.validate_launch(gx, gy, gz, block_x, 1, 1)?;
+        let grid: GridSize = (gx, gy, gz).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
@@ -375,9 +495,7 @@ impl CudaMediumAd {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -392,37 +510,47 @@ impl CudaMediumAd {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, period)?;
 
-        let elems = cols * rows;
-        let in_bytes = elems * std::mem::size_of::<f32>();
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| {
+                CudaMediumAdError::InvalidInput(
+                    "cols*rows overflow in medium_ad many-series".into(),
+                )
+            })?;
+        let elem_size = std::mem::size_of::<f32>();
+        let in_bytes = elems
+            .checked_mul(elem_size)
+            .ok_or_else(|| {
+                CudaMediumAdError::InvalidInput(
+                    "input bytes overflow in medium_ad many-series".into(),
+                )
+            })?;
         let out_bytes = in_bytes;
-        if !Self::will_fit(in_bytes + out_bytes, 64 << 20) {
-            return Err(CudaMediumAdError::InvalidInput(
-                "insufficient VRAM for requested launch".into(),
-            ));
-        }
+        let total_bytes = in_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| {
+                CudaMediumAdError::InvalidInput(
+                    "total bytes overflow in medium_ad many-series".into(),
+                )
+            })?;
+        Self::will_fit(total_bytes, 64 << 20)?;
 
-        let h_prices = LockedBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        let h_first = LockedBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        let h_prices = LockedBuffer::from_slice(data_tm_f32)?;
+        let h_first = LockedBuffer::from_slice(&first_valids)?;
 
-        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        
-        unsafe { d_prices.async_copy_from(&h_prices, &self.stream) }
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        unsafe { d_first.async_copy_from(&h_first, &self.stream) }
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        let mut d_prices =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+        let mut d_first =
+            unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }?;
+        let mut d_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+
+        unsafe { d_prices.async_copy_from(&h_prices, &self.stream) }?;
+        unsafe { d_first.async_copy_from(&h_first, &self.stream) }?;
 
         self.launch_many_series_kernel(&d_prices, cols, rows, period, &d_first, &mut d_out)?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,

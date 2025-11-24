@@ -110,7 +110,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaEhlersITrend {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: std::sync::Arc<Context>,
     device_id: u32,
     policy: CudaEhlersITrendPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -140,7 +140,7 @@ impl CudaEhlersITrend {
     pub fn new(device_id: usize) -> Result<Self, CudaEhlersITrendError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = std::sync::Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_itrend_kernel.ptx"));
         let jit_opts = &[
@@ -164,7 +164,7 @@ impl CudaEhlersITrend {
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaEhlersITrendPolicy::default(),
             last_batch: None,
@@ -200,6 +200,9 @@ impl CudaEhlersITrend {
     pub fn synchronize(&self) -> Result<(), CudaEhlersITrendError> {
         self.stream.synchronize().map_err(Into::into)
     }
+
+    #[inline]
+    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
 
     // VRAM helpers
     #[inline]

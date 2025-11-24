@@ -197,7 +197,7 @@ pub use mfi_wrapper::{CudaMfi, CudaMfiError};
 pub use mom_wrapper::{CudaMom, CudaMomError};
 #[cfg(feature = "cuda")]
 pub use msw_wrapper::{CudaMsw, CudaMswError};
-pub use ppo_wrapper::{CudaPpo, CudaPpoError};
+pub use ppo_wrapper::{CudaPpo, CudaPpoError, DeviceArrayF32Ppo};
 #[cfg(feature = "cuda")]
 pub use qqe_wrapper::{CudaQqe, CudaQqeError};
 #[cfg(feature = "cuda")]

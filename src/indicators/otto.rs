@@ -23,6 +23,7 @@
 //!   Decision: SIMD remains disabled; streaming is now constant-time and
 //!   mirrors the scalar path after warmup (slow*fast + 10).
 //! - Memory: Uses standard Vec; MA selection remains dynamic; no unsafe in scalar.
+//! - Decision log: SIMD disabled; CUDA wrapper present for batch and many-series paths; Python CUDA handles expose CAI v3 + DLPack v1.x; numerical outputs match the scalar reference path.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
@@ -198,6 +199,14 @@ pub enum OttoError {
     CmoError(String),
     #[error("otto: Moving average calculation failed: {0}")]
     MaError(String),
+    #[error("otto: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("otto: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("otto: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("otto: Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 // ============= BUILDER PATTERN =============
@@ -1171,12 +1180,9 @@ fn resolve_batch_kernel(k: Kernel) -> Result<Kernel, OttoError> {
     Ok(match k {
         Kernel::Auto => detect_best_batch_kernel(),
         b if b.is_batch() => b,
-        _ => {
-            return Err(OttoError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        } // same error class ALMA uses
+        other => {
+            return Err(OttoError::InvalidKernelForBatch(other));
+        }
     })
 }
 
@@ -1231,10 +1237,9 @@ pub fn otto_into_slices(
     let (data, _first, ott_p, _needed, ott_percent, ma_type) = otto_prepare(input)?;
     let n = data.len();
     if hott_dst.len() != n || lott_dst.len() != n {
-        return Err(OttoError::InvalidPeriod {
-            period: hott_dst.len(),
-            data_len: n,
-        });
+        let expected = n;
+        let got = hott_dst.len().max(lott_dst.len());
+        return Err(OttoError::OutputLengthMismatch { expected, got });
     }
 
     // Periods for VIDYA tracks (match original logic)
@@ -1623,38 +1628,101 @@ pub struct OttoBatchOutput {
 }
 
 #[inline]
-fn axis_usize(a: (usize, usize, usize)) -> Vec<usize> {
-    let (s, e, st) = a;
-    if st == 0 || s == e {
-        return vec![s];
+fn axis_usize(a: (usize, usize, usize)) -> Result<Vec<usize>, OttoError> {
+    let (start, end, step) = a;
+    if step == 0 || start == end {
+        return Ok(vec![start]);
     }
-    (s..=e).step_by(st).collect()
+    if start < end {
+        let v: Vec<_> = (start..=end).step_by(step).collect();
+        if v.is_empty() {
+            return Err(OttoError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
+    } else {
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur >= end {
+            v.push(cur);
+            if cur - end < step {
+                break;
+            }
+            cur -= step;
+        }
+        if v.is_empty() {
+            return Err(OttoError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
+    }
 }
 
 #[inline]
-fn axis_f64(a: (f64, f64, f64)) -> Vec<f64> {
-    let (s, e, st) = a;
-    if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
-        return vec![s];
+fn axis_f64(a: (f64, f64, f64)) -> Result<Vec<f64>, OttoError> {
+    let (start, end, step) = a;
+    if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+        return Ok(vec![start]);
     }
-    let mut v = Vec::new();
-    let mut x = s;
-    while x <= e + 1e-12 {
-        v.push(x);
-        x += st;
+    let mut out = Vec::new();
+    if start < end {
+        let st = if step > 0.0 { step } else { -step };
+        let mut x = start;
+        while x <= end + 1e-12 {
+            out.push(x);
+            x += st;
+        }
+    } else {
+        let st = if step > 0.0 { -step } else { step };
+        if st.abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        let mut x = start;
+        while x >= end - 1e-12 {
+            out.push(x);
+            x += st;
+        }
     }
-    v
+    if out.is_empty() {
+        return Err(OttoError::InvalidRange {
+            start: start.to_string(),
+            end: end.to_string(),
+            step: step.to_string(),
+        });
+    }
+    Ok(out)
 }
 
-fn expand_grid_otto(r: &OttoBatchRange) -> Vec<OttoParams> {
-    let p = axis_usize(r.ott_period);
-    let op = axis_f64(r.ott_percent);
-    let fv = axis_usize(r.fast_vidya);
-    let sv = axis_usize(r.slow_vidya);
-    let cc = axis_f64(r.correcting_constant);
+fn expand_grid_otto(r: &OttoBatchRange) -> Result<Vec<OttoParams>, OttoError> {
+    let p = axis_usize(r.ott_period)?;
+    let op = axis_f64(r.ott_percent)?;
+    let fv = axis_usize(r.fast_vidya)?;
+    let sv = axis_usize(r.slow_vidya)?;
+    let cc = axis_f64(r.correcting_constant)?;
     let mt = &r.ma_types;
 
-    let mut v = Vec::with_capacity(p.len() * op.len() * fv.len() * sv.len() * cc.len() * mt.len());
+    if mt.is_empty() {
+        return Err(OttoError::InvalidRange {
+            start: "ma_types".into(),
+            end: "ma_types".into(),
+            step: "0".into(),
+        });
+    }
+
+    let mut v = Vec::with_capacity(
+        p.len()
+            .saturating_mul(op.len())
+            .saturating_mul(fv.len())
+            .saturating_mul(sv.len())
+            .saturating_mul(cc.len())
+            .saturating_mul(mt.len()),
+    );
     for &pp in &p {
         for &oo in &op {
             for &ff in &fv {
@@ -1675,7 +1743,14 @@ fn expand_grid_otto(r: &OttoBatchRange) -> Vec<OttoParams> {
             }
         }
     }
-    v
+    if v.is_empty() {
+        return Err(OttoError::InvalidRange {
+            start: "otto_batch".into(),
+            end: "otto_batch".into(),
+            step: "0".into(),
+        });
+    }
+    Ok(v)
 }
 
 // Precompute abs(CMO) with sliding window period 9 for reuse in batch
@@ -1741,22 +1816,16 @@ pub fn otto_batch_with_kernel(
     }
     let kernel = resolve_batch_kernel(k)?;
 
-    let combos = expand_grid_otto(sweep);
-    if combos.is_empty() {
-        // If combos is empty, it means expand_grid_otto returned no combinations
-        // This typically happens when ma_types is empty or parameters are invalid
-        return Err(OttoError::InvalidPeriod {
-            period: 0,
-            data_len: data.len(),
-        });
-    }
-
+    let combos = expand_grid_otto(sweep)?;
     let rows = combos.len();
     let cols = data.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| OttoError::InvalidInput("rows*cols overflow".into()))?;
 
     // Initialize matrices with NaN
-    let mut hott = vec![f64::NAN; rows * cols];
-    let mut lott = vec![f64::NAN; rows * cols];
+    let mut hott = vec![f64::NAN; total];
+    let mut lott = vec![f64::NAN; total];
 
     // Precompute shared CMO abs(9) stream once for all rows
     let cmo_abs = cmo_abs9_stream(data);

@@ -190,20 +190,36 @@ impl CudaAdosc {
 
         // Memory sizing
         let (rows, cols) = (combos.len(), len);
-        let bytes_inputs = 4 * cols * std::mem::size_of::<f32>();
-        let bytes_adl = cols * std::mem::size_of::<f32>();
-        let bytes_periods = 2 * rows * std::mem::size_of::<i32>();
+        let bytes_inputs = 4usize
+            .checked_mul(cols)
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?;
+        let bytes_adl = cols
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?;
+        let bytes_periods = 2usize
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?;
         let bytes_out_total = rows
             .checked_mul(cols)
             .ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?
-            * std::mem::size_of::<f32>();
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?;
         let headroom = 64usize * 1024 * 1024;
 
         let required = bytes_inputs
             .checked_add(bytes_adl).ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
             .checked_add(bytes_periods).ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
             .checked_add(bytes_out_total).ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?;
-        let fits_all = Self::will_fit(required, headroom);
+        let fits_all = match Self::will_fit(required, headroom) {
+            Ok(true) => true,
+            Ok(false) => false,
+            Err(CudaAdoscError::OutOfMemory { .. }) => false,
+            Err(e) => return Err(e),
+        };
 
         if fits_all {
             let total = rows.checked_mul(cols).ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
@@ -298,7 +314,9 @@ impl CudaAdosc {
         short: usize,
         long: usize,
     ) -> Result<DeviceArrayF32Adosc, CudaAdoscError> {
-        let len = rows.checked_mul(cols).ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
+        let len = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
         if high_tm.len() != len
             || low_tm.len() != len
             || close_tm.len() != len
@@ -311,6 +329,21 @@ impl CudaAdosc {
         if short == 0 || long == 0 || short >= long {
             return Err(CudaAdoscError::InvalidInput("invalid short/long".into()));
         }
+
+        // Rough VRAM estimate: 4 inputs + 1 output plus headroom.
+        let bytes_inputs = 4usize
+            .checked_mul(len)
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?;
+        let bytes_output = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?;
+        let required = bytes_inputs
+            .checked_add(bytes_output)
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?;
+        let headroom = 64usize * 1024 * 1024;
+        let _ = Self::will_fit(required, headroom)?;
 
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }?;
@@ -686,10 +719,17 @@ fn expand_grid_checked_cuda(r: &AdoscBatchRange) -> Result<Vec<AdoscParams>, Cud
 
 impl CudaAdosc {
     #[inline]
-    fn will_fit(required: usize, headroom: usize) -> bool {
+    fn will_fit(required: usize, headroom: usize) -> Result<bool, CudaAdoscError> {
         match mem_get_info() {
-            Ok((free, _)) => required.saturating_add(headroom) <= free,
-            Err(_) => true,
+            Ok((free, _)) => {
+                let need = required.saturating_add(headroom);
+                if need <= free {
+                    Ok(true)
+                } else {
+                    Err(CudaAdoscError::OutOfMemory { required, free, headroom })
+                }
+            }
+            Err(_) => Ok(true),
         }
     }
 }

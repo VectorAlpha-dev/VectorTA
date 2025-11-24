@@ -2096,8 +2096,18 @@ pub fn wilders_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
+    if rows == 0 {
+        return Err(PyValueError::new_err(format!(
+            "invalid range: start={}, end={}, step={}",
+            sweep.period.0, sweep.period.1, sweep.period.2
+        )));
+    }
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+
     // Pre-allocate NumPy array (1-D, will reshape later)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Parse kernel string to enum with CPU feature validation
@@ -2200,7 +2210,7 @@ pub fn wilders_cuda_many_series_one_param_dev_py(
     Ok(WildersDeviceArrayF32Py { inner })
 }
 
-// Wilders-specific CUDA Array Interface v3 + DLPack stubs (context-guarded handle)
+// Wilders-specific CUDA Array Interface v3 + DLPack (version negotiation) with context guard
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct WildersDeviceArrayF32Py {
@@ -2234,7 +2244,20 @@ impl WildersDeviceArrayF32Py {
         (2, self.inner.device_id as i32)
     }
 
-    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+    // DLPack v1.x producer with legacy fallback.
+    // - If max_version >= (1, 0), return a capsule named "dltensor_versioned"; otherwise legacy "dltensor".
+    // - Strides are in elements and non-NULL for ndim>0; byte_offset=0 for contiguous.
+    // - Data pointer is NULL when size==0.
+    // - Stream semantics: producer work is synchronized, so we do not insert events.
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<&PyAny>,
+        max_version: Option<(u8, u8)>,
+        _dl_device: Option<&PyAny>,
+        _copy: Option<&PyAny>,
+    ) -> PyResult<PyObject> {
         use std::ffi::c_void;
 
         #[repr(C)]
@@ -2279,21 +2302,37 @@ impl WildersDeviceArrayF32Py {
 
         extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
             unsafe {
-                let name = b"dltensor\0";
-                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
+                // Determine current capsule name and choose the correct symbol
+                let cname = pyo3::ffi::PyCapsule_GetName(capsule);
+                if cname.is_null() { return; }
+                let rust_cstr = std::ffi::CStr::from_ptr(cname);
+                let name_bytes = rust_cstr.to_bytes();
+                let (get_name, used_name) = if name_bytes == b"dltensor_versioned" {
+                    (b"dltensor_versioned\0", b"used_dltensor_versioned\0")
+                } else {
+                    (b"dltensor\0", b"used_dltensor\0")
+                };
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    get_name.as_ptr() as *const _,
+                ) as *mut DLManagedTensor;
                 if !ptr.is_null() {
                     if let Some(del) = (*ptr).deleter { del(ptr); }
                     // Rename capsule per convention to prevent double use
-                    let used = b"used_dltensor\0";
-                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                    pyo3::ffi::PyCapsule_SetName(capsule, used_name.as_ptr() as *const _);
                 }
             }
         }
 
+        // Producer stream semantics: we synchronized the producing CUDA stream prior to
+        // exposing this buffer, so we may ignore `stream` per Array API semantics.
+        let _ = stream; // reserved for future event-wait if producer becomes async
+
         // Build shape/strides (element-based strides per DLPack)
         let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
         let strides = Box::new([self.inner.cols as i64, 1i64]);
-        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+        let elem_count = (self.inner.rows).saturating_mul(self.inner.cols);
+        let data_ptr: *mut c_void = if elem_count == 0 { std::ptr::null_mut() } else { self.inner.device_ptr() as usize as *mut c_void };
 
         let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _ctx: self.inner.ctx.clone() });
         let guard_ptr = Box::into_raw(guard);
@@ -2314,7 +2353,9 @@ impl WildersDeviceArrayF32Py {
             deleter: Some(managed_deleter),
         });
         let mt_raw = Box::into_raw(mt);
-        let name = b"dltensor\0";
+        // Choose capsule name based on requested max_version
+        let use_versioned = max_version.map(|(maj, _min)| maj >= 1).unwrap_or(false);
+        let name = if use_versioned { b"dltensor_versioned\0" } else { b"dltensor\0" };
         let capsule = unsafe {
             pyo3::ffi::PyCapsule_New(mt_raw as *mut c_void, name.as_ptr() as *const _, Some(capsule_destructor))
         };

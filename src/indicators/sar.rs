@@ -19,9 +19,15 @@
 //! - Memory Optimization: ✓ Uses `alloc_with_nan_prefix` and write-into-slice variants.
 //! - Batch Support: ✓ Parallel per-row sweep; row-specific SIMD not attempted (no reusable
 //!   precompute across rows).
+//! - Decision log: SIMD enabled on x86_64 (AVX2/AVX512 specializations) with scalar as
+//!   the reference path; CUDA wrapper enabled and returning VRAM handles exposed via
+//!   CUDA Array Interface v3 and DLPack v1.x; scalar/CPU, WASM, and CUDA outputs remain
+//!   numerically aligned (tests unchanged).
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -35,6 +41,9 @@ use pyo3::types::PyDict;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
@@ -187,8 +196,8 @@ impl SarBuilder {
 
 #[derive(Debug, Error)]
 pub enum SarError {
-    #[error("sar: Empty data provided for SAR.")]
-    EmptyData,
+    #[error("sar: Empty input data.")]
+    EmptyInputData,
     #[error("sar: All values are NaN.")]
     AllValuesNaN,
     #[error("sar: Not enough valid data. needed = {needed}, valid = {valid}")]
@@ -197,8 +206,12 @@ pub enum SarError {
     InvalidAcceleration { acceleration: f64 },
     #[error("sar: Invalid maximum: {maximum}")]
     InvalidMaximum { maximum: f64 },
-    #[error("sar: Output length mismatch: got = {got}, expected = {expected}")]
-    LengthMismatch { got: usize, expected: usize },
+    #[error("sar: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("sar: Invalid parameter range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
+    #[error("sar: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -213,7 +226,7 @@ pub fn sar_with_kernel(input: &SarInput, kernel: Kernel) -> Result<SarOutput, Sa
     };
 
     if high.is_empty() || low.is_empty() {
-        return Err(SarError::EmptyData);
+        return Err(SarError::EmptyInputData);
     }
 
     // Trim to minimum length to avoid out-of-bounds access
@@ -283,14 +296,15 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
     };
 
     if high.is_empty() || low.is_empty() {
-        return Err(SarError::EmptyData);
+        return Err(SarError::EmptyInputData);
     }
 
     // Verify output buffer size matches input
-    if dst.len() != high.len() || dst.len() != low.len() {
-        return Err(SarError::LengthMismatch {
+    let expected_len = high.len().min(low.len());
+    if dst.len() != expected_len {
+        return Err(SarError::OutputLengthMismatch {
+            expected: expected_len,
             got: dst.len(),
-            expected: high.len().min(low.len()),
         });
     }
 
@@ -829,7 +843,7 @@ pub fn sar_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(SarError::EmptyData),
+        other => return Err(SarError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -863,24 +877,71 @@ impl SarBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &SarBatchRange) -> Vec<SarParams> {
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
-        }
-        let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
-        }
-        v
+fn axis_f64_checked(axis: (f64, f64, f64)) -> Result<Vec<f64>, SarError> {
+    let (start, end, step) = axis;
+    if !step.is_finite() {
+        return Err(SarError::InvalidRange { start, end, step });
+    }
+    if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+        return Ok(vec![start]);
     }
 
-    let accs = axis_f64(r.acceleration);
-    let maxs = axis_f64(r.maximum);
+    let mut v = Vec::new();
+    let tol = step.abs() * 1e-12;
 
-    let mut out = Vec::with_capacity(accs.len() * maxs.len());
+    if step > 0.0 {
+        if start <= end {
+            // Increasing or flat range, positive step.
+            let mut x = start;
+            while x <= end + tol {
+                v.push(x);
+                x += step;
+            }
+        } else {
+            // Reversed bounds: walk downwards with positive step magnitude.
+            let mut x = start;
+            while x >= end - tol {
+                v.push(x);
+                x -= step;
+            }
+        }
+    } else {
+        // step < 0.0
+        if start >= end {
+            // Decreasing range with negative step.
+            let mut x = start;
+            while x >= end - tol {
+                v.push(x);
+                x += step; // negative step
+            }
+        } else {
+            // start < end with negative step would never terminate; treat as invalid.
+            return Err(SarError::InvalidRange { start, end, step });
+        }
+    }
+
+    if v.is_empty() {
+        Err(SarError::InvalidRange { start, end, step })
+    } else {
+        Ok(v)
+    }
+}
+
+#[inline(always)]
+fn expand_grid(r: &SarBatchRange) -> Result<Vec<SarParams>, SarError> {
+    let accs = axis_f64_checked(r.acceleration)?;
+    let maxs = axis_f64_checked(r.maximum)?;
+
+    let capacity = accs
+        .len()
+        .checked_mul(maxs.len())
+        .ok_or(SarError::InvalidRange {
+            start: r.acceleration.0,
+            end: r.acceleration.1,
+            step: r.acceleration.2,
+        })?;
+
+    let mut out = Vec::with_capacity(capacity);
     for &a in &accs {
         for &m in &maxs {
             out.push(SarParams {
@@ -889,7 +950,7 @@ fn expand_grid(r: &SarBatchRange) -> Vec<SarParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -920,10 +981,7 @@ fn sar_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<SarBatchOutput, SarError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(SarError::EmptyData);
-    }
+    let combos = expand_grid(sweep)?;
 
     // Trim to minimum length to avoid out-of-bounds access
     let min_len = high.len().min(low.len());
@@ -1093,7 +1151,7 @@ pub unsafe fn sar_row_avx512_long(
 
 #[inline(always)]
 fn expand_grid_for_test(r: &SarBatchRange) -> Vec<SarParams> {
-    expand_grid(r)
+    expand_grid(r).expect("expand_grid_for_test should not fail")
 }
 
 #[cfg(feature = "python")]
@@ -1178,12 +1236,15 @@ pub fn sar_batch_py<'py>(
         acceleration: acceleration_range,
         maximum: maximum_range,
     };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = min_len;
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("sar_batch_py: size overflow in rows*cols"))?;
 
     // preallocate the NumPy output and write into it directly
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -1227,10 +1288,7 @@ fn sar_batch_inner_into_noalloc(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<SarParams>, SarError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(SarError::EmptyData);
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = high
         .iter()
@@ -1246,10 +1304,17 @@ fn sar_batch_inner_into_noalloc(
 
     let rows = combos.len();
     let cols = high.len();
-    if out.len() != rows * cols {
-        return Err(SarError::LengthMismatch {
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(SarError::InvalidRange {
+            start: sweep.acceleration.0,
+            end: sweep.acceleration.1,
+            step: sweep.acceleration.2,
+        })?;
+    if out.len() != expected {
+        return Err(SarError::OutputLengthMismatch {
+            expected,
             got: out.len(),
-            expected: rows * cols,
         });
     }
 
@@ -1366,6 +1431,212 @@ pub fn sar_js(
     Ok(output)
 }
 
+// ----------------------------- PYTHON CUDA VRAM HANDLE -----------------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct SarDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl SarDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let buf = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let ptr = buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Producing stream is synchronized before return; omit 'stream' per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        // Validate consumer-requested device. We do not implement cross-device copies.
+        let _ = stream;
+        if let Some((dev_type, dev_id)) = dl_device {
+            if dev_type != 2 || dev_id != self.device_id as i32 {
+                if copy.unwrap_or(false) {
+                    return Err(PyValueError::new_err(
+                        "cross-device DLPack copy is not implemented for SarDeviceArrayF32Py",
+                    ));
+                } else {
+                    return Err(PyValueError::new_err(
+                        "requested dl_device does not match SAR producer device",
+                    ));
+                }
+            }
+        }
+
+        // Move ownership of the device buffer into the DLManagedTensor capsule.
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        // Holder keeps buffer/context and shape/strides alive until consumer calls deleter.
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            buf: DeviceBuffer<f32>,
+            _ctx: Arc<Context>,
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() {
+                    let _holder: Box<Holder> = Box::from_raw(holder_ptr);
+                    drop(_holder);
+                }
+            }
+        }
+
+        // Capsule destructor calls the deleter only for still-named dltensor[_versioned] capsules.
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let versioned = b"dltensor_versioned\0";
+            let legacy = b"dltensor\0";
+            let mut ptr =
+                pyo3::ffi::PyCapsule_GetPointer(capsule, versioned.as_ptr() as *const c_char);
+            if ptr.is_null() {
+                ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, legacy.as_ptr() as *const c_char);
+            }
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: if self.rows == 0 || self.cols == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+                    },
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [rows, cols],
+            strides: [cols, 1],
+            buf,
+            _ctx: self._ctx.clone(),
+        });
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
+        let _ = Box::into_raw(holder);
+
+        let wants_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        let name = if wants_versioned {
+            b"dltensor_versioned\0"
+        } else {
+            b"dltensor\0"
+        };
+
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut std::ffi::c_void,
+                name.as_ptr() as *const c_char,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe { dl_managed_deleter(mt_ptr) };
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
 // ----------------------------- PYTHON CUDA BINDINGS -----------------------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "sar_cuda_batch_dev")]
@@ -1377,7 +1648,7 @@ pub fn sar_cuda_batch_dev_py(
     acceleration_range: (f64, f64, f64),
     maximum_range: (f64, f64, f64),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<SarDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaSar;
 
@@ -1393,13 +1664,15 @@ pub fn sar_cuda_batch_dev_py(
         acceleration: acceleration_range,
         maximum: maximum_range,
     };
-    let inner = py.allow_threads(|| {
+    let (buf, rows, cols, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaSar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.sar_batch_dev(h, l, &sweep)
-            .map(|(dev, _combos)| dev)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let (dev, _combos) = cuda
+            .sar_batch_dev(h, l, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        Ok::<_, pyo3::PyErr>((dev.buf, dev.rows, dev.cols, ctx, cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(SarDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev_id })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1414,7 +1687,7 @@ pub fn sar_cuda_many_series_one_param_dev_py(
     acceleration: f64,
     maximum: f64,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<SarDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaSar;
 
@@ -1423,7 +1696,10 @@ pub fn sar_cuda_many_series_one_param_dev_py(
     }
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
-    if cols.checked_mul(rows).unwrap_or(0) != h.len() || h.len() != l.len() {
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("sar_cuda_many_series_one_param_dev: size overflow in cols*rows"))?;
+    if expected != h.len() || h.len() != l.len() {
         return Err(PyValueError::new_err(
             "time‑major inputs must be equal length and cols*rows",
         ));
@@ -1432,12 +1708,15 @@ pub fn sar_cuda_many_series_one_param_dev_py(
         acceleration: Some(acceleration),
         maximum: Some(maximum),
     };
-    let inner = py.allow_threads(|| {
+    let (buf, r_out, c_out, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaSar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.sar_many_series_one_param_time_major_dev(h, l, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let dev = cuda
+            .sar_many_series_one_param_time_major_dev(h, l, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        Ok::<_, pyo3::PyErr>((dev.buf, dev.rows, dev.cols, ctx, cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(SarDeviceArrayF32Py { buf: Some(buf), rows: r_out, cols: c_out, _ctx: ctx, device_id: dev_id })
 }
 
 #[cfg(feature = "wasm")]
@@ -1524,11 +1803,15 @@ pub fn sar_batch_into(
             acceleration: (acc_start, acc_end, acc_step),
             maximum: (max_start, max_end, max_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos =
+            expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("sar_batch_into: size overflow in rows*cols"))?;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         // Use Scalar kernel for WASM batch operations
         sar_batch_inner_into_noalloc_wasm(high, low, &sweep, Kernel::Scalar, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1545,10 +1828,7 @@ fn sar_batch_inner_into_noalloc_wasm(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<SarParams>, SarError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(SarError::EmptyData);
-    }
+    let combos = expand_grid(sweep)?;
 
     // Trim to minimum length to avoid out-of-bounds access
     let min_len = high.len().min(low.len());
@@ -1568,10 +1848,17 @@ fn sar_batch_inner_into_noalloc_wasm(
 
     let rows = combos.len();
     let cols = high.len();
-    if out.len() != rows * cols {
-        return Err(SarError::LengthMismatch {
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(SarError::InvalidRange {
+            start: sweep.acceleration.0,
+            end: sweep.acceleration.1,
+            step: sweep.acceleration.2,
+        })?;
+    if out.len() != expected {
+        return Err(SarError::OutputLengthMismatch {
+            expected,
             got: out.len(),
-            expected: rows * cols,
         });
     }
 

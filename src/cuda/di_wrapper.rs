@@ -19,24 +19,29 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaDiError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaDiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaDiError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaDiError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaDiError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -92,7 +97,7 @@ impl DeviceArrayF32Pair {
 pub struct CudaDi {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaDiPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -104,34 +109,24 @@ pub struct CudaDi {
 
 impl CudaDi {
     pub fn new(device_id: usize) -> Result<Self, CudaDiError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         // Query SM count for launch heuristics
         let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))? as u32;
+            .get_attribute(DeviceAttribute::MultiprocessorCount)?
+            as u32;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/di_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaDiError::Cuda(e.to_string()))?
-                }
-            }
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -150,21 +145,24 @@ impl CudaDi {
     pub fn set_policy(&mut self, policy: CudaDiPolicy) {
         self.policy = policy;
     }
-    pub fn synchronize(&self) -> Result<(), CudaDiError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))
-    }
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn synchronize(&self) -> Result<(), CudaDiError> { Ok(self.stream.synchronize()?) }
 
     // ---- Helpers ------------------------------------------------------------
-    fn device_will_fit(bytes: usize, headroom: usize) -> bool {
-        let check = match env::var("CUDA_MEM_CHECK") {
-            Ok(v) => v != "0" && v.to_lowercase() != "false",
-            Err(_) => true,
-        };
-        if !check { return true; }
-        if let Ok((free, _)) = mem_get_info() { return bytes.saturating_add(headroom) <= free; }
-        true
+    #[inline]
+    fn will_fit(&self, required: usize, headroom: usize) -> Result<(), CudaDiError> {
+        match mem_get_info() {
+            Ok((free, _total)) => {
+                if required.saturating_add(headroom) > free {
+                    return Err(CudaDiError::OutOfMemory { required, free, headroom });
+                }
+                Ok(())
+            }
+            Err(e) => Err(CudaDiError::Cuda(e)),
+        }
     }
 
     fn first_valid_hlc(high: &[f32], low: &[f32], close: &[f32]) -> Result<usize, CudaDiError> {
@@ -181,26 +179,54 @@ impl CudaDi {
         Err(CudaDiError::InvalidInput("all values are NaN".into()))
     }
 
-    fn expand_periods(range: &DiBatchRange) -> Vec<usize> {
+    fn expand_periods(range: &DiBatchRange) -> Result<Vec<usize>, CudaDiError> {
         let (start, end, step) = range.period;
-        if step == 0 || start == end { vec![start] } else { (start..=end).step_by(step).collect() }
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
+        }
+        // reversed bounds
+        let mut v = Vec::new();
+        let mut cur = start;
+        let st = step.max(1);
+        while cur >= end {
+            v.push(cur);
+            if cur == end { break; }
+            cur = cur.saturating_sub(st);
+            if cur < end { break; }
+        }
+        if v.is_empty() {
+            return Err(CudaDiError::InvalidInput(format!(
+                "invalid range: start={} end={} step={}",
+                start, end, step
+            )));
+        }
+        Ok(v)
     }
 
-    fn chunk_size_for_batch(n_combos: usize, len: usize) -> usize {
+    fn chunk_size_for_batch(&self, n_combos: usize, len: usize) -> usize {
         // Inputs: 3×len (up,dn,tr) + params (periods,warm) + outputs: 2×(combos×len)
-        let in_bytes = 3 * len * std::mem::size_of::<f32>();
-        let params_bytes = n_combos * (2 * std::mem::size_of::<i32>());
-        let out_per_combo = 2 * len * std::mem::size_of::<f32>();
+        let in_bytes = 3usize
+            .checked_mul(len)
+            .and_then(|b| b.checked_mul(std::mem::size_of::<f32>()))
+            .unwrap_or(usize::MAX);
+        let params_bytes = n_combos
+            .checked_mul(2 * std::mem::size_of::<i32>())
+            .unwrap_or(usize::MAX);
+        let out_per_combo = 2usize
+            .checked_mul(len)
+            .and_then(|b| b.checked_mul(std::mem::size_of::<f32>()))
+            .unwrap_or(usize::MAX);
         let headroom = 64 * 1024 * 1024;
         let mut chunk = n_combos.max(1);
         while chunk > 1 {
-            let need = in_bytes + params_bytes + chunk * out_per_combo + headroom;
-            if Self::device_will_fit(need, 0) {
-                break;
-            }
-            if Self::device_will_fit(need, 0) {
-                break;
-            }
+            let need = in_bytes
+                .saturating_add(params_bytes)
+                .saturating_add(chunk.saturating_mul(out_per_combo))
+                .saturating_add(headroom);
+            if self.will_fit(need, 0).is_ok() { break; }
             chunk = (chunk + 1) / 2;
         }
         chunk.max(1)
@@ -340,7 +366,7 @@ impl CudaDi {
         let func = self
             .module
             .get_function("di_batch_from_precomputed_f32")
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaDiError::MissingKernelSymbol { name: "di_batch_from_precomputed_f32" })?;
         let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
         // Grid-stride over combos: size grid by device parallelism (~8 blocks/SM), cap by chunk size
         let target_blocks = self.sm_count.saturating_mul(8).max(1);
@@ -348,6 +374,7 @@ impl CudaDi {
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
+        if block_x > 1024 || grid_x == 0 { return Err(CudaDiError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 }); }
         unsafe {
             let mut up_ptr = d_up.as_device_ptr().as_raw();
             let mut dn_ptr = d_dn.as_device_ptr().as_raw();
@@ -371,9 +398,7 @@ impl CudaDi {
                 &mut plus_ptr as *mut _ as *mut c_void,
                 &mut minus_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         // Record selection for introspection
         unsafe {
@@ -403,11 +428,7 @@ impl CudaDi {
             return Err(CudaDiError::InvalidInput("empty input".into()));
         }
         let first_valid = Self::first_valid_hlc(high, low, close)?;
-
-        let periods = Self::expand_periods(sweep);
-        if periods.is_empty() {
-            return Err(CudaDiError::InvalidInput("no parameter combos".into()));
-        }
+        let periods = Self::expand_periods(sweep)?;
         for &p in &periods {
             if p == 0 || p > len || (len - first_valid) < p {
                 return Err(CudaDiError::InvalidInput(format!(
@@ -424,30 +445,43 @@ impl CudaDi {
         let (up_h, dn_h, tr_h) = Self::build_up_dn_tr(high, low, close, first_valid);
 
         // Async uploads to overlap H2D with later work on the same stream
-        let d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&up_h, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let d_dn: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&dn_h, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&tr_h, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        let d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&up_h, &self.stream)? };
+        let d_dn: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&dn_h, &self.stream)? };
+        let d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&tr_h, &self.stream)? };
 
         let n_combos = periods.len();
         let periods_i32: Vec<i32> = periods.iter().map(|&p| p as i32).collect();
-        let warms_i32: Vec<i32> = periods.iter().map(|&p| (first_valid + p - 1) as i32).collect();
-        let d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let d_warms: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        let warms_i32: Vec<i32> = periods
+            .iter()
+            .map(|&p| (first_valid.saturating_add(p).saturating_sub(1)) as i32)
+            .collect();
+        let d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream)? };
+        let d_warms: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream)? };
 
         // Allocate outputs (combos x len)
-        let elems = n_combos * len;
-        let mut d_plus: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let mut d_minus: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        let elems = n_combos.checked_mul(len).ok_or_else(|| CudaDiError::InvalidInput("size overflow".into()))?;
+        // Best-effort VRAM check
+        let in_bytes = 3usize
+            .checked_mul(len).and_then(|b| b.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaDiError::InvalidInput("byte size overflow".into()))?;
+        let params_bytes = n_combos
+            .checked_mul(2 * std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaDiError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes = 2usize
+            .checked_mul(elems)
+            .and_then(|b| b.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaDiError::InvalidInput("byte size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(params_bytes)
+            .and_then(|b| b.checked_add(out_bytes))
+            .ok_or_else(|| CudaDiError::InvalidInput("byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        let _ = self.will_fit(required, headroom)?;
+        let mut d_plus: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream)? };
+        let mut d_minus: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream)? };
 
         // VRAM-aware chunking across combos if needed
-        let chunk = Self::chunk_size_for_batch(n_combos, len);
+        let chunk = self.chunk_size_for_batch(n_combos, len);
         let mut processed = 0usize;
         while processed < n_combos {
             let this_chunk = chunk.min(n_combos - processed);
@@ -489,10 +523,10 @@ impl CudaDi {
         if cols == 0 || rows == 0 {
             return Err(CudaDiError::InvalidInput("invalid dims".into()));
         }
-        if high_tm.len() != cols * rows
-            || low_tm.len() != cols * rows
-            || close_tm.len() != cols * rows
-        {
+        let total = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaDiError::InvalidInput("size overflow".into()))?;
+        if high_tm.len() != total || low_tm.len() != total || close_tm.len() != total {
             return Err(CudaDiError::InvalidInput(
                 "flat input length mismatch".into(),
             ));
@@ -513,25 +547,33 @@ impl CudaDi {
             }
         }
 
-        let d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let d_low:  DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let d_first: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        let d_high: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }?;
+        let d_low: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }?;
+        let d_close: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }?;
+        let d_first: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
 
-        let mut d_plus_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let mut d_minus_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        // Best-effort VRAM check for outputs (plus/minus time-major grids)
+        let out_bytes = 2usize
+            .checked_mul(total)
+            .and_then(|b| b.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaDiError::InvalidInput("byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        let _ = self.will_fit(out_bytes, headroom)?;
+
+        let mut d_plus_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total, &self.stream) }?;
+        let mut d_minus_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total, &self.stream) }?;
 
         // Launch config: warp-per-series 1D tiling
         let func = self
             .module
             .get_function("di_many_series_one_param_f32")
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaDiError::MissingKernelSymbol { name: "di_many_series_one_param_f32" })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => 128,
@@ -562,9 +604,10 @@ impl CudaDi {
                 &mut plus_ptr as *mut _ as *mut c_void,
                 &mut minus_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+            if block_x > 1024 || grid_x == 0 {
+                return Err(CudaDiError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            }
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         self.synchronize()?;

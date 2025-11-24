@@ -449,6 +449,27 @@ impl CudaVama {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
+        // VRAM headroom check similar to batch path
+        let headroom = 64usize * 1024 * 1024; // ~64MB
+        let elem_bytes = std::mem::size_of::<f32>();
+        let prices_bytes = data_tm_f32.len().saturating_mul(elem_bytes);
+        let first_valids_bytes = prepared.first_valids.len().saturating_mul(std::mem::size_of::<i32>());
+        let work_bytes = num_series
+            .checked_mul(series_len)
+            .and_then(|n| n.checked_mul(elem_bytes))
+            .ok_or_else(|| CudaVamaError::InvalidInput("size overflow".into()))?
+            .saturating_mul(2); // ema + out
+        let total_est = prices_bytes
+            .saturating_add(first_valids_bytes)
+            .saturating_add(work_bytes);
+        if !Self::will_fit(total_est, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaVamaError::OutOfMemory { required: total_est, free, headroom });
+            } else {
+                return Err(CudaVamaError::OutOfMemory { required: total_est, free: 0, headroom });
+            }
+        }
+
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)?;
         let mut d_ema: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(num_series * series_len)? };
@@ -501,6 +522,27 @@ impl CudaVama {
 
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
+
+        // VRAM headroom check similar to dev-returning path
+        let headroom = 64usize * 1024 * 1024; // ~64MB
+        let elem_bytes = std::mem::size_of::<f32>();
+        let prices_bytes = data_tm_f32.len().saturating_mul(elem_bytes);
+        let first_valids_bytes = prepared.first_valids.len().saturating_mul(std::mem::size_of::<i32>());
+        let work_bytes = num_series
+            .checked_mul(series_len)
+            .and_then(|n| n.checked_mul(elem_bytes))
+            .ok_or_else(|| CudaVamaError::InvalidInput("size overflow".into()))?
+            .saturating_mul(2); // ema + out
+        let total_est = prices_bytes
+            .saturating_add(first_valids_bytes)
+            .saturating_add(work_bytes);
+        if !Self::will_fit(total_est, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaVamaError::OutOfMemory { required: total_est, free, headroom });
+            } else {
+                return Err(CudaVamaError::OutOfMemory { required: total_est, free: 0, headroom });
+            }
+        }
 
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)?;

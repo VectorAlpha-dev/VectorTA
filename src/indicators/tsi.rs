@@ -11,13 +11,10 @@
 //! - **`Ok(TsiOutput)`** containing a `Vec<f64>` of TSI values (-100 to +100) matching input length.
 //! - **`Err(TsiError)`** on invalid parameters or insufficient data.
 //!
-//! ## Developer Notes
-//! - SIMD: AVX2/AVX512 are present as stubs and short‑circuit to the scalar path.
-//!   Rationale: TSI is inherently sequential (EMA recursion), so per‑element
-//!   vectorization does not provide wins; keeping scalar as reference.
-//! - Scalar: Inlined double‑EMA kernel with robust NaN handling and no O(N) temporaries.
-//!   Note: FMA/mul_add variants did not show consistent speedups vs the existing safe math,
-//!   so we retained the simpler arithmetic for stability and portability.
+//! ## Developer Notes / Decision Log
+//! - SIMD: AVX2/AVX512 are present as stubs and short‑circuit to the scalar path. TSI is inherently sequential (EMA recursion), so scalar remains the reference implementation.
+//! - CUDA: Single‑precision batch + many‑series kernels are available behind the `cuda` feature; wrappers return VRAM handles with CAI v3 + DLPack v1.x interop and explicit VRAM checks, but numerical outputs match the scalar path.
+//! - Scalar: Inlined double‑EMA kernel with robust NaN handling and no O(N) temporaries; warmup semantics and NaN propagation are the ground truth for all other paths.
 //! - Memory: Uses `alloc_with_nan_prefix` / matrix helpers for zero‑copy prefixes.
 //! - Batch: Parallel per‑row evaluation; rows use the scalar kernel. Row‑specific
 //!   batch kernels (shared precompute across rows) not implemented yet; expected gains
@@ -45,11 +42,19 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for TsiInput<'a> {
@@ -200,6 +205,8 @@ impl TsiBuilder {
 
 #[derive(Debug, Error)]
 pub enum TsiError {
+    #[error("tsi: Input data slice is empty.")]
+    EmptyInputData,
     #[error("tsi: All values are NaN.")]
     AllValuesNaN,
     #[error("tsi: Invalid period: long = {long_period}, short = {short_period}, data length = {data_len}")]
@@ -210,6 +217,14 @@ pub enum TsiError {
     },
     #[error("tsi: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("tsi: Non-batch kernel passed to batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("tsi: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("tsi: Invalid range expansion: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("tsi: size overflow computing rows*cols")]
+    SizeOverflow,
     #[error("tsi: EMA sub-error: {0}")]
     EmaSubError(#[from] EmaError),
 }
@@ -218,6 +233,9 @@ pub enum TsiError {
 fn tsi_prepare<'a>(input: &'a TsiInput) -> Result<(&'a [f64], usize, usize, usize), TsiError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
+    if len == 0 {
+        return Err(TsiError::EmptyInputData);
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -262,10 +280,9 @@ fn tsi_compute_into_streaming(
 
     let warmup_end = first + long + short;
     if out.len() != data.len() {
-        return Err(TsiError::InvalidPeriod {
-            long_period: out.len(),
-            short_period: 0,
-            data_len: data.len(),
+        return Err(TsiError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
         });
     }
 
@@ -510,11 +527,9 @@ pub fn tsi_into(input: &TsiInput, out: &mut [f64]) -> Result<(), TsiError> {
     // Validate length matches input
     let data_len = input.as_ref().len();
     if out.len() != data_len {
-        return Err(TsiError::InvalidPeriod {
-            // Mirror existing length-mismatch mapping used by streaming variant
-            long_period: out.len(),
-            short_period: 0,
-            data_len: data_len,
+        return Err(TsiError::OutputLengthMismatch {
+            expected: data_len,
+            got: out.len(),
         });
     }
     tsi_into_slice(out, input, Kernel::Auto)
@@ -864,11 +879,7 @@ pub fn tsi_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(TsiError::InvalidPeriod {
-                long_period: 0,
-                short_period: 0,
-                data_len: 0,
-            })
+            return Err(TsiError::InvalidKernelForBatch(k));
         }
     };
 
@@ -904,17 +915,62 @@ impl TsiBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &TsiBatchRange) -> Vec<TsiParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &TsiBatchRange) -> Result<Vec<TsiParams>, TsiError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TsiError> {
+        // Robust expansion rules:
+        // - step == 0: treat as static (single value)
+        // - start == end: single value
+        // - start < end and step > 0: increasing inclusive range
+        // - start > end and step > 0: decreasing inclusive range
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let vals: Vec<usize> = (start..=end).step_by(step).collect();
+            if vals.is_empty() {
+                return Err(TsiError::InvalidRange { start, end, step });
+            }
+            return Ok(vals);
+        }
+        // start > end: build a decreasing sequence without underflow
+        let mut v = start;
+        let mut out = Vec::new();
+        loop {
+            out.push(v);
+            let guard = end.saturating_add(step);
+            if v <= guard {
+                break;
+            }
+            v = v.saturating_sub(step);
+            if v == 0 && step == 0 {
+                break;
+            }
+        }
+        if out.is_empty() {
+            return Err(TsiError::InvalidRange { start, end, step });
+        }
+        if *out.last().unwrap() != end {
+            out.push(end);
+        }
+        Ok(out)
     }
-    let longs = axis_usize(r.long_period);
-    let shorts = axis_usize(r.short_period);
 
-    let mut out = Vec::with_capacity(longs.len() * shorts.len()); // Small params vector, OK
+    let longs = axis_usize(r.long_period)?;
+    let shorts = axis_usize(r.short_period)?;
+    if longs.is_empty() || shorts.is_empty() {
+        return Err(TsiError::InvalidRange {
+            start: r.long_period.0,
+            end: r.long_period.1,
+            step: r.long_period.2,
+        });
+    }
+
+    let total = longs
+        .len()
+        .checked_mul(shorts.len())
+        .ok_or(TsiError::SizeOverflow)?;
+
+    let mut out = Vec::with_capacity(total);
     for &l in &longs {
         for &s in &shorts {
             out.push(TsiParams {
@@ -923,7 +979,7 @@ fn expand_grid(r: &TsiBatchRange) -> Vec<TsiParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -950,14 +1006,7 @@ fn tsi_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<TsiBatchOutput, TsiError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(TsiError::InvalidPeriod {
-            long_period: sweep.long_period.0,
-            short_period: sweep.short_period.0,
-            data_len: data.len(),
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -979,6 +1028,9 @@ fn tsi_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    if rows.checked_mul(cols).is_none() {
+        return Err(TsiError::SizeOverflow);
+    }
 
     // Use uninitialized memory helpers like ALMA
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1056,14 +1108,7 @@ fn tsi_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<TsiParams>, TsiError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(TsiError::InvalidPeriod {
-            long_period: sweep.long_period.0,
-            short_period: sweep.short_period.0,
-            data_len: data.len(),
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -1085,6 +1130,15 @@ fn tsi_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(TsiError::SizeOverflow)?;
+    if out.len() != expected {
+        return Err(TsiError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     let do_row = |row: usize, out_row: &mut [f64]| {
         let p = &combos[row];
@@ -2089,12 +2143,16 @@ pub fn tsi_batch_py<'py>(
         short_period: short_period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("tsi_batch: size overflow"))?;
+
     // Pre-allocate output array for batch operations
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -2148,8 +2206,212 @@ pub fn tsi_batch_py<'py>(
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::tsi_wrapper::CudaTsi;
+
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[pyclass(module = "ta_indicators.cuda", name = "TsiDeviceArrayF32", unsendable)]
+pub struct TsiDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    ctx_guard: Arc<Context>,
+    device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl TsiDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = &self.inner;
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (inner.cols * itemsize, itemsize))?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // Producing stream is synchronized before return; no pending work.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32,
+            ctx_guard: Arc<Context>,
+            device_id: u32,
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(
+            capsule: *mut pyo3::ffi::PyObject,
+        ) {
+            let versioned = b"dltensor_versioned\0";
+            let legacy = b"dltensor\0";
+            let mut ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                versioned.as_ptr() as *const c_char,
+            );
+            if ptr.is_null() {
+                ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    legacy.as_ptr() as *const c_char,
+                );
+            }
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        // Move VRAM handle into Holder; leave a harmless dummy in self.
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: if rows == 0 || cols == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        inner.device_ptr() as *mut std::ffi::c_void
+                    },
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [rows, cols],
+            strides: [cols, 1],
+            arr: inner,
+            ctx_guard: self.ctx_guard.clone(),
+            device_id: self.device_id,
+        });
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx =
+            &mut *holder as *mut Holder as *mut std::ffi::c_void;
+        let _ = Box::into_raw(holder);
+
+        let _ = (stream, dl_device, copy);
+
+        let wants_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        let name_ptr: *const c_char = if wants_versioned {
+            b"dltensor_versioned\0".as_ptr() as *const c_char
+        } else {
+            b"dltensor\0".as_ptr() as *const c_char
+        };
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut std::ffi::c_void,
+                name_ptr,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe { dl_managed_deleter(mt_ptr) };
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl TsiDeviceArrayF32Py {
+    pub fn new_from_rust(
+        inner: DeviceArrayF32,
+        ctx_guard: Arc<Context>,
+        device_id: u32,
+    ) -> Self {
+        Self {
+            inner,
+            ctx_guard,
+            device_id,
+        }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "tsi_cuda_batch_dev")]
@@ -2160,7 +2422,7 @@ pub fn tsi_cuda_batch_dev_py<'py>(
     long_period_range: (usize, usize, usize),
     short_period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+) -> PyResult<(TsiDeviceArrayF32Py, Bound<'py, PyDict>)> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2169,10 +2431,15 @@ pub fn tsi_cuda_batch_dev_py<'py>(
         long_period: long_period_range,
         short_period: short_period_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
-        let mut cuda = CudaTsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.tsi_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
+        let mut cuda =
+            CudaTsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let (arr, combos) = cuda
+            .tsi_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, combos, ctx, dev_id))
     })?;
 
     use numpy::{IntoPyArray, PyArrayMethods};
@@ -2193,7 +2460,7 @@ pub fn tsi_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((TsiDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id), dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2207,23 +2474,28 @@ pub fn tsi_cuda_many_series_one_param_dev_py<'py>(
     long_period: usize,
     short_period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<TsiDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
-        let mut cuda = CudaTsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.tsi_many_series_one_param_time_major_dev(
-            slice_in,
-            cols,
-            rows,
-            long_period,
-            short_period,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let mut cuda =
+            CudaTsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .tsi_many_series_one_param_time_major_dev(
+                slice_in,
+                cols,
+                rows,
+                long_period,
+                short_period,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(TsiDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(feature = "python")]
@@ -2358,8 +2630,8 @@ pub fn tsi_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     } else {
         detect_best_kernel()
     };
-    let result =
-        tsi_batch_slice(data, &sweep, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let result = tsi_batch_slice(data, &sweep, kernel)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let js_output = TsiBatchJsOutput {
         values: result.values,
@@ -2397,10 +2669,13 @@ pub fn tsi_batch_into(
             short_period: (short_period_start, short_period_end, short_period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let total_size = rows * cols;
+        let total_size = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("tsi_batch_into: size overflow"))?;
 
         let out_slice = std::slice::from_raw_parts_mut(out_ptr, total_size);
 

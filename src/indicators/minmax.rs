@@ -10,11 +10,13 @@
 //! - **`Ok(MinmaxOutput)`** on success, containing local extrema and forward-filled values.
 //! - **`Err(MinmaxError)`** on failure
 //!
-//! ## Developer Notes
+//! ## Developer Notes / Decision Log
 //! - Scalar path optimized: hybrid small-order loop (unsafe, tight hot loop) and large-order O(n) prefix–suffix
 //!   (van Herk / Gil–Werman) precompute. Preserves strict inequalities and finiteness semantics.
-//! - SIMD (AVX2/AVX512): kept as stubs delegating to scalar. Pattern is memory/dependency-bound; measured gains
-//!   are negligible over the optimized scalar path. Selection short-circuits to scalar.
+//! - SIMD (AVX2/AVX512) currently implemented as stubs delegating to the optimized scalar path; this pattern is
+//!   memory/dependency-bound and measured gains are negligible, so runtime selection short-circuits to scalar.
+//! - CUDA wrappers provide batch and many-series kernels with VRAM-backed outputs; Python interop uses the shared
+//!   CAI v3 / DLPack path so numerical outputs match the scalar reference (tests unchanged).
 //! - Batch row-specific SIMD: not implemented. Potential future work via shared RMQ/sparse-tables for min/max
 //!   and prefix finiteness counts across orders; would allow O(1) window queries per row.
 //! - Streaming: O(1) per update via monotonic deques for right-window min/max and a (k+1) delay line
@@ -35,6 +37,12 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 use core::arch::x86_64::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -173,13 +181,19 @@ impl MinmaxBuilder {
 #[derive(Debug, Error)]
 pub enum MinmaxError {
     #[error("minmax: Empty data provided.")]
-    EmptyData,
+    EmptyInputData,
     #[error("minmax: Invalid order: order = {order}, data length = {data_len}")]
     InvalidOrder { order: usize, data_len: usize },
     #[error("minmax: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("minmax: All values are NaN.")]
     AllValuesNaN,
+    #[error("minmax: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("minmax: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("minmax: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // --- KERNEL API ---
@@ -213,7 +227,7 @@ pub fn minmax_into_slice(
     };
 
     if high.is_empty() || low.is_empty() {
-        return Err(MinmaxError::EmptyData);
+        return Err(MinmaxError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MinmaxError::InvalidOrder {
@@ -228,9 +242,9 @@ pub fn minmax_into_slice(
         || last_min_dst.len() != len
         || last_max_dst.len() != len
     {
-        return Err(MinmaxError::InvalidOrder {
-            order: is_min_dst.len(),
-            data_len: len,
+        return Err(MinmaxError::OutputLengthMismatch {
+            expected: len,
+            got: is_min_dst.len(),
         });
     }
 
@@ -360,7 +374,7 @@ pub fn minmax_with_kernel(
     };
 
     if high.is_empty() || low.is_empty() {
-        return Err(MinmaxError::EmptyData);
+        return Err(MinmaxError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MinmaxError::InvalidOrder {
@@ -447,8 +461,276 @@ pub fn minmax_with_kernel(
 // ========================= Python CUDA Bindings =========================
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::minmax_wrapper::CudaMinmax;
+
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[pyclass(module = "ta_indicators.cuda", name = "MinmaxDeviceArrayF32", unsendable)]
+pub struct MinmaxDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl MinmaxDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        let row_stride = self
+            .cols
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| PyValueError::new_err("stride overflow in __cuda_array_interface__"))?;
+        d.set_item("strides", (row_stride, std::mem::size_of::<f32>()))?;
+        let buf = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let ptr = buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Producer stream is synchronized before returning; omit "stream" per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+        use std::os::raw::c_char;
+
+        let _ = stream;
+
+        if let Some((_ty, dev)) = dl_device {
+            if dev != self.device_id as i32 {
+                return Err(PyValueError::new_err("dlpack device mismatch"));
+            }
+        }
+        if matches!(copy, Some(true)) {
+            return Err(PyValueError::new_err(
+                "copy=True not supported for MinmaxDeviceArrayF32",
+            ));
+        }
+
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLPackVersion {
+            major: i32,
+            minor: i32,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensorVersioned)>,
+            dl_tensor: DLTensor,
+            flags: u64,
+        }
+
+        struct Manager {
+            _ctx: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+        }
+
+        unsafe extern "C" fn dlpack_deleter_legacy(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
+            drop(_mgr);
+        }
+
+        unsafe extern "C" fn dlpack_deleter_versioned(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
+            drop(_mgr);
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            use std::ffi::CStr;
+            if capsule.is_null() {
+                return;
+            }
+            let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule);
+            if name_ptr.is_null() {
+                return;
+            }
+            let name = CStr::from_ptr(name_ptr);
+            let bytes = name.to_bytes();
+            if bytes == b"dltensor_versioned" {
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    "dltensor_versioned\0".as_ptr() as *const c_char,
+                );
+                if !ptr.is_null() {
+                    let mt = ptr as *mut DLManagedTensorVersioned;
+                    if let Some(del) = (*mt).deleter {
+                        del(mt);
+                    }
+                    pyo3::ffi::PyCapsule_SetPointer(capsule, std::ptr::null_mut());
+                }
+            } else if bytes == b"dltensor" {
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    "dltensor\0".as_ptr() as *const c_char,
+                );
+                if !ptr.is_null() {
+                    let mt = ptr as *mut DLManagedTensor;
+                    if let Some(del) = (*mt).deleter {
+                        del(mt);
+                    }
+                    pyo3::ffi::PyCapsule_SetPointer(capsule, std::ptr::null_mut());
+                }
+            } else {
+                // renamed to used_*; do nothing
+            }
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1]);
+        let len = (rows as usize)
+            .checked_mul(cols as usize)
+            .unwrap_or(0);
+        let data_ptr = if len == 0 {
+            std::ptr::null_mut()
+        } else {
+            buf.as_device_ptr().as_raw() as *mut c_void
+        };
+
+        let mgr = Box::new(Manager {
+            _ctx: self.ctx.clone(),
+            _buf: buf,
+            _shape: shape,
+            _strides: strides,
+        });
+        let mgr_ptr = Box::into_raw(mgr);
+        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
+        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
+
+        let wants_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+
+        let capsule = if wants_versioned {
+            let mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 0 },
+                manager_ctx: mgr_ptr as *mut c_void,
+                deleter: Some(dlpack_deleter_versioned),
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: shape_ptr,
+                    strides: strides_ptr,
+                    byte_offset: 0,
+                },
+                flags: 0,
+            });
+            let mt_ptr = Box::into_raw(mt);
+            unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut c_void,
+                    "dltensor_versioned\0".as_ptr() as *const c_char,
+                    Some(capsule_destructor),
+                )
+            }
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: shape_ptr,
+                    strides: strides_ptr,
+                    byte_offset: 0,
+                },
+                manager_ctx: mgr_ptr as *mut c_void,
+                deleter: Some(dlpack_deleter_legacy),
+            });
+            let mt_ptr = Box::into_raw(mt);
+            unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut c_void,
+                    "dltensor\0".as_ptr() as *const c_char,
+                    Some(capsule_destructor),
+                )
+            }
+        };
+
+        if capsule.is_null() {
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "minmax_cuda_batch_dev")]
@@ -466,22 +748,24 @@ pub fn minmax_cuda_batch_dev_py<'py>(
     let hs = high.as_slice()?;
     let ls = low.as_slice()?;
     let sweep = MinmaxBatchRange { order: order_range };
-    let (quad, combos) = py.allow_threads(|| {
+    let (quad, combos, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaMinmax::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.minmax_batch_dev(hs, ls, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let (quad, combos) = cuda
+            .minmax_batch_dev(hs, ls, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((quad, combos, cuda.context_arc(), cuda.device_id()))
     })?;
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item(
         "is_min",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: crate::cuda::moving_averages::DeviceArrayF32 {
-                    buf: quad.is_min,
-                    rows: combos.len(),
-                    cols: hs.len(),
-                },
+            MinmaxDeviceArrayF32Py {
+                buf: Some(quad.is_min),
+                rows: combos.len(),
+                cols: hs.len(),
+                ctx: ctx.clone(),
+                device_id: dev_id,
             },
         )?,
     )?;
@@ -489,12 +773,12 @@ pub fn minmax_cuda_batch_dev_py<'py>(
         "is_max",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: crate::cuda::moving_averages::DeviceArrayF32 {
-                    buf: quad.is_max,
-                    rows: combos.len(),
-                    cols: hs.len(),
-                },
+            MinmaxDeviceArrayF32Py {
+                buf: Some(quad.is_max),
+                rows: combos.len(),
+                cols: hs.len(),
+                ctx: ctx.clone(),
+                device_id: dev_id,
             },
         )?,
     )?;
@@ -502,12 +786,12 @@ pub fn minmax_cuda_batch_dev_py<'py>(
         "last_min",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: crate::cuda::moving_averages::DeviceArrayF32 {
-                    buf: quad.last_min,
-                    rows: combos.len(),
-                    cols: hs.len(),
-                },
+            MinmaxDeviceArrayF32Py {
+                buf: Some(quad.last_min),
+                rows: combos.len(),
+                cols: hs.len(),
+                ctx: ctx.clone(),
+                device_id: dev_id,
             },
         )?,
     )?;
@@ -515,12 +799,12 @@ pub fn minmax_cuda_batch_dev_py<'py>(
         "last_max",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: crate::cuda::moving_averages::DeviceArrayF32 {
-                    buf: quad.last_max,
-                    rows: combos.len(),
-                    cols: hs.len(),
-                },
+            MinmaxDeviceArrayF32Py {
+                buf: Some(quad.last_max),
+                rows: combos.len(),
+                cols: hs.len(),
+                ctx,
+                device_id: dev_id,
             },
         )?,
     )?;
@@ -563,22 +847,24 @@ pub fn minmax_cuda_many_series_one_param_dev_py<'py>(
     let hflat = high_tm.as_slice()?;
     let lflat = low_tm.as_slice()?;
     let params = MinmaxParams { order: Some(order) };
-    let quad = py.allow_threads(|| {
+    let (quad, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaMinmax::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.minmax_many_series_one_param_time_major_dev(hflat, lflat, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let quad = cuda
+            .minmax_many_series_one_param_time_major_dev(hflat, lflat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((quad, cuda.context_arc(), cuda.device_id()))
     })?;
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item(
         "is_min",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: crate::cuda::moving_averages::DeviceArrayF32 {
-                    buf: quad.is_min,
-                    rows,
-                    cols,
-                },
+            MinmaxDeviceArrayF32Py {
+                buf: Some(quad.is_min),
+                rows,
+                cols,
+                ctx: ctx.clone(),
+                device_id: dev_id,
             },
         )?,
     )?;
@@ -586,12 +872,12 @@ pub fn minmax_cuda_many_series_one_param_dev_py<'py>(
         "is_max",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: crate::cuda::moving_averages::DeviceArrayF32 {
-                    buf: quad.is_max,
-                    rows,
-                    cols,
-                },
+            MinmaxDeviceArrayF32Py {
+                buf: Some(quad.is_max),
+                rows,
+                cols,
+                ctx: ctx.clone(),
+                device_id: dev_id,
             },
         )?,
     )?;
@@ -599,12 +885,12 @@ pub fn minmax_cuda_many_series_one_param_dev_py<'py>(
         "last_min",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: crate::cuda::moving_averages::DeviceArrayF32 {
-                    buf: quad.last_min,
-                    rows,
-                    cols,
-                },
+            MinmaxDeviceArrayF32Py {
+                buf: Some(quad.last_min),
+                rows,
+                cols,
+                ctx: ctx.clone(),
+                device_id: dev_id,
             },
         )?,
     )?;
@@ -612,12 +898,12 @@ pub fn minmax_cuda_many_series_one_param_dev_py<'py>(
         "last_max",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: crate::cuda::moving_averages::DeviceArrayF32 {
-                    buf: quad.last_max,
-                    rows,
-                    cols,
-                },
+            MinmaxDeviceArrayF32Py {
+                buf: Some(quad.last_max),
+                rows,
+                cols,
+                ctx,
+                device_id: dev_id,
             },
         )?,
     )?;
@@ -1289,10 +1575,7 @@ pub fn minmax_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(MinmaxError::InvalidOrder {
-                order: 0,
-                data_len: 0,
-            })
+            return Err(MinmaxError::InvalidKernelForBatch(k));
         }
     };
     let simd = match kernel {
@@ -1350,19 +1633,53 @@ impl MinmaxBatchOutput {
 // --- BATCH EXPANSION ---
 
 #[inline(always)]
-fn expand_grid(r: &MinmaxBatchRange) -> Vec<MinmaxParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &MinmaxBatchRange) -> Result<Vec<MinmaxParams>, MinmaxError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, MinmaxError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut out = Vec::new();
+        if start < end {
+            let st = step.max(1);
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(st) {
+                    Some(next) => {
+                        if next == v {
+                            break;
+                        }
+                        v = next;
+                    }
+                    None => break,
+                }
+            }
+        } else {
+            let st = step.max(1) as isize;
+            let mut v = start as isize;
+            let end_i = end as isize;
+            while v >= end_i {
+                out.push(v as usize);
+                v -= st;
+            }
+        }
+        if out.is_empty() {
+            return Err(MinmaxError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(out)
     }
-    let orders = axis_usize(r.order);
+    let orders = axis_usize(r.order)?;
     let mut out = Vec::with_capacity(orders.len());
     for &o in &orders {
         out.push(MinmaxParams { order: Some(o) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1394,7 +1711,7 @@ fn minmax_batch_inner(
     parallel: bool,
 ) -> Result<MinmaxBatchOutput, MinmaxError> {
     if high.is_empty() || low.is_empty() {
-        return Err(MinmaxError::EmptyData);
+        return Err(MinmaxError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MinmaxError::InvalidOrder {
@@ -1403,13 +1720,7 @@ fn minmax_batch_inner(
         });
     }
 
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(MinmaxError::InvalidOrder {
-            order: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let len = high.len();
     let first = high
@@ -1427,6 +1738,13 @@ fn minmax_batch_inner(
 
     let rows = combos.len();
     let cols = len;
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| MinmaxError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols overflow".to_string(),
+        })?;
 
     // 4 matrices, uninitialized
     let mut min_mu = make_uninit_matrix(rows, cols);
@@ -1572,7 +1890,7 @@ fn minmax_batch_inner_into(
     last_max_out: &mut [f64],
 ) -> Result<Vec<MinmaxParams>, MinmaxError> {
     if high.is_empty() || low.is_empty() {
-        return Err(MinmaxError::EmptyData);
+        return Err(MinmaxError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MinmaxError::InvalidOrder {
@@ -1581,26 +1899,27 @@ fn minmax_batch_inner_into(
         });
     }
 
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(MinmaxError::InvalidOrder {
-            order: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let len = high.len();
     let rows = combos.len();
     let cols = len;
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| MinmaxError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols overflow".to_string(),
+        })?;
 
-    if is_min_out.len() != rows * cols
-        || is_max_out.len() != rows * cols
-        || last_min_out.len() != rows * cols
-        || last_max_out.len() != rows * cols
+    if is_min_out.len() != total
+        || is_max_out.len() != total
+        || last_min_out.len() != total
+        || last_max_out.len() != total
     {
-        return Err(MinmaxError::InvalidOrder {
-            order: is_min_out.len(),
-            data_len: rows * cols,
+        return Err(MinmaxError::OutputLengthMismatch {
+            expected: total,
+            got: is_min_out.len(),
         });
     }
 
@@ -1623,19 +1942,19 @@ fn minmax_batch_inner_into(
         (
             core::slice::from_raw_parts_mut(
                 is_min_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
-                rows * cols,
+                total,
             ),
             core::slice::from_raw_parts_mut(
                 is_max_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
-                rows * cols,
+                total,
             ),
             core::slice::from_raw_parts_mut(
                 last_min_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
-                rows * cols,
+                total,
             ),
             core::slice::from_raw_parts_mut(
                 last_max_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
-                rows * cols,
+                total,
             ),
         )
     };
@@ -1923,15 +2242,18 @@ pub fn minmax_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let sweep = MinmaxBatchRange { order: order_range };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow in minmax_batch_py"))?;
 
     // Pre-allocate arrays for batch operation
-    let is_min_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let is_max_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let last_min_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let last_max_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let is_min_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let is_max_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let last_min_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let last_max_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
 
     let is_min_slice = unsafe { is_min_arr.as_slice_mut()? };
     let is_max_slice = unsafe { is_max_arr.as_slice_mut()? };
@@ -2175,7 +2497,13 @@ pub fn minmax_batch_unified_js(
     let rows = out.rows; // combos
     let cols = out.cols;
 
-    let mut values = Vec::with_capacity(4 * rows * cols);
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows*cols overflow in minmax_batch_unified_js"))?;
+    let cap = total
+        .checked_mul(4)
+        .ok_or_else(|| JsValue::from_str("capacity overflow in minmax_batch_unified_js"))?;
+    let mut values = Vec::with_capacity(cap);
     // series-major layout: is_min, is_max, last_min, last_max blocks
     for series in 0..4 {
         for r in 0..rows {
@@ -2232,14 +2560,18 @@ pub fn minmax_batch_into(
             order: (order_start, order_end, order_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow in minmax_batch_into"))?;
 
-        let is_min_out = std::slice::from_raw_parts_mut(is_min_ptr, rows * cols);
-        let is_max_out = std::slice::from_raw_parts_mut(is_max_ptr, rows * cols);
-        let last_min_out = std::slice::from_raw_parts_mut(last_min_ptr, rows * cols);
-        let last_max_out = std::slice::from_raw_parts_mut(last_max_ptr, rows * cols);
+        let is_min_out = std::slice::from_raw_parts_mut(is_min_ptr, total);
+        let is_max_out = std::slice::from_raw_parts_mut(is_max_ptr, total);
+        let last_min_out = std::slice::from_raw_parts_mut(last_min_ptr, total);
+        let last_max_out = std::slice::from_raw_parts_mut(last_max_ptr, total);
 
         minmax_batch_inner_into(
             high,

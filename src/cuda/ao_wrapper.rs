@@ -206,12 +206,28 @@ impl CudaAo {
         // Build DS (float2) exclusive prefix on host (FP64-free on device)
         let prefix: Vec<Float2> = build_prefix_ds(hl2, first_valid);
 
-        // VRAM estimate and headroom
+        // VRAM estimate and headroom (checked arithmetic)
         let rows = combos.len();
-        let bytes_prefix = (len + 1) * std::mem::size_of::<Float2>();
-        let bytes_periods = 2 * rows * std::mem::size_of::<i32>();
-        let bytes_out_total = rows * len * std::mem::size_of::<f32>();
-        let required = bytes_prefix + bytes_periods + bytes_out_total;
+        let len_plus_one = len
+            .checked_add(1)
+            .ok_or_else(|| CudaAoError::InvalidInput("len+1 overflow".into()))?;
+        let bytes_prefix = len_plus_one
+            .checked_mul(std::mem::size_of::<Float2>())
+            .ok_or_else(|| CudaAoError::InvalidInput("prefix size overflow".into()))?;
+        let bytes_periods = rows
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<i32>()))
+            .ok_or_else(|| CudaAoError::InvalidInput("periods size overflow".into()))?;
+        let elems_out = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaAoError::InvalidInput("rows*len overflow".into()))?;
+        let bytes_out_total = elems_out
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAoError::InvalidInput("output size overflow".into()))?;
+        let required = bytes_prefix
+            .checked_add(bytes_periods)
+            .and_then(|v| v.checked_add(bytes_out_total))
+            .ok_or_else(|| CudaAoError::InvalidInput("total VRAM size overflow".into()))?;
         let headroom = 64usize * 1024 * 1024;
         self.will_fit(required, headroom)?;
 
@@ -219,7 +235,7 @@ impl CudaAo {
         let d_prefix: DeviceBuffer<Float2> = DeviceBuffer::from_slice(&prefix)?;
 
         // Allocate one device output for all rows (avoid host bounce)
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_out) }?;
 
         if rows <= 65_535 {
             let d_shorts_full = DeviceBuffer::from_slice(&shorts)?;
@@ -277,7 +293,13 @@ impl CudaAo {
             let mut shorts_ptr = d_shorts.as_device_ptr().as_raw();
             let mut longs_ptr = d_longs.as_device_ptr().as_raw();
             let mut combos_i = n_combos as i32;
-            let byte_off = (combo_offset * len * std::mem::size_of::<f32>()) as u64;
+            let elem_offset = combo_offset
+                .checked_mul(len)
+                .ok_or_else(|| CudaAoError::InvalidInput("combo_offset*len overflow".into()))?;
+            let byte_off = elem_offset
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| CudaAoError::InvalidInput("byte offset overflow".into()))?
+                as u64;
             let mut out_ptr = d_out.as_device_ptr().as_raw() + byte_off;
             let args: &mut [*mut c_void] = &mut [
                 &mut prefix_ptr as *mut _ as *mut c_void,
@@ -306,10 +328,13 @@ impl CudaAo {
         if cols == 0 || rows == 0 {
             return Err(CudaAoError::InvalidInput("invalid dims".into()));
         }
-        if hl2_tm.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAoError::InvalidInput("rows*cols overflow".into()))?;
+        if hl2_tm.len() != expected {
             return Err(CudaAoError::InvalidInput(format!(
                 "time-major input length mismatch (expected {}, got {})",
-                cols * rows,
+                expected,
                 hl2_tm.len()
             )));
         }
@@ -341,15 +366,29 @@ impl CudaAo {
             first_valids[s] = fv;
         }
 
-        let prices_bytes = hl2_tm.len() * std::mem::size_of::<f32>();
-        let first_bytes = first_valids.len() * std::mem::size_of::<i32>();
-        let out_bytes = cols * rows * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_bytes + out_bytes;
+        let prices_bytes = hl2_tm
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAoError::InvalidInput("prices size overflow".into()))?;
+        let first_bytes = first_valids
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaAoError::InvalidInput("first_valids size overflow".into()))?;
+        let elems_out = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAoError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = elems_out
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAoError::InvalidInput("output size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(first_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaAoError::InvalidInput("total VRAM size overflow".into()))?;
         self.will_fit(required, 64 * 1024 * 1024)?;
 
         let d_prices = DeviceBuffer::from_slice(hl2_tm)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_out) }?;
         self.launch_many_series(&d_prices, &d_first, cols, rows, short, long, &mut d_out)?;
         Ok(DeviceArrayF32Ao { buf: d_out, rows, cols, ctx: self._context.clone(), device_id: self.device_id })
     }

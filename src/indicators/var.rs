@@ -200,12 +200,20 @@ impl VarBuilder {
 
 #[derive(Debug, Error)]
 pub enum VarError {
+    #[error("var: input data is empty")]
+    EmptyInputData,
     #[error("var: All values are NaN.")]
     AllValuesNaN,
     #[error("var: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("var: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("var: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("var: invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
+    #[error("var: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("var: nbdev is NaN or infinite: {nbdev}")]
     InvalidNbdev { nbdev: f64 },
 }
@@ -219,11 +227,14 @@ pub fn var(input: &VarInput) -> Result<VarOutput, VarError> {
 
 pub fn var_with_kernel(input: &VarInput, kernel: Kernel) -> Result<VarOutput, VarError> {
     let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(VarError::EmptyInputData);
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(VarError::AllValuesNaN)?;
-    let len = data.len();
     let period = input.get_period();
     let nbdev = input.get_nbdev();
 
@@ -289,20 +300,23 @@ pub fn var_with_kernel(input: &VarInput, kernel: Kernel) -> Result<VarOutput, Va
 #[cfg(not(feature = "wasm"))]
 pub fn var_into(input: &VarInput, out: &mut [f64]) -> Result<(), VarError> {
     let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(VarError::EmptyInputData);
+    }
+    if out.len() != len {
+        return Err(VarError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(VarError::AllValuesNaN)?;
-    let len = data.len();
     let period = input.get_period();
     let nbdev = input.get_nbdev();
 
-    if out.len() != len {
-        return Err(VarError::InvalidPeriod {
-            period: out.len(),
-            data_len: len,
-        });
-    }
     if period == 0 || period > len {
         return Err(VarError::InvalidPeriod {
             period,
@@ -580,11 +594,20 @@ pub fn var_avx512(
 #[inline]
 pub fn var_into_slice(dst: &mut [f64], input: &VarInput, kern: Kernel) -> Result<(), VarError> {
     let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(VarError::EmptyInputData);
+    }
+    if dst.len() != len {
+        return Err(VarError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(VarError::AllValuesNaN)?;
-    let len = data.len();
     let period = input.get_period();
     let nbdev = input.get_nbdev();
 
@@ -603,13 +626,6 @@ pub fn var_into_slice(dst: &mut [f64], input: &VarInput, kern: Kernel) -> Result
     if nbdev.is_nan() || nbdev.is_infinite() {
         return Err(VarError::InvalidNbdev { nbdev });
     }
-    if dst.len() != data.len() {
-        return Err(VarError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
-        });
-    }
-
     let chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -876,23 +892,58 @@ fn expand_grid(r: &VarBatchRange) -> Vec<VarParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut v = Vec::new();
+        if start < end {
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                match x.checked_add(step) {
+                    Some(next) if next > x => x = next,
+                    _ => break,
+                }
+            }
+        } else {
+            let mut x = start;
+            while x >= end {
+                v.push(x);
+                match x.checked_sub(step) {
+                    Some(next) if next < x => x = next,
+                    _ => break,
+                }
+            }
+        }
+        v
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+        let eps = 1e-12;
+        if step.abs() < eps || (start - end).abs() < eps {
             return vec![start];
         }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if step > 0.0 {
+            if start > end + eps {
+                return v;
+            }
+            while x <= end + eps {
+                v.push(x);
+                x += step;
+            }
+        } else {
+            if start < end - eps {
+                return v;
+            }
+            while x >= end - eps {
+                v.push(x);
+                x += step;
+            }
         }
         v
     }
     let periods = axis_usize(r.period);
     let nbdevs = axis_f64(r.nbdev);
-    let mut out = Vec::with_capacity(periods.len() * nbdevs.len());
+    let capacity = periods.len().checked_mul(nbdevs.len()).unwrap_or(0);
+    let mut out = Vec::with_capacity(capacity);
     for &p in &periods {
         for &n in &nbdevs {
             out.push(VarParams {
@@ -961,11 +1012,15 @@ fn var_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<VarBatchOutput, VarError> {
+    if data.is_empty() {
+        return Err(VarError::EmptyInputData);
+    }
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(VarError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(VarError::InvalidRange {
+            start: sweep.period.0 as f64,
+            end: sweep.period.1 as f64,
+            step: sweep.period.2 as f64,
         });
     }
     let first = data
@@ -1095,10 +1150,7 @@ pub fn var_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(VarError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(VarError::InvalidKernelForBatch(k))
         }
     };
     let simd = match kernel {
@@ -1321,7 +1373,10 @@ pub fn var_batch_into(
         let rows = combos.len();
         let cols = len;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows * cols overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         // key addition: initialize warmup prefixes per row
         let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
@@ -2224,9 +2279,12 @@ pub fn var_batch_py<'py>(
 
     let dict = PyDict::new(py);
     // Convert flat vector to 2D array similar to how ATR does it
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
     let values_2d = unsafe { numpy::PyArray2::<f64>::new(py, [rows, cols], false) };
     let raw_ptr = values_2d.data() as *mut f64;
-    let output_slice = unsafe { std::slice::from_raw_parts_mut(raw_ptr, rows * cols) };
+    let output_slice = unsafe { std::slice::from_raw_parts_mut(raw_ptr, total) };
     output_slice.copy_from_slice(&out.values);
 
     dict.set_item("values", values_2d)?;
@@ -2255,7 +2313,318 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::var_wrapper::CudaVar;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+// VAR-specific VRAM handle for Python (CUDA Array Interface v3 + DLPack v1.x)
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "VarDeviceArrayF32", unsendable)]
+pub struct VarDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl VarDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Producer kernels synchronize before returning, so no stream key is required.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (_stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        mut slf: pyo3::PyRefMut<'py, Self>,
+        py: Python<'py>,
+        _stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi;
+        use std::ffi::{CStr, CString};
+        use std::os::raw::{c_char, c_void};
+        use std::ptr::null_mut;
+
+        if let Some((dev_type, dev_id)) = dl_device {
+            if dev_type != 2 || dev_id != slf.device_id as i32 {
+                return Err(PyValueError::new_err("dl_device mismatch for VAR buffer"));
+            }
+        }
+        if matches!(copy, Some(true)) {
+            return Err(PyValueError::new_err(
+                "copy=True not supported for VAR DLPack export",
+            ));
+        }
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLPackVersion {
+            major: u32,
+            minor: u32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+
+        struct HolderV0 {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32,
+            _ctx: Arc<Context>,
+            device_id: u32,
+        }
+
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32,
+            _ctx: Arc<Context>,
+            device_id: u32,
+        }
+
+        extern "C" fn deleter_v0(mt: *mut DLManagedTensor) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut HolderV0;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        extern "C" fn deleter_v1(mt: *mut DLManagedTensorVersioned) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut HolderV1;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut ffi::PyObject) {
+            if capsule.is_null() {
+                return;
+            }
+            let name_ptr = ffi::PyCapsule_GetName(capsule);
+            if name_ptr.is_null() {
+                return;
+            }
+            let name = CStr::from_ptr(name_ptr);
+            let (symbol, versioned) = if name.to_bytes() == b"dltensor_versioned" {
+                (b"dltensor_versioned\0".as_ptr() as *const c_char, true)
+            } else if name.to_bytes() == b"dltensor" {
+                (b"dltensor\0".as_ptr() as *const c_char, false)
+            } else {
+                return;
+            };
+
+            let ptr = ffi::PyCapsule_GetPointer(capsule, symbol);
+            if ptr.is_null() {
+                return;
+            }
+            if versioned {
+                let mt = ptr as *mut DLManagedTensorVersioned;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+            } else {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+            }
+            ffi::PyCapsule_SetPointer(capsule, null_mut());
+        }
+
+        let wants_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+
+        // Move VRAM handle into the holder to avoid double free on drop.
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut slf.inner,
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
+
+        let data_ptr = if inner.rows == 0 || inner.cols == 0 {
+            std::ptr::null_mut()
+        } else {
+            inner.buf.as_device_ptr().as_raw() as *mut c_void
+        };
+
+        if wants_versioned {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    version: DLPackVersion { major: 1, minor: 0 },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_v1),
+                    flags: 0,
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: slf.device_id as i32,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                },
+                shape: [inner.rows as i64, inner.cols as i64],
+                strides: [inner.cols as i64, 1],
+                arr: inner,
+                _ctx: slf._ctx.clone(),
+                device_id: slf.device_id,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            holder.managed.manager_ctx =
+                &mut *holder as *mut HolderV1 as *mut c_void;
+            let _ = Box::into_raw(holder);
+
+            let name = CString::new("dltensor_versioned").unwrap();
+            let capsule = unsafe {
+                ffi::PyCapsule_New(
+                    mt_ptr as *mut c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { deleter_v1(mt_ptr) };
+                return Err(PyValueError::new_err(
+                    "failed to create DLPack capsule (versioned)",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mut holder = Box::new(HolderV0 {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: slf.device_id as i32,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_v0),
+                },
+                shape: [inner.rows as i64, inner.cols as i64],
+                strides: [inner.cols as i64, 1],
+                arr: inner,
+                _ctx: slf._ctx.clone(),
+                device_id: slf.device_id,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            holder.managed.manager_ctx =
+                &mut *holder as *mut HolderV0 as *mut c_void;
+            let _ = Box::into_raw(holder);
+
+            let name = CString::new("dltensor").unwrap();
+            let capsule = unsafe {
+                ffi::PyCapsule_New(
+                    mt_ptr as *mut c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { deleter_v0(mt_ptr) };
+                return Err(PyValueError::new_err(
+                    "failed to create DLPack capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "var_cuda_batch_dev")]
@@ -2266,7 +2635,7 @@ pub fn var_cuda_batch_dev_py(
     period_range: (usize, usize, usize),
     nbdev_range: (f32, f32, f32),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<VarDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2279,13 +2648,19 @@ pub fn var_cuda_batch_dev_py(
             nbdev_range.2 as f64,
         ),
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaVar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.var_batch_dev(slice_in, &sweep)
-            .map(|pair| pair.0)
+            .map(|pair| (pair.0, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(VarDeviceArrayF32Py {
+        inner,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2299,7 +2674,7 @@ pub fn var_cuda_many_series_one_param_dev_py(
     period: usize,
     nbdev: f64,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<VarDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2308,12 +2683,19 @@ pub fn var_cuda_many_series_one_param_dev_py(
         period: Some(period),
         nbdev: Some(nbdev),
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaVar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.var_many_series_one_param_time_major_dev(slice_tm, cols, rows, &params)
+            .map(|h| (h, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(VarDeviceArrayF32Py {
+        inner,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 // Helper function for batch processing that writes directly to output
@@ -2325,11 +2707,15 @@ fn var_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<VarParams>, VarError> {
+    if data.is_empty() {
+        return Err(VarError::EmptyInputData);
+    }
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(VarError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(VarError::InvalidRange {
+            start: sweep.period.0 as f64,
+            end: sweep.period.1 as f64,
+            step: sweep.period.2 as f64,
         });
     }
     let first = data
