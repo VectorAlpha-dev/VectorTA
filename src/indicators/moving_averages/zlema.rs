@@ -86,10 +86,17 @@ impl DeviceArrayF32Py {
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
-    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<pyo3::PyObject> {
-        use pyo3::ffi;
-        use std::ffi::CString;
-        use std::os::raw::{c_char, c_void};
+    // DLPack v1.x with version negotiation; legacy fallback
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<pyo3::PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
 
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
@@ -106,63 +113,108 @@ impl DeviceArrayF32Py {
             byte_offset: u64,
         }
         #[repr(C)]
-        struct DLManagedTensor {
-            dl_tensor: DLTensor,
-            manager_ctx: *mut c_void,
-            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
-        }
+        struct DLManagedTensor { dl_tensor: DLTensor, manager_ctx: *mut c_void, deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)> }
         #[repr(C)]
-        struct Manager { py_self: *mut ffi::PyObject, shape: *mut [i64; 2] }
+        struct DLManagedTensorVersioned { manager: *mut DLManagedTensor, version: u32 }
 
-        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+        #[repr(C)]
+        struct ManagerCtx { shape: *mut i64, strides: *mut i64, _shape: Box<[i64; 2]>, _strides: Box<[i64; 2]>, _self_ref: pyo3::PyObject }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
             if p.is_null() { return; }
-            unsafe {
-                let mgr = (*p).manager_ctx as *mut Manager;
-                if !mgr.is_null() {
-                    let mgr_box = Box::from_raw(mgr);
-                    let g = ffi::PyGILState_Ensure();
-                    ffi::Py_DECREF(mgr_box.py_self);
-                    ffi::PyGILState_Release(g);
-                    if !mgr_box.shape.is_null() {
-                        let _ = Box::from_raw(mgr_box.shape);
-                    }
-                }
-                let _ = Box::from_raw(p);
-            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() { let _ = Box::from_raw(ctx_ptr); }
+            drop(mt);
         }
+
+        // If a consumer stream pointer (>2) is provided, insert a dependency via event
+        #[cfg(feature = "cuda")]
+        if let Some(s) = stream { if s > 2 {
+            unsafe {
+                use cust::sys as cu;
+                let mut ev: cu::CUevent = std::ptr::null_mut();
+                let _ = cu::cuEventCreate(&mut ev as *mut _, 0);
+                let prod: cu::CUstream = slf.stream as *mut _;
+                let _ = cu::cuEventRecord(ev, prod);
+                let cons: cu::CUstream = s as *mut _;
+                let _ = cu::cuStreamWaitEvent(cons, ev, 0);
+                let _ = cu::cuEventDestroy_v2(ev);
+            }
+        }}
 
         let rows = slf.inner.rows as i64;
         let cols = slf.inner.cols as i64;
-        let mut shape = Box::new([rows, cols]);
-        let shape_ptr: *mut [i64; 2] = &mut *shape;
+        let total_elems = (rows as i128) * (cols as i128);
 
-        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
-        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx { shape: shape_ptr, strides: strides_ptr, _shape: shape, _strides: strides, _self_ref: self_ref });
         let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
 
-        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
-        let dl = DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
-                ndim: 2,
-                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                shape: shape_ptr as *mut i64,
-                strides: core::ptr::null_mut(),
-                byte_offset: 0,
-            },
-            manager_ctx: mgr_ptr,
-            deleter: Some(dlpack_deleter),
+        let data_ptr: *mut c_void = if total_elems == 0 { std::ptr::null_mut() } else { slf.inner.device_ptr() as usize as *mut c_void };
+        let tensor = DLTensor {
+            data: data_ptr,
+            device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
         };
+        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
 
-        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
-        let name = CString::new("dltensor").unwrap();
-        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
-        if capsule.is_null() {
-            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
-            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                extern "C" fn cap_destructor(capsule: *mut pyffi::PyObject) {
+                    unsafe {
+                        let nm = CString::new("dltensor_versioned").unwrap();
+                        let ptr = pyffi::PyCapsule_GetPointer(capsule, nm.as_ptr());
+                        if !ptr.is_null() {
+                            let wrap = ptr as *mut DLManagedTensorVersioned;
+                            if !wrap.is_null() {
+                                let inner = (*wrap).manager;
+                                if !inner.is_null() {
+                                    if let Some(del) = (*inner).deleter { del(inner); }
+                                }
+                                let _ = Box::from_raw(wrap);
+                            }
+                            let used = CString::new("used_dltensor_versioned").unwrap();
+                            let _ = pyffi::PyCapsule_SetName(capsule, used.as_ptr());
+                        }
+                    }
+                }
+                let wrapped = Box::new(DLManagedTensorVersioned { manager: Box::into_raw(mt), version: 1 });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(cap_destructor));
+                if cap.is_null() { let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned); return Err(PyValueError::new_err("failed to create versioned DLPack capsule")); }
+                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+            } else {
+                extern "C" fn cap_destructor(capsule: *mut pyffi::PyObject) {
+                    unsafe {
+                        let nm = CString::new("dltensor").unwrap();
+                        let ptr = pyffi::PyCapsule_GetPointer(capsule, nm.as_ptr());
+                        if !ptr.is_null() {
+                            let inner = ptr as *mut DLManagedTensor;
+                            if let Some(del) = (*inner).deleter { del(inner); }
+                            let used = CString::new("used_dltensor").unwrap();
+                            let _ = pyffi::PyCapsule_SetName(capsule, used.as_ptr());
+                        }
+                    }
+                }
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(cap_destructor));
+                if cap.is_null() { let _ = Box::from_raw(ptr as *mut DLManagedTensor); return Err(PyValueError::new_err("failed to create DLPack capsule")); }
+                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+            }
         }
-        Ok(unsafe { pyo3::prelude::PyObject::from_owned_ptr(py, capsule) })
     }
 }
 
@@ -1688,10 +1740,7 @@ pub fn zlema_compute_into(
 ) -> Result<(), ZlemaError> {
     let (data, first, period, warm) = zlema_validate(input)?;
     if out.len() != data.len() {
-        return Err(ZlemaError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
-        });
+        return Err(ZlemaError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
 
     // Initialize the warmup period with the same quiet-NaN pattern used by Vec API
@@ -2211,7 +2260,10 @@ pub fn zlema_batch_into(
 
         let combos = expand_grid(&sweep);
         let rows = combos.len();
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * len);
+        let total = rows
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         // Use batch kernel detection and conversion
         let kernel = match Kernel::Auto {

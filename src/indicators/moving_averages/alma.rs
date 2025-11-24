@@ -108,8 +108,10 @@ impl DeviceArrayF32Py {
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
         #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
         struct DLTensor {
-            data: *mut std::ffi::c_void,
+            data: *mut c_void,
             device: DLDevice,
             ndim: i32,
             dtype: DLDataType,

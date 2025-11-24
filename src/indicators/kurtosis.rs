@@ -17,6 +17,7 @@
 //! - Streaming: O(1) central-moment update implemented, but short-circuited to exact O(n) rebuild each tick to satisfy strict 1e-9 parity with batch. Revisit if tolerance policy loosens.
 //! - Memory: uses `alloc_with_nan_prefix` for warmup; zero-copy write into caller buffers.
 //! - Batch: parallel row execution present; row-specific kernels defer to scalar to avoid numerical drift.
+//! - CUDA: PTX wrapper enabled with typed errors and VRAM-backed handles; Python interop uses CUDA Array Interface v3 and DLPack v1.x while keeping the CUDA context alive via RAII.
 //!
 //! ### Decision Log / TODO
 //! - SIMD kernels are present but short-circuited to scalar due to strict unit-test references requiring identical rounding; revisit only if tolerance policy changes.
@@ -35,6 +36,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -53,6 +58,8 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for KurtosisInput<'a> {
@@ -190,6 +197,12 @@ pub enum KurtosisError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("kurtosis: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("kurtosis: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("kurtosis: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("kurtosis: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("kurtosis: Invalid period (zero or missing).")]
     ZeroOrMissingPeriod,
 }
@@ -287,9 +300,9 @@ pub fn kurtosis_into_slice(
         });
     }
     if dst.len() != data.len() {
-        return Err(KurtosisError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(KurtosisError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -425,12 +438,7 @@ pub fn kurtosis_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(KurtosisError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(KurtosisError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -523,19 +531,37 @@ impl KurtosisBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &KurtosisBatchRange) -> Vec<KurtosisParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &KurtosisBatchRange) -> Result<Vec<KurtosisParams>, KurtosisError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, KurtosisError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
+        }
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(KurtosisError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(KurtosisParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -563,11 +589,12 @@ fn kurtosis_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<KurtosisBatchOutput, KurtosisError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(KurtosisError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(KurtosisError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
         });
     }
 
@@ -585,6 +612,11 @@ fn kurtosis_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    let _ = rows.checked_mul(cols).ok_or_else(|| KurtosisError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
     let mut values_mu = make_uninit_matrix(rows, cols);
 
     let warmup_periods: Vec<usize> = combos
@@ -655,11 +687,12 @@ fn kurtosis_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<KurtosisParams>, KurtosisError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(KurtosisError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(KurtosisError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
         });
     }
 
@@ -677,6 +710,19 @@ fn kurtosis_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| KurtosisError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
+    if out.len() != expected {
+        return Err(KurtosisError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Initialize NaN prefixes for each row based on warmup period
     for (row, combo) in combos.iter().enumerate() {
@@ -1797,11 +1843,14 @@ pub fn kurtosis_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("kurtosis: rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
@@ -1834,6 +1883,251 @@ pub fn kurtosis_batch_py<'py>(
     Ok(dict)
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "KurtosisDeviceArrayF32")]
+pub struct KurtosisDeviceArrayF32Py {
+    pub inner: DeviceArrayF32,
+    _ctx_guard: Arc<Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl KurtosisDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
+
+    #[pyo3(signature = (_stream=None, max_version=None, _dl_device=None, _copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        _stream: Option<isize>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use pyo3::PyObject;
+        use std::ffi::{c_void, CStr, CString};
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx_guard: Arc<Context>,
+            _self_ref: PyObject,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx.is_null() {
+                let _ = Box::from_raw(ctx);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            if capsule.is_null() {
+                return;
+            }
+            let name_ptr = pyffi::PyCapsule_GetName(capsule);
+            if name_ptr.is_null() {
+                return;
+            }
+            let name = CStr::from_ptr(name_ptr).to_bytes();
+            if name == b"dltensor" {
+                let raw = b"dltensor\0";
+                let ptr = pyffi::PyCapsule_GetPointer(
+                    capsule,
+                    raw.as_ptr() as *const _,
+                ) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter {
+                        del(ptr);
+                    }
+                    let used = b"used_dltensor\0";
+                    let _ = pyffi::PyCapsule_SetName(
+                        capsule,
+                        used.as_ptr() as *const _,
+                    );
+                }
+            } else if name == b"dltensor_versioned" {
+                let raw = b"dltensor_versioned\0";
+                let vptr = pyffi::PyCapsule_GetPointer(
+                    capsule,
+                    raw.as_ptr() as *const _,
+                ) as *mut DLManagedTensorVersioned;
+                if !vptr.is_null() {
+                    let manager = (*vptr).manager;
+                    if !manager.is_null() {
+                        if let Some(del) = (*manager).deleter {
+                            del(manager);
+                        }
+                    }
+                    let used = b"used_dltensor_versioned\0";
+                    let _ = pyffi::PyCapsule_SetName(
+                        capsule,
+                        used.as_ptr() as *const _,
+                    );
+                }
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let self_ref =
+            unsafe { PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _ctx_guard: slf._ctx_guard.clone(),
+            _self_ref: self_ref,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr: *mut c_void = if rows == 0 || cols == 0 {
+            std::ptr::null_mut()
+        } else {
+            slf.inner.buf.as_device_ptr().as_raw() as *mut c_void
+        };
+
+        let tensor = DLTensor {
+            data: data_ptr,
+            device: DLDevice {
+                device_type: 2,
+                device_id: slf._device_id as i32,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: tensor,
+            manager_ctx: mgr_ptr,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(
+                    ptr,
+                    name.as_ptr(),
+                    Some(capsule_destructor),
+                );
+                if cap.is_null() {
+                    let _ =
+                        Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "failed to create versioned DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl KurtosisDeviceArrayF32Py {
+    pub fn new_from_rust(
+        inner: DeviceArrayF32,
+        ctx_guard: Arc<Context>,
+        device_id: u32,
+    ) -> Self {
+        Self {
+            inner,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+        }
+    }
+}
+
 // ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "kurtosis_cuda_batch_dev")]
@@ -1843,10 +2137,9 @@ pub fn kurtosis_cuda_batch_dev_py(
     data_f32: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+) -> PyResult<KurtosisDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::kurtosis_wrapper::CudaKurtosis;
-    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1854,15 +2147,21 @@ pub fn kurtosis_cuda_batch_dev_py(
     let sweep = KurtosisBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_guard, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaKurtosis::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         let (dev, _combos) = cuda
             .kurtosis_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>(dev)
+        Ok::<_, PyErr>((dev, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(KurtosisDeviceArrayF32Py::new_from_rust(
+        inner,
+        ctx_guard,
+        dev_id,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1873,10 +2172,9 @@ pub fn kurtosis_cuda_many_series_one_param_dev_py(
     data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+) -> PyResult<KurtosisDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::kurtosis_wrapper::CudaKurtosis;
-    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1887,13 +2185,21 @@ pub fn kurtosis_cuda_many_series_one_param_dev_py(
     let rows = shape[0];
     let cols = shape[1];
     let slice_in = data_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_guard, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaKurtosis::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.kurtosis_many_series_one_param_time_major_dev(slice_in, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let dev = cuda
+            .kurtosis_many_series_one_param_time_major_dev(slice_in, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((dev, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(KurtosisDeviceArrayF32Py::new_from_rust(
+        inner,
+        ctx_guard,
+        dev_id,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2040,11 +2346,24 @@ pub fn kurtosis_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let expected = rows
+            .checked_mul(cols)
+            .ok_or_else(|| {
+                JsValue::from_str(
+                    &KurtosisError::InvalidRange {
+                        start: rows.to_string(),
+                        end: cols.to_string(),
+                        step: "rows*cols".into(),
+                    }
+                    .to_string(),
+                )
+            })?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, expected);
 
         let kernel = detect_best_kernel();
         kurtosis_batch_inner_into(data, &sweep, kernel, false, out)

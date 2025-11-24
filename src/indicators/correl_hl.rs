@@ -15,6 +15,7 @@
 //! - **SIMD Kernels**: AVX2/AVX512 implemented to accelerate initial/rebuild reductions; slide remains scalar O(1).
 //! - **Streaming Performance**: O(1) - uses running sums for efficient incremental correlation calculation
 //! - **Batch**: Row-specific optimized variant via shared prefix sums over (h, h², l, l², h·l), segmenting on NaNs.
+//! - **CUDA/Python**: CUDA wrapper returns typed errors and VRAM-backed handles with context + device id; Python exposes CUDA Array Interface v3 and DLPack v1.x capsules while preserving numerical outputs.
 //! - **Memory**: Uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes for warmup-friendly allocations
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -46,7 +47,16 @@ use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::mem::{ManuallyDrop, MaybeUninit};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 use thiserror::Error;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 
 #[derive(Debug, Clone)]
 pub enum CorrelHlData<'a> {
@@ -185,8 +195,8 @@ impl CorrelHlBuilder {
 
 #[derive(Debug, Error)]
 pub enum CorrelHlError {
-    #[error("correl_hl: Empty data provided (high or low).")]
-    EmptyData,
+    #[error("correl_hl: Empty data (high or low).")]
+    EmptyInputData,
     #[error("correl_hl: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("correl_hl: Data length mismatch between high and low.")]
@@ -197,8 +207,15 @@ pub enum CorrelHlError {
     AllValuesNaN,
     #[error("correl_hl: Candle field error: {field}")]
     CandleFieldError { field: &'static str },
-    #[error("correl_hl: Output length {dst} != input length {src}")]
-    OutputLengthMismatch { dst: usize, src: usize },
+    #[error("correl_hl: Output length mismatch (expected {expected}, got {got})")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("correl_hl: invalid input: {0}")]
+    InvalidInput(&'static str),
+    // Batch range or kernel usage errors
+    #[error("correl_hl: invalid range: start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("correl_hl: invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -213,7 +230,7 @@ fn correl_hl_prepare<'a>(
 ) -> Result<(&'a [f64], &'a [f64], usize, usize, Kernel), CorrelHlError> {
     let (high, low) = input.as_refs()?;
     if high.is_empty() || low.is_empty() {
-        return Err(CorrelHlError::EmptyData);
+        return Err(CorrelHlError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(CorrelHlError::DataLengthMismatch);
@@ -288,10 +305,7 @@ pub fn correl_hl_into_slice(
 ) -> Result<(), CorrelHlError> {
     let (high, low, period, first, chosen) = correl_hl_prepare(input, kernel)?;
     if dst.len() != high.len() {
-        return Err(CorrelHlError::OutputLengthMismatch {
-            dst: dst.len(),
-            src: high.len(),
-        });
+        return Err(CorrelHlError::OutputLengthMismatch { expected: high.len(), got: dst.len() });
     }
     correl_hl_compute_into(high, low, period, first, chosen, dst);
     let warm = first + period - 1;
@@ -313,10 +327,7 @@ pub fn correl_hl_into(out: &mut [f64], input: &CorrelHlInput) -> Result<(), Corr
     // Reuse the existing prepare logic to derive warmup and kernel selection
     let (high, _low, period, first, _chosen) = correl_hl_prepare(input, Kernel::Auto)?;
     if out.len() != high.len() {
-        return Err(CorrelHlError::OutputLengthMismatch {
-            dst: out.len(),
-            src: high.len(),
-        });
+        return Err(CorrelHlError::OutputLengthMismatch { expected: high.len(), got: out.len() });
     }
 
     // Prefill warmup prefix to match alloc_with_nan_prefix semantics
@@ -925,27 +936,58 @@ impl CorrelHlBatchBuilder {
     pub fn apply_candles(self, c: &Candles) -> Result<CorrelHlBatchOutput, CorrelHlError> {
         let high = c
             .select_candle_field("high")
-            .map_err(|_| CorrelHlError::EmptyData)?;
+            .map_err(|_| CorrelHlError::EmptyInputData)?;
         let low = c
             .select_candle_field("low")
-            .map_err(|_| CorrelHlError::EmptyData)?;
+            .map_err(|_| CorrelHlError::EmptyInputData)?;
         self.apply_slices(high, low)
     }
 }
 
-pub fn expand_grid(r: &CorrelHlBatchRange) -> Vec<CorrelHlParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+pub fn expand_grid(r: &CorrelHlBatchRange) -> Result<Vec<CorrelHlParams>, CorrelHlError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CorrelHlError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                match x.checked_add(step) {
+                    Some(nx) if nx > x => x = nx,
+                    _ => break,
+                }
+            }
+            if v.is_empty() { return Err(CorrelHlError::InvalidRange { start, end, step }); }
+            Ok(v)
+        } else {
+            // reversed bounds
+            let mut v = Vec::new();
+            let mut x = start;
+            while x >= end {
+                v.push(x);
+                if x < end + step { break; }
+                x = x.saturating_sub(step);
+                if x == 0 { break; }
+            }
+            if v.is_empty() { return Err(CorrelHlError::InvalidRange { start, end, step }); }
+            Ok(v)
+        }
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
+    if periods.is_empty() {
+        return Err(CorrelHlError::InvalidRange {
+            start: r.period.0,
+            end: r.period.1,
+            step: r.period.2,
+        });
+    }
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(CorrelHlParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[derive(Clone, Debug)]
@@ -980,12 +1022,7 @@ pub fn correl_hl_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(CorrelHlError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(CorrelHlError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -1025,13 +1062,7 @@ fn correl_hl_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<CorrelHlBatchOutput, CorrelHlError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(CorrelHlError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = high
         .iter()
@@ -1049,6 +1080,9 @@ fn correl_hl_batch_inner(
 
     let rows = combos.len();
     let cols = high.len();
+
+    rows.checked_mul(cols)
+        .ok_or(CorrelHlError::InvalidInput("rows*cols overflow"))?;
 
     // Calculate warmup periods for each row
     let warm: Vec<usize> = combos
@@ -1172,13 +1206,7 @@ fn correl_hl_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<CorrelHlParams>, CorrelHlError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(CorrelHlError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = high
         .iter()
@@ -1196,6 +1224,16 @@ fn correl_hl_batch_inner_into(
 
     let rows = combos.len();
     let cols = high.len();
+
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(CorrelHlError::InvalidInput("rows*cols overflow"))?;
+    if out.len() != total {
+        return Err(CorrelHlError::OutputLengthMismatch {
+            expected: total,
+            got: out.len(),
+        });
+    }
 
     // Warm prefixes with helper, zero-copy, debug-poison friendly.
     let warm: Vec<usize> = combos
@@ -1442,13 +1480,13 @@ pub fn correl_hl_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<
     };
 
     // Expand parameter grid and allocate output once
-    let combos = expand_grid(&sweep);
-    if combos.is_empty() {
-        return Err(JsValue::from_str("No valid parameter combinations"));
-    }
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = high.len();
-    let mut values = vec![0.0f64; rows * cols];
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+    let mut values = vec![0.0f64; total];
 
     // Use the shared-prefix batch path to ensure numerical parity with the
     // zero-copy fast API (`correl_hl_batch_into`). This writes warmup NaNs
@@ -1492,10 +1530,13 @@ pub fn correl_hl_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
 
-        let out_slice = std::slice::from_raw_parts_mut(out_ptr, rows * len);
+        let total = rows
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+        let out_slice = std::slice::from_raw_parts_mut(out_ptr, total);
 
         // Use the optimized batch inner function
         correl_hl_batch_inner_into(high, low, &sweep, Kernel::Auto, false, out_slice)
@@ -1577,11 +1618,14 @@ pub fn correl_hl_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -1616,6 +1660,214 @@ pub fn correl_hl_batch_py<'py>(
     Ok(dict)
 }
 
+// ==================== PYTHON: CUDA VRAM HANDLE (CAI v3 + DLPack v1.x) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "CorrelHlDeviceArrayF32", unsendable)]
+pub struct CorrelHlDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    _ctx_guard: Arc<Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl CorrelHlDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = &self.inner;
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (inner.cols * itemsize, itemsize))?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _self_ref: PyObject,
+            _arr: DeviceArrayF32,
+            _ctx: Arc<Context>,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ = Box::from_raw(ctx_ptr);
+            }
+        }
+
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let total = (rows as i128) * (cols as i128);
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let self_ref = unsafe {
+            PyObject::from_borrowed_ptr(py, self as *mut _ as *mut pyo3::ffi::PyObject)
+        };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _self_ref: self_ref,
+            _arr: inner,
+            _ctx: self._ctx_guard.clone(),
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let dl = DLTensor {
+            data: if total == 0 {
+                std::ptr::null_mut()
+            } else {
+                unsafe {
+                    (*(mgr_ptr as *mut ManagerCtx))
+                        ._arr
+                        .buf
+                        .as_device_ptr()
+                        .as_raw() as *mut c_void
+                }
+            },
+            device: DLDevice {
+                device_type: 2,
+                device_id: self._device_id as i32,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: dl,
+            manager_ctx: mgr_ptr,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl CorrelHlDeviceArrayF32Py {
+    pub fn new_from_rust(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self {
+            inner,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+        }
+    }
+}
+
 // ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "correl_hl_cuda_batch_dev")]
@@ -1626,10 +1878,9 @@ pub fn correl_hl_cuda_batch_dev_py(
     low_f32: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+) -> PyResult<CorrelHlDeviceArrayF32Py> {
     use crate::cuda::correl_hl_wrapper::CudaCorrelHl;
     use crate::cuda::cuda_available;
-    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1638,15 +1889,15 @@ pub fn correl_hl_cuda_batch_dev_py(
     let sweep = CorrelHlBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
-        let cuda =
-            CudaCorrelHl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaCorrelHl::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, _combos) = cuda
             .correl_hl_batch_dev(h, l, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>(dev)
+        Ok::<_, PyErr>((dev, cuda.context_arc(), cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(CorrelHlDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1658,10 +1909,9 @@ pub fn correl_hl_cuda_many_series_one_param_dev_py(
     low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+) -> PyResult<CorrelHlDeviceArrayF32Py> {
     use crate::cuda::correl_hl_wrapper::CudaCorrelHl;
     use crate::cuda::cuda_available;
-    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1673,13 +1923,15 @@ pub fn correl_hl_cuda_many_series_one_param_dev_py(
     let cols = shape[1];
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
-        let cuda =
-            CudaCorrelHl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.correl_hl_many_series_one_param_time_major_dev(h, l, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaCorrelHl::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev = cuda
+            .correl_hl_many_series_one_param_time_major_dev(h, l, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((dev, cuda.context_arc(), cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(CorrelHlDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(test)]

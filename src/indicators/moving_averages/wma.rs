@@ -324,8 +324,8 @@ fn wma_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, o
 #[inline]
 pub fn wma_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
     let lookback = period - 1;
-    let sum_of_weights = (period * (period + 1)) >> 1;
-    let divider = sum_of_weights as f64;
+    // Avoid potential usize overflow in period * (period + 1) by computing in f64.
+    let divider = (period as f64) * ((period + 1) as f64) * 0.5;
 
     let mut weighted_sum = 0.0;
     let mut plain_sum = 0.0;
@@ -596,27 +596,29 @@ impl WmaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &WmaBatchRange) -> Vec<WmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        // Robust expansion rules:
-        // - step == 0: static (single value)
-        // - start == end: single value
-        // - start < end and step > 0: increasing inclusive range
-        // - start > end and step > 0: decreasing inclusive range
+        // Hardened semantics:
+        // - step == 0 OR start == end => static (single value)
+        // - start < end => increasing inclusive with step>0
+        // - start > end => decreasing inclusive with step>0
         if step == 0 || start == end {
             return vec![start];
         }
         if start < end {
-            return (start..=end).step_by(step).collect();
+            return (start..=end).step_by(step.max(1)).collect();
         }
-        // start > end: build a decreasing sequence without underflow
-        let mut v = start;
+        // Decreasing sequence using isize to avoid underflow/overflow on end+step
         let mut out = Vec::new();
-        loop {
-            out.push(v);
-            if v <= end + step { break; }
-            v -= step;
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            out.push(x as usize);
+            x -= st;
+        }
+        if out.is_empty() {
+            return out;
         }
         if *out.last().unwrap() != end {
-            // ensure inclusive end if not hit exactly by stepping
             out.push(end);
         }
         out

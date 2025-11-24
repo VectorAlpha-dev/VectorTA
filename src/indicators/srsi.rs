@@ -18,6 +18,7 @@
 //! - **`Err(SrsiError)`** otherwise.
 //!
 //! ## Developer Notes
+//! - **Decision log**: SIMD paths delegate to the scalar kernel; CUDA wrapper is available and returns VRAM handles consumed via CUDA Array Interface v3 and DLPack v1.x; numerical outputs match the scalar reference.
 //! - Scalar optimized: inlined Wilder RSI + O(n) min/max via block prefix/suffix scans (avoids per-iteration modulo) and rolling SMAs. Defaults (14,14,3,3) use classic path for bitwise-identical outputs.
 //! - **AVX2/AVX512 Kernels**: Delegated to scalar for now; sliding-window min/max is branchy and memory-bound, so SIMD shows no clear win. Revisit with alternative layouts if profiling warrants.
 //! - **Streaming**: Enabled O(1) per-tick kernel using Wilder RSI + monotonic deques for Stoch window and rolling SMAs for K/D; matches scalar outputs after warmup.
@@ -31,6 +32,16 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::ffi as pyffi;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::ffi::{c_void, CString};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -247,16 +258,28 @@ pub enum SrsiError {
     RsiError(#[from] RsiError),
     #[error("srsi: Error from Stochastic calculation: {0}")]
     StochError(#[from] StochError),
+    #[error("srsi: Input data is empty.")]
+    EmptyInputData,
     #[error("srsi: All input data values are NaN.")]
     AllValuesNaN,
-    #[error("srsi: Not enough valid data for the requested period.")]
-    NotEnoughValidData,
-    #[error("srsi: Size mismatch - destination buffers must match input data length. Expected {expected}, got k={k_len}, d={d_len}")]
-    SizeMismatch {
+    #[error("srsi: Invalid period {period} for data length {data_len}.")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("srsi: Not enough valid data for the requested period. needed={needed}, valid={valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("srsi: Output length mismatch - destination buffers must match input data length. Expected {expected}, got k={k_len}, d={d_len}")]
+    OutputLengthMismatch {
         expected: usize,
         k_len: usize,
         d_len: usize,
     },
+    #[error("srsi: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
+    #[error("srsi: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -270,6 +293,10 @@ pub fn srsi_with_kernel(input: &SrsiInput, kernel: Kernel) -> Result<SrsiOutput,
         SrsiData::Slice(sl) => sl,
     };
 
+    if data.is_empty() {
+        return Err(SrsiError::EmptyInputData);
+    }
+
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -280,8 +307,13 @@ pub fn srsi_with_kernel(input: &SrsiInput, kernel: Kernel) -> Result<SrsiOutput,
     let k_len = input.get_k();
     let d_len = input.get_d();
 
-    if len - first < rsi_period.max(stoch_period).max(k_len).max(d_len) {
-        return Err(SrsiError::NotEnoughValidData);
+    let needed = rsi_period
+        .max(stoch_period)
+        .max(k_len)
+        .max(d_len);
+    let valid = len - first;
+    if valid < needed {
+        return Err(SrsiError::NotEnoughValidData { needed, valid });
     }
 
     let chosen = match kernel {
@@ -322,8 +354,14 @@ pub unsafe fn srsi_scalar(
 
     // ---- validation ---------------------------------------------------------
     let n = data.len();
+    if n == 0 {
+        return Err(SrsiError::EmptyInputData);
+    }
     if rsi_period == 0 || stoch_period == 0 || k_period == 0 || d_period == 0 {
-        return Err(SrsiError::NotEnoughValidData);
+        return Err(SrsiError::InvalidPeriod {
+            period: rsi_period.max(stoch_period).max(k_period).max(d_period),
+            data_len: n,
+        });
     }
     let first = data
         .iter()
@@ -331,7 +369,10 @@ pub unsafe fn srsi_scalar(
         .ok_or(SrsiError::AllValuesNaN)?;
     let max_need = rsi_period.max(stoch_period).max(k_period).max(d_period);
     if n - first < max_need {
-        return Err(SrsiError::NotEnoughValidData);
+        return Err(SrsiError::NotEnoughValidData {
+            needed: max_need,
+            valid: n - first,
+        });
     }
 
     // ---- warmups ------------------------------------------------------------
@@ -341,7 +382,10 @@ pub unsafe fn srsi_scalar(
     let d_warmup = k_warmup + d_period - 1;
 
     if n <= d_warmup {
-        return Err(SrsiError::NotEnoughValidData);
+        return Err(SrsiError::NotEnoughValidData {
+            needed: d_warmup + 1,
+            valid: n,
+        });
     }
 
     // ---- buffers ------------------------------------------------------------
@@ -593,6 +637,9 @@ pub unsafe fn srsi_scalar_classic(
     d_period: usize,
 ) -> Result<SrsiOutput, SrsiError> {
     let n = data.len();
+    if n == 0 {
+        return Err(SrsiError::EmptyInputData);
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -605,7 +652,10 @@ pub unsafe fn srsi_scalar_classic(
     let d_warmup = k_warmup + d_period - 1;
 
     if n <= d_warmup {
-        return Err(SrsiError::NotEnoughValidData);
+        return Err(SrsiError::NotEnoughValidData {
+            needed: d_warmup + 1,
+            valid: n,
+        });
     }
 
     // Step 1: Calculate RSI inline (Wilder's smoothing method)
@@ -863,7 +913,13 @@ impl SrsiStream {
         let d_period = params.d.unwrap_or(3);
 
         if rsi_period == 0 || stoch_period == 0 || k_period == 0 || d_period == 0 {
-            return Err(SrsiError::NotEnoughValidData);
+            return Err(SrsiError::InvalidPeriod {
+                period: rsi_period
+                    .max(stoch_period)
+                    .max(k_period)
+                    .max(d_period),
+                data_len: 0,
+            });
         }
 
         Ok(Self {
@@ -1218,19 +1274,59 @@ impl SrsiBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &SrsiBatchRange) -> Vec<SrsiParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &SrsiBatchRange) -> Result<Vec<SrsiParams>, SrsiError> {
+    fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, SrsiError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let st = step.max(1);
+            let v: Vec<usize> = (start..=end).step_by(st).collect();
+            if v.is_empty() {
+                return Err(SrsiError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(SrsiError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let rsi_periods = axis(r.rsi_period);
-    let stoch_periods = axis(r.stoch_period);
-    let ks = axis(r.k);
-    let ds = axis(r.d);
+    let rsi_periods = axis(r.rsi_period)?;
+    let stoch_periods = axis(r.stoch_period)?;
+    let ks = axis(r.k)?;
+    let ds = axis(r.d)?;
 
-    let mut out = Vec::with_capacity(rsi_periods.len() * stoch_periods.len() * ks.len() * ds.len());
+    if rsi_periods.is_empty()
+        || stoch_periods.is_empty()
+        || ks.is_empty()
+        || ds.is_empty()
+    {
+        return Err(SrsiError::InvalidRange {
+            start: r.rsi_period.0.to_string(),
+            end: r.rsi_period.1.to_string(),
+            step: r.rsi_period.2.to_string(),
+        });
+    }
+
+    let mut out =
+        Vec::with_capacity(rsi_periods.len() * stoch_periods.len() * ks.len() * ds.len());
     for &rsi_p in &rsi_periods {
         for &stoch_p in &stoch_periods {
             for &k in &ks {
@@ -1246,7 +1342,7 @@ fn expand_grid(r: &SrsiBatchRange) -> Vec<SrsiParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1258,7 +1354,7 @@ pub fn srsi_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => Kernel::ScalarBatch,
+        _ => return Err(SrsiError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1296,9 +1392,13 @@ fn srsi_batch_inner_into(
     k_out: &mut [f64],
     d_out: &mut [f64],
 ) -> Result<Vec<SrsiParams>, SrsiError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(SrsiError::NotEnoughValidData);
+        return Err(SrsiError::InvalidRange {
+            start: sweep.rsi_period.0.to_string(),
+            end: sweep.rsi_period.1.to_string(),
+            step: sweep.rsi_period.2.to_string(),
+        });
     }
 
     let first = data
@@ -1329,7 +1429,10 @@ fn srsi_batch_inner_into(
         .unwrap();
 
     if data.len() - first < max_period {
-        return Err(SrsiError::NotEnoughValidData);
+        return Err(SrsiError::NotEnoughValidData {
+            needed: max_period,
+            valid: data.len() - first,
+        });
     }
 
     let cols = data.len();
@@ -1398,9 +1501,13 @@ fn srsi_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<SrsiBatchOutput, SrsiError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(SrsiError::NotEnoughValidData);
+        return Err(SrsiError::InvalidRange {
+            start: sweep.rsi_period.0.to_string(),
+            end: sweep.rsi_period.1.to_string(),
+            step: sweep.rsi_period.2.to_string(),
+        });
     }
     let first = data
         .iter()
@@ -1418,10 +1525,18 @@ fn srsi_batch_inner(
         .max()
         .unwrap();
     if data.len() - first < max_period {
-        return Err(SrsiError::NotEnoughValidData);
+        return Err(SrsiError::NotEnoughValidData {
+            needed: max_period,
+            valid: data.len() - first,
+        });
     }
     let rows = combos.len();
     let cols = data.len();
+    let _ = rows.checked_mul(cols).ok_or_else(|| SrsiError::InvalidRange {
+        start: sweep.rsi_period.0.to_string(),
+        end: sweep.rsi_period.1.to_string(),
+        step: sweep.rsi_period.2.to_string(),
+    })?;
 
     // Fast path: single row — delegate to the optimized single-series kernel
     if rows == 1 {
@@ -1548,11 +1663,262 @@ fn srsi_batch_inner(
 }
 
 #[inline(always)]
-pub fn expand_grid_srsi(r: &SrsiBatchRange) -> Vec<SrsiParams> {
+pub fn expand_grid_srsi(r: &SrsiBatchRange) -> Result<Vec<SrsiParams>, SrsiError> {
     expand_grid(r)
 }
 
 // ==================== PYTHON: CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "SrsiDeviceArrayF32", unsendable)]
+pub struct SrsiDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl SrsiDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Producing CUDA stream is synchronized before returning the handle,
+        // so we omit the "stream" key per CAI v3 guidance.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        // Array API stream semantics: producer is already synchronized, so only validate.
+        if let Some(s) = stream {
+            if s == 0 {
+                return Err(PyValueError::new_err(
+                    "__dlpack__ stream=0 is invalid for CUDA",
+                ));
+            }
+        }
+        if let Some((dev_ty, dev_id)) = dl_device {
+            if dev_ty != 2 || dev_id != slf.device_id as i32 {
+                return Err(PyValueError::new_err(
+                    "dl_device mismatch; cross-device copy not supported for SrsiDeviceArrayF32",
+                ));
+            }
+        }
+        if let Some(true) = copy {
+            return Err(PyValueError::new_err(
+                "copy=True not supported for SrsiDeviceArrayF32",
+            ));
+        }
+
+        // DLPack v0.6 and v1.x (versioned) producer
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            py_self: *mut pyffi::PyObject,
+        }
+
+        unsafe extern "C" fn capsule_destructor(cap: *mut pyffi::PyObject) {
+            if cap.is_null() {
+                return;
+            }
+            let name_c = unsafe { pyffi::PyCapsule_GetName(cap) };
+            if name_c.is_null() {
+                return;
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr(name_c) }.to_string_lossy();
+            let valid = name == "dltensor" || name == "dltensor_versioned";
+            let ptr = unsafe { pyffi::PyCapsule_GetPointer(cap, name_c as *const _) };
+            if ptr.is_null() || !valid {
+                return;
+            }
+            unsafe {
+                if name == "dltensor_versioned" {
+                    let v = ptr as *mut DLManagedTensorVersioned;
+                    if !v.is_null() {
+                        let mt = (*v).manager;
+                        if !mt.is_null() {
+                            if let Some(del) = (*mt).deleter {
+                                del(mt);
+                            }
+                        }
+                        let _ = Box::from_raw(v);
+                    }
+                } else {
+                    let mt = ptr as *mut DLManagedTensor;
+                    if !mt.is_null() {
+                        if let Some(del) = (*mt).deleter {
+                            del(mt);
+                        }
+                    }
+                }
+            }
+        }
+
+        unsafe extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            unsafe {
+                let ctx = (*p).manager_ctx as *mut ManagerCtx;
+                if !ctx.is_null() {
+                    let pyobj = (*ctx).py_self;
+                    let _ = Box::from_raw(ctx);
+                    if !pyobj.is_null() {
+                        pyffi::Py_DECREF(pyobj);
+                    }
+                }
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+
+        // Allocate shape/strides (elements) and INCREF self so the VRAM buffer outlives the capsule
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr = shape_box.as_mut_ptr();
+        let strides_ptr = strides_box.as_mut_ptr();
+        let py_self = slf.as_ptr();
+        unsafe {
+            pyffi::Py_INCREF(py_self);
+        }
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape_box: shape_box,
+            _strides_box: strides_box,
+            py_self,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let total_elems = (rows as i128).saturating_mul(cols as i128);
+        let data_ptr = if total_elems == 0 {
+            std::ptr::null_mut()
+        } else {
+            slf.inner.device_ptr() as usize as *mut c_void
+        };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice {
+                    device_type: 2,
+                    device_id: slf.device_id as i32,
+                },
+                ndim: 2,
+                dtype: DLDataType {
+                    code: 2,
+                    bits: 32,
+                    lanes: 1,
+                },
+                shape: shape_ptr,
+                strides: strides_ptr,
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(managed_deleter),
+        });
+
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create versioned DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl SrsiDeviceArrayF32Py {
+    pub fn new_from_rust(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self {
+            inner,
+            _ctx: ctx_guard,
+            device_id,
+        }
+    }
+}
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "srsi_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, rsi_range, stoch_range, k_range, d_range, device_id=0))]
@@ -1578,25 +1944,24 @@ pub fn srsi_cuda_batch_dev_py<'py>(
         k: k_range,
         d: d_range,
     };
-    let (pair, combos) = py.allow_threads(|| {
-        let cuda = CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.srsi_batch_dev(slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let ((pair, combos), ctx, dev_id) = py.allow_threads(|| {
+        let cuda =
+            CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let res = cuda
+            .srsi_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((res, ctx, dev_id))
     })?;
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item(
         "k",
-        Py::new(
-            py,
-            super::moving_averages::alma::DeviceArrayF32Py { inner: pair.k },
-        )?,
+        SrsiDeviceArrayF32Py::new_from_rust(pair.k, ctx.clone(), dev_id),
     )?;
     dict.set_item(
         "d",
-        Py::new(
-            py,
-            super::moving_averages::alma::DeviceArrayF32Py { inner: pair.d },
-        )?,
+        SrsiDeviceArrayF32Py::new_from_rust(pair.d, ctx, dev_id),
     )?;
     dict.set_item("rows", combos.len())?;
     dict.set_item("cols", slice.len())?;
@@ -1660,6 +2025,12 @@ pub fn srsi_cuda_many_series_one_param_dev_py<'py>(
     let rows = shape[0];
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if flat.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
+    }
     let params = SrsiParams {
         rsi_period: Some(rsi_period),
         stoch_period: Some(stoch_period),
@@ -1667,25 +2038,24 @@ pub fn srsi_cuda_many_series_one_param_dev_py<'py>(
         d: Some(d),
         source: None,
     };
-    let pair = py.allow_threads(|| {
-        let cuda = CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.srsi_many_series_one_param_time_major_dev(flat, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (pair, ctx, dev_id) = py.allow_threads(|| {
+        let cuda =
+            CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let res = cuda
+            .srsi_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((res, ctx, dev_id))
     })?;
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item(
         "k",
-        Py::new(
-            py,
-            super::moving_averages::alma::DeviceArrayF32Py { inner: pair.k },
-        )?,
+        SrsiDeviceArrayF32Py::new_from_rust(pair.k, ctx.clone(), dev_id),
     )?;
     dict.set_item(
         "d",
-        Py::new(
-            py,
-            super::moving_averages::alma::DeviceArrayF32Py { inner: pair.d },
-        )?,
+        SrsiDeviceArrayF32Py::new_from_rust(pair.d, ctx, dev_id),
     )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
@@ -1805,13 +2175,16 @@ pub fn srsi_batch_py<'py>(
         d: d_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
     // Pre-allocate output arrays
-    let k_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let d_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let k_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let d_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let k_slice = unsafe { k_arr.as_slice_mut()? };
     let d_slice = unsafe { d_arr.as_slice_mut()? };
 
@@ -1874,7 +2247,7 @@ pub fn srsi_into_slice(
     let data: &[f64] = input.as_ref();
 
     if dst_k.len() != data.len() || dst_d.len() != data.len() {
-        return Err(SrsiError::SizeMismatch {
+        return Err(SrsiError::OutputLengthMismatch {
             expected: data.len(),
             k_len: dst_k.len(),
             d_len: dst_d.len(),
@@ -2082,12 +2455,15 @@ pub fn srsi_batch_into(
             d: (d_start, d_end, d_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
-        let k_out = std::slice::from_raw_parts_mut(k_ptr as *mut f64, rows * cols);
-        let d_out = std::slice::from_raw_parts_mut(d_ptr as *mut f64, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+        let k_out = std::slice::from_raw_parts_mut(k_ptr as *mut f64, total);
+        let d_out = std::slice::from_raw_parts_mut(d_ptr as *mut f64, total);
 
         srsi_batch_inner_into(data, &sweep, Kernel::Auto, false, k_out, d_out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2668,7 +3044,7 @@ mod tests {
         let mut d_correct = vec![0.0; data_len]; // Correct size
         let result = srsi_into_slice(&mut k_small, &mut d_correct, &input, Kernel::Scalar);
         match result {
-            Err(SrsiError::SizeMismatch {
+            Err(SrsiError::OutputLengthMismatch {
                 expected,
                 k_len,
                 d_len,
@@ -2685,7 +3061,7 @@ mod tests {
         let mut d_small = vec![0.0; 35]; // Wrong size
         let result = srsi_into_slice(&mut k_correct, &mut d_small, &input, Kernel::Scalar);
         match result {
-            Err(SrsiError::SizeMismatch {
+            Err(SrsiError::OutputLengthMismatch {
                 expected,
                 k_len,
                 d_len,
@@ -2702,7 +3078,7 @@ mod tests {
         let mut d_wrong = vec![0.0; 70]; // Wrong size
         let result = srsi_into_slice(&mut k_wrong, &mut d_wrong, &input, Kernel::Scalar);
         match result {
-            Err(SrsiError::SizeMismatch {
+            Err(SrsiError::OutputLengthMismatch {
                 expected,
                 k_len,
                 d_len,

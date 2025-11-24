@@ -309,21 +309,24 @@ impl CudaWma {
 
     fn expand_periods(range: &WmaBatchRange) -> Vec<WmaParams> {
         let (start, end, step) = range.period;
-        let periods = if step == 0 || start == end {
+        let periods: Vec<usize> = if step == 0 || start == end {
             vec![start]
         } else if start < end {
-            (start..=end).step_by(step).collect::<Vec<_>>()
+            (start..=end).step_by(step.max(1)).collect::<Vec<_>>()
         } else {
-            // Decreasing sequence inclusive without underflow
-            let mut v = start;
+            // Decreasing sequence inclusive using isize to avoid overflow
             let mut out = Vec::new();
-            loop {
-                out.push(v);
-                if v <= end + step { break; }
-                v -= step;
+            let mut x = start as isize;
+            let end_i = end as isize;
+            let st = (step as isize).max(1);
+            while x >= end_i {
+                out.push(x as usize);
+                x -= st;
             }
-            if *out.last().unwrap() != end { out.push(end); }
-            out
+            if out.is_empty() { out } else {
+                if *out.last().unwrap() != end { out.push(end); }
+                out
+            }
         };
         periods
             .into_iter()
@@ -1091,7 +1094,7 @@ impl DeviceArrayF32Py {
             dtype: DLDataType,
             shape: *mut i64,
             strides: *mut i64,
-            byte_offset: usize,
+            byte_offset: u64,
         }
         #[repr(C)]
         struct DLManagedTensor {
@@ -1150,6 +1153,9 @@ impl DeviceArrayF32Py {
         // Compute shape/strides (strides are in elements per DLPack C-API)
         let rows = slf.inner.rows as i64;
         let cols = slf.inner.cols as i64;
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+
+        // Allocate shape/strides (elements) and INCREF self so the VRAM buffer outlives the capsule
         let mut shape_box = Box::new([rows, cols]);
         let mut strides_box = Box::new([cols, 1]);
         let shape_ptr: *mut i64 = shape_box.as_mut_ptr();

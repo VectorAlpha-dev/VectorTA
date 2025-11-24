@@ -975,6 +975,7 @@ fn uma_core_into(
 
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         match _kernel {
+            #[cfg(target_feature = "avx512f")]
             Kernel::Avx512 => unsafe {
                 let (sx, sw) = uma_weighted_accumulate_avx512(
                     data.as_ptr().add(start),
@@ -985,17 +986,16 @@ fn uma_core_into(
                 xws = sx;
                 wsum = sw;
             },
+            #[cfg(target_feature = "avx2")]
             Kernel::Avx2 => unsafe {
-                if cfg!(target_feature = "avx2") {
-                    let (sx, sw) = uma_weighted_accumulate_avx2(
-                        data.as_ptr().add(start),
-                        ln_lut.as_ptr(),
-                        len_r,
-                        p,
-                    );
-                    xws = sx;
-                    wsum = sw;
-                }
+                let (sx, sw) = uma_weighted_accumulate_avx2(
+                    data.as_ptr().add(start),
+                    ln_lut.as_ptr(),
+                    len_r,
+                    p,
+                );
+                xws = sx;
+                wsum = sw;
             },
             _ => {}
         }

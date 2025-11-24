@@ -13,33 +13,39 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::ttm_trend::TtmTrendBatchRange;
-use cust::context::Context;
-use cust::device::Device;
-use cust::context::CacheConfig;
-use cust::function::{BlockSize, Function, GridSize};
+use cust::context::{CacheConfig, Context};
+use cust::device::{Device, DeviceAttribute};
+use cust::error::CudaError;
+use cust::function::{BlockSize, GridSize};
 use cust::launch;
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use std::error::Error;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaTtmTrendError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaTtmTrendError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Cuda(e) => write!(f, "CUDA error: {}", e),
-            Self::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl Error for CudaTtmTrendError {}
 
 #[derive(Clone, Debug)]
 struct Combo {
@@ -50,15 +56,15 @@ struct Combo {
 pub struct CudaTtmTrend {
     pub(crate) module: Module,
     pub(crate) stream: Stream,
-    _ctx: Context,
+    context: Arc<Context>,
+    device_id: u32,
 }
 
 impl CudaTtmTrend {
     pub fn new(device_id: usize) -> Result<Self, CudaTtmTrendError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let ctx = Context::new(device).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ttm_trend_kernel.ptx"));
         // JIT with context-target + O2, then fallback
         let jit = &[
@@ -67,33 +73,99 @@ impl CudaTtmTrend {
         ];
         let module = Module::from_ptx(ptx, jit)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _ctx: ctx,
+            context,
+            device_id: device_id as u32,
         })
     }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom: usize) -> bool {
-        if let Ok((free, _)) = mem_get_info() {
-            required_bytes.saturating_add(headroom) <= free
-        } else {
-            true
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom: usize) -> Result<(), CudaTtmTrendError> {
+        match mem_get_info() {
+            Ok((free, _)) => {
+                if required_bytes.saturating_add(headroom) <= free {
+                    Ok(())
+                } else {
+                    Err(CudaTtmTrendError::OutOfMemory {
+                        required: required_bytes,
+                        free,
+                        headroom,
+                    })
+                }
+            }
+            Err(_) => Ok(()),
         }
     }
 
-    fn expand_grid(range: &TtmTrendBatchRange) -> Vec<i32> {
+    #[inline]
+    fn validate_launch_dims(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaTtmTrendError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        let (gx, gy, gz) = grid;
+        let (bx, by, bz) = block;
+        if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 {
+            return Err(CudaTtmTrendError::InvalidInput(
+                "zero-sized grid or block".into(),
+            ));
+        }
+        if gx > max_gx || gy > max_gy || gz > max_gz || bx > max_bx || by > max_by || bz > max_bz {
+            return Err(CudaTtmTrendError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
+    }
+
+    fn expand_grid(range: &TtmTrendBatchRange) -> Result<Vec<i32>, CudaTtmTrendError> {
         let (start, end, step) = range.period;
         if step == 0 || start == end {
-            vec![start as i32]
-        } else {
-            (start..=end).step_by(step).map(|p| p as i32).collect()
+            return Ok(vec![start as i32]);
         }
+        if start < end {
+            let st = step.max(1);
+            let v: Vec<i32> = (start..=end).step_by(st).map(|p| p as i32).collect();
+            if v.is_empty() {
+                return Err(CudaTtmTrendError::InvalidInput(format!(
+                    "invalid range: start={start}, end={end}, step={step}"
+                )));
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as i32);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(CudaTtmTrendError::InvalidInput(format!(
+                "invalid range: start={start}, end={end}, step={step}"
+            )));
+        }
+        Ok(v)
     }
 
     fn prepare_batch_inputs(
@@ -115,12 +187,7 @@ impl CudaTtmTrend {
             .zip(close_f32)
             .position(|(&s, &c)| !s.is_nan() && !c.is_nan())
             .ok_or_else(|| CudaTtmTrendError::InvalidInput("all values are NaN".into()))?;
-        let periods = Self::expand_grid(sweep);
-        if periods.is_empty() {
-            return Err(CudaTtmTrendError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let periods = Self::expand_grid(sweep)?;
         let mut combos = Vec::with_capacity(periods.len());
         for &p in &periods {
             let pu = p as usize;
@@ -186,47 +253,58 @@ impl CudaTtmTrend {
     ) -> Result<DeviceArrayF32, CudaTtmTrendError> {
         let (combos, first, len) = Self::prepare_batch_inputs(source_f32, close_f32, sweep)?;
         let n_combos = combos.len();
+        let elem_ff2 = std::mem::size_of::<[f32; 2]>();
+        let elem_f32 = std::mem::size_of::<f32>();
+        let elem_i32 = std::mem::size_of::<i32>();
+
+        // VRAM estimate (best-effort) with checked arithmetic
+        let prefix_bytes = len
+            .checked_mul(elem_ff2)
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in prefix bytes".into()))?;
+        let close_bytes = len
+            .checked_mul(elem_f32)
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in close bytes".into()))?;
+        let params_bytes = n_combos
+            .checked_mul(elem_i32)
+            .and_then(|x| x.checked_mul(2))
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in params bytes".into()))?;
+        let out_elems = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(elem_f32)
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in output bytes".into()))?;
+        let logical = prefix_bytes
+            .checked_add(close_bytes)
+            .and_then(|x| x.checked_add(params_bytes))
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("total VRAM size overflow".into()))?;
+        let headroom = 64usize << 20;
+        Self::will_fit(logical, headroom)?;
 
         // Host precompute: float-float prefix of source (hi, lo)
         let prefix_ff2 = Self::build_prefix_source_ff2(source_f32, first);
 
         // Device buffers
-        let d_prefix: DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&prefix_ff2)
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_close  = DeviceBuffer::from_slice(close_f32).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let d_prefix: DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&prefix_ff2)?;
+        let d_close  = DeviceBuffer::from_slice(close_f32)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
         let warms: Vec<i32> = combos.iter().map(|c| c.warm).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_warms =
-            DeviceBuffer::from_slice(&warms).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let warms: Vec<i32> = combos.iter().map(|c| c.warm).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_warms =
-            DeviceBuffer::from_slice(&warms).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let d_warms = DeviceBuffer::from_slice(&warms)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         // Pre-zero outputs once (kernel writes only t >= warm)
-        unsafe { d_out.set_zero_async(&self.stream) }
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-
-        // VRAM estimate (best-effort)
-        let est_bytes = len * (std::mem::size_of::<[f32; 2]>() + std::mem::size_of::<f32>())
-            + n_combos * (std::mem::size_of::<i32>() * 2)
-            + n_combos * len * std::mem::size_of::<f32>();
-        if !Self::will_fit(est_bytes, 64usize << 20) {
-            return Err(CudaTtmTrendError::InvalidInput(
-                "insufficient free VRAM".into(),
-            ));
-        }
+        unsafe { d_out.set_zero_async(&self.stream) }?;
 
         // Launch tiled kernel (2-D grid over (time, params))
         let mut func = self
             .module
             .get_function("ttm_trend_batch_prefix_ff2_tiled")
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTtmTrendError::MissingKernelSymbol {
+                name: "ttm_trend_batch_prefix_ff2_tiled",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         // Keep host constants in sync with .cu defaults
@@ -234,8 +312,11 @@ impl CudaTtmTrend {
         const TTM_TILE_PARAMS: u32 = 8;
         let grid_x: u32 = ((len as u32) + TTM_TILE_TIME - 1) / TTM_TILE_TIME;
         let grid_y: u32 = ((n_combos as u32) + TTM_TILE_PARAMS - 1) / TTM_TILE_PARAMS;
-        let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+        let gx = grid_x.max(1);
+        let gy = grid_y.max(1);
+        let grid: GridSize = (gx, gy, 1).into();
         let block: BlockSize = (TTM_TILE_TIME, TTM_TILE_PARAMS, 1).into();
+        self.validate_launch_dims((gx, gy, 1), (TTM_TILE_TIME, TTM_TILE_PARAMS, 1))?;
         unsafe {
             let mut pref_ptr = d_prefix.as_device_ptr().as_raw();
             let mut close_ptr = d_close.as_device_ptr().as_raw();
@@ -253,14 +334,10 @@ impl CudaTtmTrend {
                 &mut ncomb_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -319,29 +396,42 @@ impl CudaTtmTrend {
             first_valids[s] = fv;
         }
 
+        // VRAM estimate for many-series kernel (best-effort, checked)
+        let elem_f32 = std::mem::size_of::<f32>();
+        let elem_i32 = std::mem::size_of::<i32>();
+        let series_elems = expected;
+        let in_bytes = series_elems
+            .checked_mul(elem_f32)
+            .and_then(|x| x.checked_mul(2))
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in input bytes".into()))?;
+        let fv_bytes = cols
+            .checked_mul(elem_i32)
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in first_valid bytes".into()))?;
+        let out_bytes = series_elems
+            .checked_mul(elem_f32)
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in output bytes".into()))?;
+        let logical = in_bytes
+            .checked_add(fv_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("total VRAM size overflow".into()))?;
+        let headroom = 64usize << 20;
+        Self::will_fit(logical, headroom)?;
+
         // Device buffers
-        let d_src = DeviceBuffer::from_slice(source_tm_f32)
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm_f32)
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_src = DeviceBuffer::from_slice(source_tm_f32)
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm_f32)
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let d_src = DeviceBuffer::from_slice(source_tm_f32)?;
+        let d_close = DeviceBuffer::from_slice(close_tm_f32)?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(expected) }?;
         // Pre-zero warmup region once; kernel only writes t >= warm per series
-        unsafe { d_out.set_zero_async(&self.stream) }
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        unsafe { d_out.set_zero_async(&self.stream) }?;
 
         let mut func = self
             .module
             .get_function("ttm_trend_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTtmTrendError::MissingKernelSymbol {
+                name: "ttm_trend_many_series_one_param_time_major_f32",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         // Occupancy-guided block size (rounded to warp multiple with sane clamp)
         let auto_block = || -> u32 {
@@ -353,8 +443,10 @@ impl CudaTtmTrend {
         };
         let block_x: u32 = auto_block();
         let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let gx = grid_x.max(1);
+        let grid: GridSize = (gx, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch_dims((gx, 1, 1), (block_x, 1, 1))?;
         unsafe {
             let mut src_ptr = d_src.as_device_ptr().as_raw();
             let mut close_ptr = d_close.as_device_ptr().as_raw();
@@ -376,13 +468,9 @@ impl CudaTtmTrend {
                 &mut p_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -391,9 +479,7 @@ impl CudaTtmTrend {
     }
 
     pub fn synchronize(&self) -> Result<(), CudaTtmTrendError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
 }
 

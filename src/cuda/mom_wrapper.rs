@@ -18,23 +18,28 @@ use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaMomError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaMomError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaMomError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaMomError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaMomError {}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CudaMomPolicy {
@@ -45,26 +50,71 @@ pub struct CudaMomPolicy {
 pub struct CudaMom {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaMomPolicy,
     sm_count: u32,
     max_grid_x: u32,
 }
 
+fn expand_grid_checked_cuda(r: &MomBatchRange) -> Result<Vec<MomParams>, CudaMomError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, CudaMomError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(next) if next > v => v = next,
+                    _ => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            while v >= end {
+                out.push(v);
+                if v < end + step {
+                    break;
+                }
+                v = v.saturating_sub(step);
+                if v == 0 {
+                    break;
+                }
+            }
+        }
+        if out.is_empty() {
+            return Err(CudaMomError::InvalidInput(format!(
+                "invalid range: start={} end={} step={}",
+                start, end, step
+            )));
+        }
+        Ok(out)
+    }
+
+    let periods = axis_usize(r.period)?;
+    let mut out = Vec::with_capacity(periods.len());
+    for p in periods {
+        out.push(MomParams { period: Some(p) });
+    }
+    Ok(out)
+}
+
 impl CudaMom {
     pub fn new(device_id: usize) -> Result<Self, CudaMomError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         // Enable recommended primary-context flags to support mapped/pinned host memory
         // and let the driver choose appropriate scheduling.
         // SCHED_AUTO is accepted after context creation; MAP_HOST must be set at
         // creation time for legacy contexts, so we do not set it here.
-        context
-            .set_flags(ContextFlags::SCHED_AUTO)
-            .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+        context.set_flags(ContextFlags::SCHED_AUTO)?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/mom_kernel.ptx"));
         let jit_opts = &[
@@ -73,23 +123,20 @@ impl CudaMom {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         // Device properties used for better launch sizing & chunking.
         let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaMomError::Cuda(e.to_string()))? as u32;
+            .get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
         let max_grid_x = device
-            .get_attribute(DeviceAttribute::MaxGridDimX)
-            .map_err(|e| CudaMomError::Cuda(e.to_string()))? as u32;
+            .get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaMomPolicy::default(),
             sm_count,
             max_grid_x,
@@ -99,6 +146,40 @@ impl CudaMom {
     #[inline]
     pub fn set_policy(&mut self, p: CudaMomPolicy) {
         self.policy = p;
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
+    fn will_fit(&self, required: usize, headroom: usize) -> Result<(), CudaMomError> {
+        match mem_get_info() {
+            Ok((free, _total)) => {
+                if required.saturating_add(headroom) > free {
+                    return Err(CudaMomError::OutOfMemory { required, free, headroom });
+                }
+                Ok(())
+            }
+            Err(e) => Err(CudaMomError::Cuda(e)),
+        }
+    }
+
+    #[inline]
+    fn validate_launch(grid: GridSize, block: BlockSize) -> Result<(), CudaMomError> {
+        let (gx, gy, gz) = (grid.x, grid.y, grid.z);
+        let (bx, by, bz) = (block.x, block.y, block.z);
+        let threads = (bx as u64) * (by as u64) * (bz as u64);
+        if threads > 1024 {
+            return Err(CudaMomError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
     }
 
     // ---------- Batch (one series × many params) ----------
@@ -114,30 +195,31 @@ impl CudaMom {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        // VRAM estimate (best-effort)
-        if let Ok((free, _)) = mem_get_info() {
-            let in_bytes = prices_f32.len() * std::mem::size_of::<f32>();
-            let params_bytes = periods_i32.len() * std::mem::size_of::<i32>();
-            let out_bytes = n_combos
-                .checked_mul(len)
-                .ok_or_else(|| CudaMomError::InvalidInput("rows*cols overflow".into()))?
-                * std::mem::size_of::<f32>();
-            let headroom = 64usize * 1024 * 1024;
-            let need = in_bytes + params_bytes + out_bytes + headroom;
-            if need > free {
-                return Err(CudaMomError::InvalidInput(
-                    "estimated device memory exceeds free VRAM".into(),
-                ));
-            }
-        }
+        // VRAM estimate (best-effort, checked arithmetic)
+        let in_bytes = prices_f32
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMomError::InvalidInput("prices bytes overflow".into()))?;
+        let params_bytes = periods_i32
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaMomError::InvalidInput("params bytes overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaMomError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMomError::InvalidInput("output bytes overflow".into()))?;
+        let required = in_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaMomError::InvalidInput("total VRAM size overflow".into()))?;
+        self.will_fit(required, 64 * 1024 * 1024)?;
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices_f32).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(prices_f32)?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len * n_combos)
-                .map_err(|e| CudaMomError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(out_elems)?
         };
 
         self.launch_batch(
@@ -170,7 +252,7 @@ impl CudaMom {
         let func = self
             .module
             .get_function("mom_batch_f32")
-            .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMomError::MissingKernelSymbol { name: "mom_batch_f32" })?;
 
         // Chunk across combos if needed to respect grid limits
         let block_x = self.policy.batch_block_x.unwrap_or(256);
@@ -182,6 +264,7 @@ impl CudaMom {
             let grid_x = this_chunk as u32;
             let grid: GridSize = (grid_x.max(1), 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
+            CudaMom::validate_launch(grid, block)?;
 
             unsafe {
                 // Offset param/output pointers for chunk
@@ -208,13 +291,11 @@ impl CudaMom {
                 ];
                 self.stream
                     .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+                    .map_err(CudaMomError::Cuda)?;
             }
             launched += this_chunk;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMomError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaMomError::Cuda)
     }
 
     // ---------- Many-series × one-param (time-major) ----------
@@ -260,24 +341,27 @@ impl CudaMom {
         }
 
         // VRAM estimate
-        if let Ok((free, _)) = mem_get_info() {
-            let n = expected;
-            let bytes = (2 * n) * std::mem::size_of::<f32>()
-                + cols * std::mem::size_of::<i32>()
-                + 64 * 1024 * 1024;
-            if bytes > free {
-                return Err(CudaMomError::InvalidInput(
-                    "estimated device memory exceeds free VRAM".into(),
-                ));
-            }
-        }
+        let elems = expected;
+        let prices_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .and_then(|v| v.checked_mul(2))
+            .ok_or_else(|| CudaMomError::InvalidInput("prices bytes overflow".into()))?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaMomError::InvalidInput("first_valids bytes overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMomError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(first_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaMomError::InvalidInput("total VRAM size overflow".into()))?;
+        self.will_fit(required, 64 * 1024 * 1024)?;
 
-        let d_prices = DeviceBuffer::from_slice(prices_tm_f32)
-            .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(prices_tm_f32)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(expected).map_err(|e| CudaMomError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(expected)?
         };
 
         self.launch_many_series(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
@@ -300,7 +384,7 @@ impl CudaMom {
         let func = self
             .module
             .get_function("mom_many_series_one_param_f32")
-            .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMomError::MissingKernelSymbol { name: "mom_many_series_one_param_f32" })?;
         // Kernel is grid-stride across series; we don't need to launch one block per column.
         let block_x = self.policy.many_block_x.unwrap_or(256);
         let needed = ((cols as u32) + block_x - 1) / block_x;
@@ -309,6 +393,7 @@ impl CudaMom {
         let grid_x = needed.min(cap).max(1);
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        CudaMom::validate_launch(grid, block)?;
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
             let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
@@ -326,11 +411,9 @@ impl CudaMom {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+                .map_err(CudaMomError::Cuda)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMomError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaMomError::Cuda)
     }
 
     // ---------- Helpers ----------
@@ -342,23 +425,7 @@ impl CudaMom {
         if len == 0 {
             return Err(CudaMomError::InvalidInput("empty prices".into()));
         }
-        // expand grid
-        let (start, end, step) = sweep.period;
-        let mut combos = Vec::new();
-        if step == 0 || start == end {
-            combos.push(MomParams {
-                period: Some(start),
-            });
-        } else {
-            let mut v = start;
-            while v <= end {
-                combos.push(MomParams { period: Some(v) });
-                v = v.saturating_add(step);
-            }
-        }
-        if combos.is_empty() {
-            return Err(CudaMomError::InvalidInput("no period combos".into()));
-        }
+        let combos = expand_grid_checked_cuda(sweep)?;
 
         let first_valid = (0..len)
             .find(|&i| !prices[i].is_nan())
@@ -388,8 +455,11 @@ impl CudaMom {
         let first_valid = (0..len)
             .find(|&i| !prices_f32[i].is_nan())
             .ok_or_else(|| CudaMomError::InvalidInput("all values NaN".into()))?;
-        let d_prices =
-            DeviceBuffer::from_slice(prices_f32).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+        let bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMomError::InvalidInput("prices bytes overflow".into()))?;
+        self.will_fit(bytes, 64 * 1024 * 1024)?;
+        let d_prices = DeviceBuffer::from_slice(prices_f32)?;
         Ok((d_prices, first_valid))
     }
 
@@ -401,46 +471,40 @@ impl CudaMom {
         first_valid: usize,
         sweep: &MomBatchRange,
     ) -> Result<DeviceArrayF32, CudaMomError> {
-        // Build period list from the sweep (lightweight helper – same expansion, skips host scan).
-        let (start, end, step) = sweep.period;
-        let mut combos = Vec::new();
-        if step == 0 || start == end {
-            combos.push(MomParams { period: Some(start) });
-        } else {
-            let mut v = start;
-            while v <= end {
-                combos.push(MomParams { period: Some(v) });
-                v = v.saturating_add(step);
-            }
-        }
-        if combos.is_empty() {
-            return Err(CudaMomError::InvalidInput("no period combos".into()));
-        }
+        let combos = expand_grid_checked_cuda(sweep)?;
         let n_combos = combos.len();
         let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap_or(0) as i32).collect();
 
         // VRAM estimate (no input duplication)
-        if let Ok((free, _)) = mem_get_info() {
-            let params_bytes = periods_i32.len() * std::mem::size_of::<i32>();
-            let out_bytes = n_combos
-                .checked_mul(len)
-                .ok_or_else(|| CudaMomError::InvalidInput("rows*cols overflow".into()))?
-                * std::mem::size_of::<f32>();
-            let headroom = 64usize * 1024 * 1024;
-            let need = params_bytes + out_bytes + headroom;
-            if need > free {
-                return Err(CudaMomError::InvalidInput(
-                    "estimated device memory exceeds free VRAM".into(),
-                ));
+        let params_bytes = periods_i32
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaMomError::InvalidInput("params bytes overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaMomError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMomError::InvalidInput("output bytes overflow".into()))?;
+        let required = params_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaMomError::InvalidInput("total VRAM size overflow".into()))?;
+        self.will_fit(required, 64 * 1024 * 1024)?;
+
+        // Ensure current device matches wrapper device when reusing a device-resident buffer
+        unsafe {
+            let mut cur: i32 = 0;
+            let _ = cust::sys::cuCtxGetDevice(&mut cur);
+            if cur as u32 != self.device_id {
+                return Err(CudaMomError::DeviceMismatch {
+                    buf: self.device_id,
+                    current: cur as u32,
+                });
             }
         }
 
-        let d_periods =
-            DeviceBuffer::from_slice(&periods_i32).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len * n_combos)
-                .map_err(|e| CudaMomError::Cuda(e.to_string()))?
-        };
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
         self.launch_batch(d_prices, &d_periods, len, first_valid, n_combos, &mut d_out)?;
         Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
     }
