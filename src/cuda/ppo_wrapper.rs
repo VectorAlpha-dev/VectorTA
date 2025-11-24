@@ -14,15 +14,16 @@
 
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::cuda::moving_averages::{CudaEma, CudaSma};
+use crate::cuda::moving_averages::CudaEmaError;
 use crate::indicators::moving_averages::ema::{EmaBatchRange, EmaParams};
 // (deduped)
+use crate::cuda::moving_averages::CudaSmaError;
 use crate::indicators::moving_averages::sma::{SmaBatchRange, SmaParams};
 use crate::indicators::ppo::{PpoBatchRange, PpoParams};
 // (deduped)
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
 use cust::memory::{mem_get_info, DeviceBuffer};
@@ -30,23 +31,53 @@ use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaPpoError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error(transparent)]
+    Ema(#[from] CudaEmaError),
+    #[error(transparent)]
+    Sma(#[from] CudaSmaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
 
-impl fmt::Display for CudaPpoError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaPpoError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaPpoError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
+/// VRAM-backed array for PPO with context guard and device id.
+pub struct DeviceArrayF32Ppo {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
+}
+
+impl DeviceArrayF32Ppo {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.rows.saturating_mul(self.cols)
     }
 }
-impl std::error::Error for CudaPpoError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -85,16 +116,16 @@ impl Default for CudaPpoPolicy {
 pub struct CudaPpo {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaPpoPolicy,
 }
 
 impl CudaPpo {
     pub fn new(device_id: usize) -> Result<Self, CudaPpoError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ppo_kernel.ptx"));
         let module = Module::from_ptx(
@@ -105,18 +136,92 @@ impl CudaPpo {
             ],
         )
         .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+        .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaPpoPolicy::default(),
         })
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaPpoError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+
+    #[inline]
+    fn will_fit(&self, required: usize, headroom: usize) -> Result<(), CudaPpoError> {
+        match mem_get_info() {
+            Ok((free, _total)) => {
+                if required.saturating_add(headroom) > free {
+                    return Err(CudaPpoError::OutOfMemory {
+                        required,
+                        free,
+                        headroom,
+                    });
+                }
+                Ok(())
+            }
+            Err(e) => Err(CudaPpoError::Cuda(e)),
+        }
+    }
+
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaPpoError> {
+        let device = Device::get_device(self.device_id)?;
+        let max_threads = device
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)?
+            .max(1) as u32;
+        let max_grid_x = device
+            .get_attribute(DeviceAttribute::MaxGridDimX)?
+            .max(1) as u32;
+        let max_grid_y = device
+            .get_attribute(DeviceAttribute::MaxGridDimY)?
+            .max(1) as u32;
+        let max_grid_z = device
+            .get_attribute(DeviceAttribute::MaxGridDimZ)?
+            .max(1) as u32;
+
+        let threads_per_block = bx
+            .saturating_mul(by)
+            .saturating_mul(bz);
+        if threads_per_block > max_threads
+            || gx > max_grid_x
+            || gy > max_grid_y
+            || gz > max_grid_z
+        {
+            return Err(CudaPpoError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
     }
 
     pub fn set_policy(&mut self, p: CudaPpoPolicy) {
@@ -131,7 +236,7 @@ impl CudaPpo {
         &self,
         data_f32: &[f32],
         sweep: &PpoBatchRange,
-    ) -> Result<(DeviceArrayF32, Vec<PpoParams>), CudaPpoError> {
+    ) -> Result<(DeviceArrayF32Ppo, Vec<PpoParams>), CudaPpoError> {
         let len = data_f32.len();
         if len == 0 {
             return Err(CudaPpoError::InvalidInput("empty data".into()));
@@ -144,13 +249,42 @@ impl CudaPpo {
         if nf == 0 || ns == 0 {
             return Err(CudaPpoError::InvalidInput("empty fast/slow sweep".into()));
         }
-        if nf == 0 || ns == 0 {
-            return Err(CudaPpoError::InvalidInput("empty fast/slow sweep".into()));
-        }
 
         // Materialize combos in canonical order (fast outer × slow inner)
         let combos: Vec<PpoParams> = expand_grid(sweep);
         let rows = combos.len();
+        if rows == 0 {
+            return Err(CudaPpoError::InvalidInput("no parameter combos".into()));
+        }
+
+        // Guard big allocations with a will_fit check (checked arithmetic)
+        let elem_f32 = std::mem::size_of::<f32>();
+        let elem_i32 = std::mem::size_of::<i32>();
+        let elem_f64 = std::mem::size_of::<f64>();
+        let prices_bytes = len
+            .checked_mul(elem_f32)
+            .ok_or_else(|| CudaPpoError::InvalidInput("price bytes overflow".into()))?;
+        let params_bytes = rows
+            .checked_mul(2usize)
+            .and_then(|v| v.checked_mul(elem_i32))
+            .ok_or_else(|| CudaPpoError::InvalidInput("params bytes overflow".into()))?;
+        // Worst‑case prefix buffer (SMA path): len+1 FP64
+        let prefix_bytes = (len + 1)
+            .checked_mul(elem_f64)
+            .ok_or_else(|| CudaPpoError::InvalidInput("prefix bytes overflow".into()))?;
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaPpoError::InvalidInput("rows*len overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(elem_f32)
+            .ok_or_else(|| CudaPpoError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(prefix_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaPpoError::InvalidInput("total bytes overflow".into()))?;
+        let headroom = 64usize * 1024 * 1024;
+        self.will_fit(required, headroom)?;
 
         // Period arrays aligned with 'combos'
         let mut fasts_i32 = Vec::with_capacity(rows);
@@ -161,18 +295,16 @@ impl CudaPpo {
         }
 
         // Copy inputs once
-        let d_prices: DeviceBuffer<f32> =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
-        let d_fasts: DeviceBuffer<i32> =
-            DeviceBuffer::from_slice(&fasts_i32).map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
-        let d_slows: DeviceBuffer<i32> =
-            DeviceBuffer::from_slice(&slows_i32).map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+        let d_prices: DeviceBuffer<f32> = DeviceBuffer::from_slice(data_f32)?;
+        let d_fasts: DeviceBuffer<i32> = DeviceBuffer::from_slice(&fasts_i32)?;
+        let d_slows: DeviceBuffer<i32> = DeviceBuffer::from_slice(&slows_i32)?;
 
         // Output buffer: [rows × len], row‑major
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(rows * len)
-        }
-        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaPpoError::InvalidInput("rows*len overflow for d_out".into()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         // First finite sample index for warmup/prefix
         let first_valid = data_f32
@@ -185,8 +317,7 @@ impl CudaPpo {
             // SMA path: single FP64 prefix sum + direct kernel (no MA surfaces)
             0 => {
                 let prefix = prefix_sum_one_series_f64(data_f32, first_valid);
-                let d_prefix: DeviceBuffer<f64> = DeviceBuffer::from_slice(&prefix)
-                    .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                let d_prefix: DeviceBuffer<f64> = DeviceBuffer::from_slice(&prefix)?;
 
                 self.launch_batch_kernel(
                     &d_prices,
@@ -220,29 +351,26 @@ impl CudaPpo {
                     // Fallback: build EMA surfaces and use elementwise PPO
                     let (fs, fe, fstep) = sweep.fast_period;
                     let (ss, se, sstep) = sweep.slow_period;
-                    let ema = CudaEma::new(0)
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                    let ema = CudaEma::new(0)?;
                     let fast_dev = ema
                         .ema_batch_dev(
                             data_f32,
                             &EmaBatchRange {
                                 period: (fs, fe, fstep),
                             },
-                        )
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                        )?;
                     let slow_dev = ema
                         .ema_batch_dev(
                             data_f32,
                             &EmaBatchRange {
                                 period: (ss, se, sstep),
                             },
-                        )
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                        )?;
 
                     let func = self
                         .module
                         .get_function("ppo_from_ma_batch_f32")
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                        .map_err(|_| CudaPpoError::MissingKernelSymbol { name: "ppo_from_ma_batch_f32" })?;
                     let block: BlockSize = (256, 1, 1).into();
                     let grid_x = ((len as u32) + 255) / 256;
                     // slow periods array and row chunking
@@ -250,8 +378,7 @@ impl CudaPpo {
                         .into_iter()
                         .map(|v| v as i32)
                         .collect();
-                    let d_slow = DeviceBuffer::from_slice(&slow_periods)
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                    let d_slow = DeviceBuffer::from_slice(&slow_periods)?;
                     for (start, count) in grid_y_chunks(rows) {
                         let grid: GridSize = (grid_x.max(1), count as u32, 1).into();
                         unsafe {
@@ -275,9 +402,8 @@ impl CudaPpo {
                                 &mut p_row_start as *mut _ as *mut c_void,
                                 &mut p_out as *mut _ as *mut c_void,
                             ];
-                            self.stream
-                                .launch(&func, grid, block, 0, args)
-                                .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                            self.validate_launch(grid_x.max(1), count as u32, 1, 256, 1, 1)?;
+                            self.stream.launch(&func, grid, block, 0, args)?;
                         }
                     }
                 }
@@ -285,11 +411,16 @@ impl CudaPpo {
             _ => unreachable!(),
         }
 
+        // Ensure all work on the internal stream is visible to consumers
+        self.synchronize()?;
+
         Ok((
-            DeviceArrayF32 {
+            DeviceArrayF32Ppo {
                 buf: d_out,
                 rows,
                 cols: len,
+                ctx: self.context_arc(),
+                device_id: self.device_id,
             },
             combos,
         ))
@@ -311,42 +442,32 @@ impl CudaPpo {
         if len <= 0 || n_combos <= 0 {
             return Ok(());
         }
-        if len <= 0 || n_combos <= 0 {
-            return Ok(());
-        }
         let func = self
             .module
             .get_function("ppo_batch_f32")
-            .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPpoError::MissingKernelSymbol { name: "ppo_batch_f32" })?;
 
-        // Choose geometry
-        let (grid, block): (GridSize, BlockSize) = match self.policy.batch {
-            BatchKernelPolicy::OneD { block_x } if block_x > 0 => {
-                if ma_mode == 0 {
-                    // SMA: time-parallel
-                    let bx = block_x;
-                    let gx = ((len as u32) + bx - 1) / bx;
-                    ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
-                } else {
-                    // EMA: one block per combo; let thread 0 run
-                    ((1, 1, 1).into(), (block_x, 1, 1).into())
-                }
-            }
-            _ => {
-                if ma_mode == 0 {
-                    let bx = 256u32;
-                    let gx = ((len as u32) + bx - 1) / bx;
-                    ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
-                } else {
-                    ((1, 1, 1).into(), (256, 1, 1).into())
-                }
-            }
+        let mut block_x = match self.policy.batch {
+            BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
+            _ => 256u32,
         };
+        if block_x == 0 {
+            return Err(CudaPpoError::InvalidPolicy("block_x must be > 0"));
+        }
+
+        let grid_x = if ma_mode == 0 {
+            ((len as u32) + block_x - 1) / block_x
+        } else {
+            1
+        };
+        let gx = grid_x.max(1);
 
         // Chunk grid.y across combos
         for (start, count) in grid_y_chunks(n_combos as usize) {
             let gy = count as u32;
-            let grid_launch: GridSize = (grid.x, gy, 1).into();
+            self.validate_launch(gx, gy, 1, block_x, 1, 1)?;
+            let grid_launch: GridSize = (gx, gy, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
             unsafe {
                 let mut p_prices = d_prices.as_device_ptr().as_raw();
                 let mut p_prefix = d_prefix.as_device_ptr().as_raw();
@@ -368,9 +489,7 @@ impl CudaPpo {
                     &mut p_n as *mut _ as *mut c_void,
                     &mut p_out as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid_launch, block, 0, args)
-                    .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid_launch, block, 0, args)?;
             }
         }
 
@@ -384,11 +503,14 @@ impl CudaPpo {
         cols: usize,
         rows: usize,
         params: &PpoParams,
-    ) -> Result<DeviceArrayF32, CudaPpoError> {
+    ) -> Result<DeviceArrayF32Ppo, CudaPpoError> {
         if cols == 0 || rows == 0 {
             return Err(CudaPpoError::InvalidInput("empty dims".into()));
         }
-        if data_tm_f32.len() != cols * rows {
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaPpoError::InvalidInput("cols*rows overflow".into()))?;
+        if data_tm_f32.len() != elems {
             return Err(CudaPpoError::InvalidInput(
                 "length mismatch for time-major input".into(),
             ));
@@ -398,9 +520,37 @@ impl CudaPpo {
         let slow = params.slow_period.unwrap_or(26) as i32;
         let ma_mode = ma_mode_from(params.ma_type.as_deref().unwrap_or("sma"))?;
 
+        // Guard big allocations with a will_fit check
+        let elem_f32 = std::mem::size_of::<f32>();
+        let elem_i32 = std::mem::size_of::<i32>();
+        let elem_f64 = std::mem::size_of::<f64>();
+        let price_bytes = elems
+            .checked_mul(elem_f32)
+            .ok_or_else(|| CudaPpoError::InvalidInput("price_tm bytes overflow".into()))?;
+        let first_bytes = cols
+            .checked_mul(elem_i32)
+            .ok_or_else(|| CudaPpoError::InvalidInput("first_valids bytes overflow".into()))?;
+        let prefix_bytes = if ma_mode == 0 {
+            elems
+                .checked_add(1)
+                .and_then(|v| v.checked_mul(elem_f64))
+                .ok_or_else(|| CudaPpoError::InvalidInput("prefix_tm bytes overflow".into()))?
+        } else {
+            elem_f64
+        };
+        let out_bytes = elems
+            .checked_mul(elem_f32)
+            .ok_or_else(|| CudaPpoError::InvalidInput("out_tm bytes overflow".into()))?;
+        let required = price_bytes
+            .checked_add(first_bytes)
+            .and_then(|v| v.checked_add(prefix_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaPpoError::InvalidInput("total bytes overflow".into()))?;
+        let headroom = 64usize * 1024 * 1024;
+        self.will_fit(required, headroom)?;
+
         // Copy input once
-        let d_prices_tm: DeviceBuffer<f32> = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+        let d_prices_tm: DeviceBuffer<f32> = DeviceBuffer::from_slice(data_tm_f32)?;
 
         // first_valids per series (time-major layout)
         let mut first_valids = vec![rows as i32; cols];
@@ -413,21 +563,19 @@ impl CudaPpo {
                 }
             }
         }
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
 
         // SMA needs time-major per-series prefix sums; EMA ignores this buffer.
         let d_prefix_tm: DeviceBuffer<f64> = if ma_mode == 0 {
-            let prefix = prefix_sum_time_major_f64(data_tm_f32, cols, rows, &first_valids);
-            DeviceBuffer::from_slice(&prefix).map_err(|e| CudaPpoError::Cuda(e.to_string()))?
+            let prefix = prefix_sum_time_major_f64(data_tm_f32, cols, rows, &first_valids)?;
+            DeviceBuffer::from_slice(&prefix)?
         } else {
-            DeviceBuffer::from_slice(&[0.0f64]).map_err(|e| CudaPpoError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice(&[0.0f64])?
         };
 
         // Output
-        let elems = cols * rows;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         // Direct kernel (handles both SMA and EMA paths). If it fails (e.g., run-time
         // JIT constraint), fall back to building MA surfaces + elementwise PPO.
@@ -450,8 +598,7 @@ impl CudaPpo {
             // Build MA surfaces
             match ma_mode {
                 0 => {
-                    let sma = CudaSma::new(0)
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                    let sma = CudaSma::new(0)?;
                     let pfast = SmaParams {
                         period: Some(fast as usize),
                     };
@@ -461,28 +608,28 @@ impl CudaPpo {
                     let fast_dev = sma
                         .sma_multi_series_one_param_time_major_dev(
                             data_tm_f32, cols, rows, &pfast,
-                        )
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                        )?;
                     let slow_dev = sma
                         .sma_multi_series_one_param_time_major_dev(
                             data_tm_f32, cols, rows, &pslow,
-                        )
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                        )?;
                     // Launch elementwise PPO kernel
                     let func = self
                         .module
                         .get_function(
                             "ppo_from_ma_many_series_one_param_time_major_f32",
                         )
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                        .map_err(|_| CudaPpoError::MissingKernelSymbol {
+                            name: "ppo_from_ma_many_series_one_param_time_major_f32",
+                        })?;
                     let tx = 256u32;
                     let ty = 1u32;
-                    let grid: GridSize = (
-                        ((rows as u32) + tx - 1) / tx,
-                        ((cols as u32) + ty - 1) / ty,
-                        1,
-                    )
-                        .into();
+                    let grid_x = ((rows as u32) + tx - 1) / tx;
+                    let grid_y = ((cols as u32) + ty - 1) / ty;
+                    let gx = grid_x.max(1);
+                    let gy = grid_y.max(1);
+                    self.validate_launch(gx, gy, 1, tx, ty, 1)?;
+                    let grid: GridSize = (gx, gy, 1).into();
                     let block: BlockSize = (tx, ty, 1).into();
                     unsafe {
                         let mut p_fast = fast_dev.buf.as_device_ptr().as_raw();
@@ -501,14 +648,11 @@ impl CudaPpo {
                             &mut p_slowp as *mut _ as *mut c_void,
                             &mut p_out as *mut _ as *mut c_void,
                         ];
-                        self.stream
-                            .launch(&func, grid, block, 0, args)
-                            .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                        self.stream.launch(&func, grid, block, 0, args)?;
                     }
                 }
                 1 => {
-                    let ema = CudaEma::new(0)
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                    let ema = CudaEma::new(0)?;
                     let pfast = EmaParams {
                         period: Some(fast as usize),
                     };
@@ -518,28 +662,28 @@ impl CudaPpo {
                     let fast_dev = ema
                         .ema_many_series_one_param_time_major_dev(
                             data_tm_f32, cols, rows, &pfast,
-                        )
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                        )?;
                     let slow_dev = ema
                         .ema_many_series_one_param_time_major_dev(
                             data_tm_f32, cols, rows, &pslow,
-                        )
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                        )?;
                     // Elementwise PPO kernel
                     let func = self
                         .module
                         .get_function(
                             "ppo_from_ma_many_series_one_param_time_major_f32",
                         )
-                        .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                        .map_err(|_| CudaPpoError::MissingKernelSymbol {
+                            name: "ppo_from_ma_many_series_one_param_time_major_f32",
+                        })?;
                     let tx = 256u32;
                     let ty = 1u32;
-                    let grid: GridSize = (
-                        ((rows as u32) + tx - 1) / tx,
-                        ((cols as u32) + ty - 1) / ty,
-                        1,
-                    )
-                        .into();
+                    let grid_x = ((rows as u32) + tx - 1) / tx;
+                    let grid_y = ((cols as u32) + ty - 1) / ty;
+                    let gx = grid_x.max(1);
+                    let gy = grid_y.max(1);
+                    self.validate_launch(gx, gy, 1, tx, ty, 1)?;
+                    let grid: GridSize = (gx, gy, 1).into();
                     let block: BlockSize = (tx, ty, 1).into();
                     unsafe {
                         let mut p_fast = fast_dev.buf.as_device_ptr().as_raw();
@@ -558,16 +702,22 @@ impl CudaPpo {
                             &mut p_slowp as *mut _ as *mut c_void,
                             &mut p_out as *mut _ as *mut c_void,
                         ];
-                        self.stream
-                            .launch(&func, grid, block, 0, args)
-                            .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                        self.stream.launch(&func, grid, block, 0, args)?;
                     }
                 }
                 _ => unreachable!(),
             }
         }
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        self.synchronize()?;
+
+        Ok(DeviceArrayF32Ppo {
+            buf: d_out,
+            rows,
+            cols,
+            ctx: self.context_arc(),
+            device_id: self.device_id,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -586,21 +736,26 @@ impl CudaPpo {
         if cols <= 0 || rows <= 0 {
             return Ok(());
         }
-        if cols <= 0 || rows <= 0 {
-            return Ok(());
-        }
         let func = self
             .module
             .get_function("ppo_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPpoError::MissingKernelSymbol {
+                name: "ppo_many_series_one_param_time_major_f32",
+            })?;
 
         let (tx, ty) = match self.policy.many_series {
             ManySeriesKernelPolicy::Tiled2D { tx, ty } if tx > 0 && ty > 0 => (tx, ty),
             _ => (128u32, 1u32), // wide in time; let y expand as needed below
         };
+        if tx == 0 || ty == 0 {
+            return Err(CudaPpoError::InvalidPolicy("tx, ty must be > 0"));
+        }
         let grid_x = ((rows as u32) + tx - 1) / tx;
         let grid_y = ((cols as u32) + ty - 1) / ty;
-        let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+        let gx = grid_x.max(1);
+        let gy = grid_y.max(1);
+        self.validate_launch(gx, gy, 1, tx, ty, 1)?;
+        let grid: GridSize = (gx, gy, 1).into();
         let block: BlockSize = (tx, ty, 1).into();
 
         unsafe {
@@ -624,9 +779,7 @@ impl CudaPpo {
                 &mut p_mode as *mut _ as *mut c_void,
                 &mut p_out as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -648,7 +801,9 @@ impl CudaPpo {
         let func = self
             .module
             .get_function("ppo_batch_ema_manyparams_f32")
-            .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPpoError::MissingKernelSymbol {
+                name: "ppo_batch_ema_manyparams_f32",
+            })?;
 
         // Choose a warp-friendly block size (>=32 and multiple of 32)
         let mut block_x = match self.policy.batch {
@@ -670,6 +825,7 @@ impl CudaPpo {
         while start < total {
             let count = (total - start).min(max_rows_per_launch);
             let gy = div_ceil_u32(count as u32, combos_per_block as u32);
+            self.validate_launch(1, gy, 1, block_x, 1, 1)?;
             let grid: GridSize = (1, gy, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
 
@@ -690,9 +846,7 @@ impl CudaPpo {
                     &mut p_n as *mut _ as *mut c_void,
                     &mut p_out as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaPpoError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
 
             start += count;
@@ -708,21 +862,34 @@ fn expand_grid(range: &PpoBatchRange) -> Vec<PpoParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        if step == 0 || start == end {
-            return vec![start];
+        if start <= end {
+            (start..=end).step_by(step).collect()
+        } else {
+            let mut v = Vec::new();
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                if cur <= end {
+                    break;
+                }
+                let next = match cur.checked_sub(step) {
+                    Some(n) => n,
+                    None => break,
+                };
+                if next < end {
+                    break;
+                }
+                cur = next;
+            }
+            v
         }
-        (start..=end).step_by(step).collect()
     }
-    let mut out = Vec::new();
+
     let fasts = axis_u(range.fast_period);
     let slows = axis_u(range.slow_period);
+    let mut out = Vec::with_capacity(fasts.len().saturating_mul(slows.len()));
     for &f in &fasts {
         for &s in &slows {
-            out.push(PpoParams {
-                fast_period: Some(f),
-                slow_period: Some(s),
-                ma_type: Some(range.ma_type.clone()),
-            });
             out.push(PpoParams {
                 fast_period: Some(f),
                 slow_period: Some(s),
@@ -762,8 +929,11 @@ fn prefix_sum_time_major_f64(
     cols: usize,
     rows: usize,
     first_valids: &[i32],
-) -> Vec<f64> {
-    let mut ps = vec![0.0f64; rows * cols + 1];
+) -> Result<Vec<f64>, CudaPpoError> {
+    let elems = rows
+        .checked_mul(cols)
+        .ok_or_else(|| CudaPpoError::InvalidInput("rows*cols overflow in prefix_sum_time_major_f64".into()))?;
+    let mut ps = vec![0.0f64; elems + 1];
     for s in 0..cols {
         let fv = first_valids[s] as usize;
         let mut acc = 0.0f64;
@@ -775,7 +945,7 @@ fn prefix_sum_time_major_f64(
             ps[i + 1] = acc;
         }
     }
-    ps
+    Ok(ps)
 }
 
 #[inline]
@@ -784,10 +954,6 @@ fn ma_mode_from(s: &str) -> Result<i32, CudaPpoError> {
     match sl.as_str() {
         "sma" => Ok(0),
         "ema" => Ok(1),
-        other => Err(CudaPpoError::InvalidInput(format!(
-            "unsupported ma_type for CUDA PPO: {}",
-            other
-        ))),
         other => Err(CudaPpoError::InvalidInput(format!(
             "unsupported ma_type for CUDA PPO: {}",
             other
@@ -809,7 +975,27 @@ fn axis_vals(start: usize, end: usize, step: usize) -> Vec<usize> {
     if step == 0 || start == end {
         return vec![start];
     }
-    (start..=end).step_by(step).collect()
+    if start <= end {
+        (start..=end).step_by(step).collect()
+    } else {
+        let mut v = Vec::new();
+        let mut cur = start;
+        loop {
+            v.push(cur);
+            if cur <= end {
+                break;
+            }
+            let next = match cur.checked_sub(step) {
+                Some(n) => n,
+                None => break,
+            };
+            if next < end {
+                break;
+            }
+            cur = next;
+        }
+        v
+    }
 }
 #[inline]
 fn axis_len(start: usize, end: usize, step: usize) -> usize {

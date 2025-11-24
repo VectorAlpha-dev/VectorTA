@@ -23,13 +23,15 @@ use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::macz::{MaczBatchRange, MaczParams};
 use cust::context::Context;
 use cust::device::Device;
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -57,25 +59,31 @@ impl Default for CudaMaczPolicy {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaMaczError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaMaczError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaMaczError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaMaczError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaMaczError {}
 
 pub struct CudaMacz {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaMaczPolicy,
     debug_batch_logged: bool,
     debug_many_logged: bool,
@@ -83,27 +91,34 @@ pub struct CudaMacz {
 
 impl CudaMacz {
     pub fn new(device_id: usize) -> Result<Self, CudaMaczError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/macz_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) =
+                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
+            }
+        };
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaMaczPolicy::default(),
             debug_batch_logged: false,
             debug_many_logged: false,
@@ -117,48 +132,171 @@ impl CudaMacz {
         &self.policy
     }
     pub fn synchronize(&self) -> Result<(), CudaMaczError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMaczError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
     }
 
     #[inline]
-    fn device_mem_ok(bytes: usize) -> bool {
-        match mem_get_info() {
-            Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
+    pub fn context_arc(&self) -> Arc<Context> {
+        Arc::clone(&self.context)
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
             Err(_) => true,
         }
     }
 
-    fn expand_grid(sweep: &MaczBatchRange) -> Vec<MaczParams> {
-        fn axis_usize((s, e, step): (usize, usize, usize)) -> Vec<usize> {
-            if step == 0 || s == e {
-                return vec![s];
-            }
-            (s..=e).step_by(step).collect()
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaMaczError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
         }
-        fn axis_f64((s, e, step): (f64, f64, f64)) -> Vec<f64> {
-            if step.abs() < 1e-12 || (s - e).abs() < 1e-12 {
-                return vec![s];
+        if let Some((free, _total)) = Self::device_mem_info() {
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaMaczError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    fn validate_launch(&self, grid: GridSize, block: BlockSize) -> Result<(), CudaMaczError> {
+        use cust::device::DeviceAttribute as DevAttr;
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(DevAttr::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let bx = block.x.saturating_mul(block.y).saturating_mul(block.z);
+        if bx > max_threads {
+            return Err(CudaMaczError::LaunchConfigTooLarge {
+                gx: grid.x,
+                gy: grid.y,
+                gz: grid.z,
+                bx: block.x,
+                by: block.y,
+                bz: block.z,
+            });
+        }
+        let max_gx = dev
+            .get_attribute(DevAttr::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(DevAttr::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(DevAttr::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+        if grid.x > max_gx || grid.y > max_gy || grid.z > max_gz {
+            return Err(CudaMaczError::LaunchConfigTooLarge {
+                gx: grid.x,
+                gy: grid.y,
+                gz: grid.z,
+                bx: block.x,
+                by: block.y,
+                bz: block.z,
+            });
+        }
+        Ok(())
+    }
+
+    fn expand_grid(sweep: &MaczBatchRange) -> Result<Vec<MaczParams>, CudaMaczError> {
+        fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaMaczError> {
+            if step == 0 || start == end {
+                return Ok(vec![start]);
+            }
+            if start < end {
+                return Ok((start..=end).step_by(step.max(1)).collect());
             }
             let mut v = Vec::new();
-            let mut x = s;
-            while x <= e + 1e-12 {
-                v.push(x);
-                x += step;
+            let mut x = start as isize;
+            let end_i = end as isize;
+            let st = (step as isize).max(1);
+            while x >= end_i {
+                v.push(x as usize);
+                x -= st;
             }
-            v
+            if v.is_empty() {
+                return Err(CudaMaczError::InvalidInput(format!(
+                    "Invalid range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            Ok(v)
         }
-        let fs = axis_usize(sweep.fast_length);
-        let ss = axis_usize(sweep.slow_length);
-        let gs = axis_usize(sweep.signal_length);
-        let zs = axis_usize(sweep.lengthz);
-        let ds = axis_usize(sweep.length_stdev);
-        let as_ = axis_f64(sweep.a);
-        let bs = axis_f64(sweep.b);
-        let mut out = Vec::with_capacity(
-            fs.len() * ss.len() * gs.len() * zs.len() * ds.len() * as_.len() * bs.len(),
-        );
+        fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaMaczError> {
+            if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+                return Ok(vec![start]);
+            }
+            if start < end {
+                let mut v = Vec::new();
+                let mut x = start;
+                let st = step.abs();
+                while x <= end + 1e-12 {
+                    v.push(x);
+                    x += st;
+                }
+                if v.is_empty() {
+                    return Err(CudaMaczError::InvalidInput(format!(
+                        "Invalid range: start={}, end={}, step={}",
+                        start, end, step
+                    )));
+                }
+                return Ok(v);
+            }
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x + 1e-12 >= end {
+                v.push(x);
+                x -= st;
+            }
+            if v.is_empty() {
+                return Err(CudaMaczError::InvalidInput(format!(
+                    "Invalid range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            Ok(v)
+        }
+        let fs = axis_usize(sweep.fast_length)?;
+        let ss = axis_usize(sweep.slow_length)?;
+        let gs = axis_usize(sweep.signal_length)?;
+        let zs = axis_usize(sweep.lengthz)?;
+        let ds = axis_usize(sweep.length_stdev)?;
+        let as_ = axis_f64(sweep.a)?;
+        let bs = axis_f64(sweep.b)?;
+        let cap = fs
+            .len()
+            .checked_mul(ss.len())
+            .and_then(|v| v.checked_mul(gs.len()))
+            .and_then(|v| v.checked_mul(zs.len()))
+            .and_then(|v| v.checked_mul(ds.len()))
+            .and_then(|v| v.checked_mul(as_.len()))
+            .and_then(|v| v.checked_mul(bs.len()))
+            .ok_or_else(|| {
+                CudaMaczError::InvalidInput("range size overflow in MACZ CUDA expand_grid".into())
+            })?;
+        let mut out = Vec::with_capacity(cap);
         for &f in &fs {
             for &s in &ss {
                 for &g in &gs {
@@ -184,7 +322,7 @@ impl CudaMacz {
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     // ---------- Prefix helpers (single series) ----------
@@ -323,7 +461,7 @@ impl CudaMacz {
         volume: Option<&[f32]>,
         sweep: &MaczBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<MaczParams>), CudaMaczError> {
-        let combos = Self::expand_grid(sweep);
+        let combos = Self::expand_grid(sweep)?;
         if combos.is_empty() {
             return Err(CudaMaczError::InvalidInput("empty param grid".into()));
         }
@@ -352,52 +490,64 @@ impl CudaMacz {
             return Err(CudaMaczError::InvalidInput("not enough valid data".into()));
         }
 
-        // VRAM estimate: inputs + prefixes + params + outputs (two arrays)
+        // VRAM estimate: inputs + prefixes + params + outputs (two arrays), all checked.
         let rows = combos.len();
-        let prefix_base = (len + 1) * (std::mem::size_of::<f64>() * 2 + std::mem::size_of::<i32>());
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_f64 = std::mem::size_of::<f64>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let prefix_slot = sz_f64
+            .checked_mul(2)
+            .and_then(|v| v.checked_add(sz_i32))
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let prefix_base = (len + 1)
+            .checked_mul(prefix_slot)
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
         let prefix_vol = if volume.is_some() {
-            (len + 1) * (std::mem::size_of::<f64>() * 2 + std::mem::size_of::<i32>())
+            (len + 1)
+                .checked_mul(prefix_slot)
+                .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?
         } else {
             0
         };
-        let req = prices.len() * std::mem::size_of::<f32>()
-            + prefix_base
-            + prefix_vol
-            + rows
-                * (5 * std::mem::size_of::<i32>()
-                    + 3 * std::mem::size_of::<f32>()
-                    + std::mem::size_of::<i32>())
-            + 2 * rows * len * std::mem::size_of::<f32>();
-        if !Self::device_mem_ok(req) {
-            return Err(CudaMaczError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
-        }
+        let prices_b = prices
+            .len()
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let params_slot = 5usize
+            .checked_mul(sz_i32)
+            .and_then(|v| v.checked_add(3usize.checked_mul(sz_f32)?))
+            .and_then(|v| v.checked_add(sz_i32))
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let params_b = rows
+            .checked_mul(params_slot)
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaMaczError::InvalidInput("rows*cols overflow".into()))?;
+        let out_b = out_elems
+            .checked_mul(sz_f32)
+            .and_then(|v| v.checked_mul(2)) // macz_tmp + hist
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let req = prices_b
+            .checked_add(prefix_base)
+            .and_then(|v| v.checked_add(prefix_vol))
+            .and_then(|v| v.checked_add(params_b))
+            .and_then(|v| v.checked_add(out_b))
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        Self::will_fit(req, headroom)?;
 
         // Upload inputs/prefixes
-        let d_close = unsafe { DeviceBuffer::from_slice_async(prices, &self.stream) }
-            .map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+        let d_close = unsafe { DeviceBuffer::from_slice_async(prices, &self.stream) }?;
         let (pcs, pcsq, pcn, vol_tuple) = Self::build_prefixes_single(prices, volume);
-        let d_pcs =
-            DeviceBuffer::from_slice(&pcs).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let d_pcsq =
-            DeviceBuffer::from_slice(&pcsq).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let d_pcn =
-            DeviceBuffer::from_slice(&pcn).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+        let d_pcs = DeviceBuffer::from_slice(&pcs)?;
+        let d_pcsq = DeviceBuffer::from_slice(&pcsq)?;
+        let d_pcn = DeviceBuffer::from_slice(&pcn)?;
         let (d_pvs, d_pps, d_pvn) = if let Some((pvs, pps, pvn)) = vol_tuple {
             (
-                Some(
-                    DeviceBuffer::from_slice(&pvs)
-                        .map_err(|e| CudaMaczError::Cuda(e.to_string()))?,
-                ),
-                Some(
-                    DeviceBuffer::from_slice(&pps)
-                        .map_err(|e| CudaMaczError::Cuda(e.to_string()))?,
-                ),
-                Some(
-                    DeviceBuffer::from_slice(&pvn)
-                        .map_err(|e| CudaMaczError::Cuda(e.to_string()))?,
-                ),
+                Some(DeviceBuffer::from_slice(&pvs)?),
+                Some(DeviceBuffer::from_slice(&pps)?),
+                Some(DeviceBuffer::from_slice(&pvn)?),
             )
         } else {
             (None, None, None)
@@ -436,40 +586,28 @@ impl CudaMacz {
             .map(|p| p.gamma.unwrap_or(0.02) as f32)
             .collect();
 
-        let d_fasts =
-            DeviceBuffer::from_slice(&fasts).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let d_slows =
-            DeviceBuffer::from_slice(&slows).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let d_sigs =
-            DeviceBuffer::from_slice(&sigs).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let d_lzs =
-            DeviceBuffer::from_slice(&lzs).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let d_lsds =
-            DeviceBuffer::from_slice(&lsds).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let d_as =
-            DeviceBuffer::from_slice(&a_s).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let d_bs =
-            DeviceBuffer::from_slice(&b_s).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let d_ul =
-            DeviceBuffer::from_slice(&use_lag).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let d_gam =
-            DeviceBuffer::from_slice(&gammas).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+        let d_fasts = DeviceBuffer::from_slice(&fasts)?;
+        let d_slows = DeviceBuffer::from_slice(&slows)?;
+        let d_sigs = DeviceBuffer::from_slice(&sigs)?;
+        let d_lzs = DeviceBuffer::from_slice(&lzs)?;
+        let d_lsds = DeviceBuffer::from_slice(&lsds)?;
+        let d_as = DeviceBuffer::from_slice(&a_s)?;
+        let d_bs = DeviceBuffer::from_slice(&b_s)?;
+        let d_ul = DeviceBuffer::from_slice(&use_lag)?;
+        let d_gam = DeviceBuffer::from_slice(&gammas)?;
 
         // Outputs
-        let mut d_macz: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(rows * len)
-                .map_err(|e| CudaMaczError::Cuda(e.to_string()))?
-        };
-        let mut d_hist: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(rows * len)
-                .map_err(|e| CudaMaczError::Cuda(e.to_string()))?
-        };
+        let elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaMaczError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_macz: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
+        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
         // Launch
         let func = self
             .module
             .get_function("macz_batch_f32")
-            .map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMaczError::MissingKernelSymbol { name: "macz_batch_f32" })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
@@ -491,6 +629,7 @@ impl CudaMacz {
         unsafe {
             let grid: GridSize = (((rows as u32 + block_x - 1) / block_x).max(1), 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
+            self.validate_launch(grid, block)?;
             let mut close_p = d_close.as_device_ptr().as_raw();
             let mut vol_p = if let Some(ref b) = volume {
                 close_p /* placeholder */
@@ -503,10 +642,7 @@ impl CudaMacz {
             }
             // Actually upload volume now (if any)
             let d_volume = if let Some(vol) = volume {
-                Some(
-                    DeviceBuffer::from_slice(vol)
-                        .map_err(|e| CudaMaczError::Cuda(e.to_string()))?,
-                )
+                Some(DeviceBuffer::from_slice(vol)?)
             } else {
                 None
             };
@@ -570,14 +706,10 @@ impl CudaMacz {
                 &mut macz_p as *mut _ as *mut c_void,
                 &mut hist_p as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {
@@ -636,74 +768,84 @@ impl CudaMacz {
         }
 
         // VRAM estimate
-        let prefix_base =
-            (rows + 1) * cols * (std::mem::size_of::<f64>() * 2 + std::mem::size_of::<i32>());
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_f64 = std::mem::size_of::<f64>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let prefix_slot = sz_f64
+            .checked_mul(2)
+            .and_then(|v| v.checked_add(sz_i32))
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let prefix_base = (rows + 1)
+            .checked_mul(cols)
+            .and_then(|v| v.checked_mul(prefix_slot))
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
         let prefix_vol = if volume_tm.is_some() {
-            (rows + 1) * cols * (std::mem::size_of::<f64>() * 2 + std::mem::size_of::<i32>())
+            (rows + 1)
+                .checked_mul(cols)
+                .and_then(|v| v.checked_mul(prefix_slot))
+                .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?
         } else {
             0
         };
-        let req = (close_tm.len() + volume_tm.as_ref().map(|v| v.len()).unwrap_or(0))
-            * std::mem::size_of::<f32>()
-            + prefix_base
-            + prefix_vol
-            + 2 * cols * rows * std::mem::size_of::<f32>()
-            + cols * std::mem::size_of::<i32>();
-        if !Self::device_mem_ok(req) {
-            return Err(CudaMaczError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
-        }
+        let mat_elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMaczError::InvalidInput("cols*rows overflow".into()))?;
+        let data_b = (close_tm.len() + volume_tm.as_ref().map(|v| v.len()).unwrap_or(0))
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let out_b = mat_elems
+            .checked_mul(sz_f32)
+            .and_then(|v| v.checked_mul(2))
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let first_valids_b = cols
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let req = data_b
+            .checked_add(prefix_base)
+            .and_then(|v| v.checked_add(prefix_vol))
+            .and_then(|v| v.checked_add(out_b))
+            .and_then(|v| v.checked_add(first_valids_b))
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        Self::will_fit(req, headroom)?;
 
         // Upload inputs and prefixes
-        let d_close_tm =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+        let d_close_tm = DeviceBuffer::from_slice(close_tm)?;
         let d_volume_tm = if let Some(v) = volume_tm {
-            Some(DeviceBuffer::from_slice(v).map_err(|e| CudaMaczError::Cuda(e.to_string()))?)
+            Some(DeviceBuffer::from_slice(v)?)
         } else {
             None
         };
         let (pcs, pcsq, pcn, vol_tuple) =
             Self::build_prefixes_time_major(close_tm, volume_tm, cols, rows);
-        let d_pcs =
-            DeviceBuffer::from_slice(&pcs).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let d_pcsq =
-            DeviceBuffer::from_slice(&pcsq).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
-        let d_pcn =
-            DeviceBuffer::from_slice(&pcn).map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+        let d_pcs = DeviceBuffer::from_slice(&pcs)?;
+        let d_pcsq = DeviceBuffer::from_slice(&pcsq)?;
+        let d_pcn = DeviceBuffer::from_slice(&pcn)?;
         let (d_pvs, d_pps, d_pvn) = if let Some((pvs, pps, pvn)) = vol_tuple {
             (
-                Some(
-                    DeviceBuffer::from_slice(&pvs)
-                        .map_err(|e| CudaMaczError::Cuda(e.to_string()))?,
-                ),
-                Some(
-                    DeviceBuffer::from_slice(&pps)
-                        .map_err(|e| CudaMaczError::Cuda(e.to_string()))?,
-                ),
-                Some(
-                    DeviceBuffer::from_slice(&pvn)
-                        .map_err(|e| CudaMaczError::Cuda(e.to_string()))?,
-                ),
+                Some(DeviceBuffer::from_slice(&pvs)?),
+                Some(DeviceBuffer::from_slice(&pps)?),
+                Some(DeviceBuffer::from_slice(&pvn)?),
             )
         } else {
             (None, None, None)
         };
 
-        let mut d_macz_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(cols * rows)
-                .map_err(|e| CudaMaczError::Cuda(e.to_string()))?
-        };
-        let mut d_hist_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(cols * rows)
-                .map_err(|e| CudaMaczError::Cuda(e.to_string()))?
-        };
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMaczError::InvalidInput("cols*rows overflow".into()))?;
+        let mut d_macz_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
+        let mut d_hist_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
         // Launch
         let func = self
             .module
             .get_function("macz_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+            .map_err(|_| {
+                CudaMaczError::MissingKernelSymbol {
+                    name: "macz_many_series_one_param_time_major_f32",
+                }
+            })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
@@ -723,11 +865,11 @@ impl CudaMacz {
             }
         }
         // Allocate first_valids on device outside the launch scope to keep it alive
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
         unsafe {
             let grid: GridSize = (((cols as u32 + block_x - 1) / block_x).max(1), 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
+            self.validate_launch(grid, block)?;
             let mut c_p = d_close_tm.as_device_ptr().as_raw();
             let mut v_p = d_volume_tm
                 .as_ref()
@@ -793,13 +935,9 @@ impl CudaMacz {
                 &mut macz_p as *mut _ as *mut c_void,
                 &mut hist_p as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMaczError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_hist_tm,
             rows,

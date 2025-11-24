@@ -12,6 +12,9 @@
 //! - **`Ok(AlphaTrendOutput)`** on success, containing `k1` and `k2` vectors of length matching the input.
 //! - **`Err(AlphaTrendError)`** otherwise.
 //!
+//! ## Decision Log
+//! SIMD enabled for TR/HLC3; CUDA batch/many-series kernels with CAI v3 + DLPack v1.x Python VRAM handles; row-specific batch kernels deferred pending profiling.
+//!
 //! ## Developer Status
 //! - SIMD implemented for TR/HLC3 (AVX2/AVX512), ATR+line kept scalar due to recurrence.
 //! - Runtime selection: Auto keeps kernel detection (SIMD measured >5% faster at 100k/1M here).
@@ -2459,13 +2462,24 @@ impl AtDeviceArrayF32Py {
         (2, self.device_id as i32) // 2 == kDLCUDA
     }
 
-    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
-        // Take ownership of the device buffer for transfer to consumer
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<&pyo3::types::PyAny>,
+        _dl_device: Option<&pyo3::types::PyAny>,
+        _copy: Option<&pyo3::types::PyAny>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+
+        // Move ownership of the device buffer into the DLManagedTensor capsule
         let buf = self
             .buf
             .take()
             .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
 
+        // Minimal DLPack FFI structs (v1.x + legacy)
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
         #[repr(C)]
@@ -2484,59 +2498,235 @@ impl AtDeviceArrayF32Py {
         struct DLManagedTensor {
             dl_tensor: DLTensor,
             manager_ctx: *mut std::ffi::c_void,
-            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLVersion {
+            major: i32,
+            minor: i32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            dl_managed_tensor: DLManagedTensor,
+            version: DLVersion,
         }
 
+        // RAII manager to keep context + buffer alive
         struct Manager {
             _ctx: Arc<Context>,
             _buf: DeviceBuffer<f32>,
-            _shape: Box<[i64; 2]>,
-            _strides: Box<[i64; 2]>,
+        }
+        struct HolderLegacy {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            mgr: Manager,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            mgr: Manager,
         }
 
-        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
-            if p.is_null() { return; }
-            let mt: Box<DLManagedTensor> = Box::from_raw(p);
-            let mgr_ptr = mt.manager_ctx as *mut Manager;
-            if !mgr_ptr.is_null() { let _mgr: Box<Manager> = Box::from_raw(mgr_ptr); drop(_mgr); }
-            drop(mt);
+        unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).manager_ctx as *mut HolderLegacy;
+            if !holder.is_null() {
+                drop(Box::from_raw(holder));
+            }
+            drop(Box::from_raw(p));
         }
 
-        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
+        unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).dl_managed_tensor.manager_ctx as *mut HolderV1;
+            if !holder.is_null() {
+                drop(Box::from_raw(holder));
+            }
+            drop(Box::from_raw(p));
+        }
+
+        // Capsule destructor: call deleter only for still-active capsules and rename to used_*.
+        unsafe extern "C" fn cap_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensor;
             if !ptr.is_null() {
-                let mt = ptr as *mut DLManagedTensor;
-                if let Some(del) = (*mt).deleter { del(mt) }
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyo3::ffi::PyCapsule_SetName(
+                    capsule,
+                    used.as_ptr() as *const c_char,
+                );
+            }
+        }
+
+        unsafe extern "C" fn cap_destructor_v1(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                let mt = &mut (*ptr).dl_managed_tensor;
+                if let Some(del) = mt.deleter {
+                    del(mt);
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_SetName(
+                    capsule,
+                    used.as_ptr() as *const c_char,
+                );
             }
         }
 
         let rows = self.rows as i64;
         let cols = self.cols as i64;
-        let shape = Box::new([rows, cols]);
-        let strides = Box::new([cols, 1]);
-        let data_ptr = buf.as_device_ptr().as_raw() as *mut std::ffi::c_void;
-        let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
-        let mgr_ptr = Box::into_raw(mgr);
-        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
-        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
-
-        let mt = Box::new(DLManagedTensor { dl_tensor: DLTensor {
-            data: data_ptr,
-            device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
-            ndim: 2,
-            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-            shape: shape_ptr,
-            strides: strides_ptr,
-            byte_offset: 0,
-        }, manager_ctx: mgr_ptr as *mut std::ffi::c_void, deleter: Some(dlpack_deleter) });
-
-        let raw_capsule = unsafe {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut std::ffi::c_void, name.as_ptr(), Some(capsule_destructor))
+        let data_ptr = if self.rows == 0 || self.cols == 0 {
+            std::ptr::null_mut()
+        } else {
+            buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
         };
-        if raw_capsule.is_null() { return Err(PyValueError::new_err("failed to create DLPack capsule")); }
-        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+
+        // Decide between legacy and v1.x based on max_version (None → legacy).
+        let want_v1 = if let Some(v) = max_version {
+            v.getattr("__iter")
+                .ok()
+                .and_then(|_| v.extract::<(i32, i32)>().ok())
+                .map(|(maj, _)| maj >= 1)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let mgr = Manager {
+            _ctx: self._ctx.clone(),
+            _buf: buf,
+        };
+
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    dl_managed_tensor: DLManagedTensor {
+                        dl_tensor: DLTensor {
+                            data: data_ptr,
+                            device: DLDevice {
+                                device_type: 2,
+                                device_id: self.device_id as i32,
+                            },
+                            ndim: 2,
+                            dtype: DLDataType {
+                                code: 2,
+                                bits: 32,
+                                lanes: 1,
+                            },
+                            shape: std::ptr::null_mut(),
+                            strides: std::ptr::null_mut(),
+                            byte_offset: 0,
+                        },
+                        manager_ctx: std::ptr::null_mut(),
+                        deleter: Some(|mt| {
+                            if !mt.is_null() {
+                                // Reconstruct outer DLManagedTensorVersioned pointer
+                                let outer = (mt as *mut u8).offset(
+                                    -(std::mem::size_of::<DLVersion>() as isize),
+                                ) as *mut DLManagedTensorVersioned;
+                                deleter_v1(outer);
+                            }
+                        }),
+                    },
+                    version: DLVersion { major: 1, minor: 0 },
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                mgr,
+            });
+            holder
+                .managed
+                .dl_managed_tensor
+                .dl_tensor
+                .shape = holder.shape.as_mut_ptr();
+            holder
+                .managed
+                .dl_managed_tensor
+                .dl_tensor
+                .strides = holder.strides.as_mut_ptr();
+            holder
+                .managed
+                .dl_managed_tensor
+                .manager_ctx = &mut *holder as *mut HolderV1 as *mut std::ffi::c_void;
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_v1),
+                )
+            };
+            if cap.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        } else {
+            let mut holder = Box::new(HolderLegacy {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: self.device_id as i32,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_legacy),
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                mgr,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder
+                .managed
+                .dl_tensor
+                .strides = holder.strides.as_mut_ptr();
+            holder
+                .managed
+                .manager_ctx = &mut *holder as *mut HolderLegacy as *mut std::ffi::c_void;
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_legacy),
+                )
+            };
+            if cap.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        }
     }
 }
 
@@ -2578,8 +2768,11 @@ pub fn alphatrend_batch_js(
     let cols = close.len();
 
     // Flat buffers, filled in place
-    let mut k1 = vec![f64::NAN; rows * cols];
-    let mut k2 = vec![f64::NAN; rows * cols];
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+    let mut k1 = vec![f64::NAN; total];
+    let mut k2 = vec![f64::NAN; total];
 
     alphatrend_batch_inner_into_slices(
         open,
@@ -2596,7 +2789,11 @@ pub fn alphatrend_batch_js(
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     // Stack k1 then k2 per combo
-    let mut values = Vec::with_capacity(rows * 2 * cols);
+    let total_values = rows
+        .checked_mul(2)
+        .and_then(|r2| r2.checked_mul(cols))
+        .ok_or_else(|| JsValue::from_str("rows*2*cols overflow"))?;
+    let mut values = Vec::with_capacity(total_values);
     for r in 0..rows {
         let base = r * cols;
         values.extend_from_slice(&k1[base..base + cols]);
@@ -2655,10 +2852,12 @@ pub fn alphatrend_batch_into_flat(
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
         // Interpret out_ptr as two stacked blocks per combo
-        let k1 = core::slice::from_raw_parts_mut(out_ptr, rows * cols);
-        let k2 = core::slice::from_raw_parts_mut(out_ptr.add(rows * cols), rows * cols);
+        let k1 = core::slice::from_raw_parts_mut(out_ptr, total);
+        let k2 = core::slice::from_raw_parts_mut(out_ptr.add(total), total);
 
         alphatrend_batch_inner_into_slices(
             open,
@@ -2712,7 +2911,10 @@ pub fn alphatrend_batch_unified_js(
     // Flatten output similar to alphatrend_batch_js
     let rows2 = output.rows * 2;
     let cols = output.cols;
-    let mut values = Vec::with_capacity(rows2 * cols);
+    let total_values = rows2
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows2*cols overflow"))?;
+    let mut values = Vec::with_capacity(total_values);
     for r in 0..output.rows {
         let base = r * cols;
         values.extend_from_slice(&output.values_k1[base..base + cols]);

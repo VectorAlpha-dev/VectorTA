@@ -18,8 +18,11 @@ use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffe
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -47,20 +50,25 @@ impl Default for CudaKstPolicy {
     }
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaKstError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaKstError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaKstError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaKstError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaKstError {}
 
 /// Pair of VRAM-backed arrays produced by the KST kernels (line + signal).
 pub struct DeviceKstPair {
@@ -96,7 +104,8 @@ struct PackedParamPtrs {
 pub struct CudaKst {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaKstPolicy,
     // Device properties
     sm_count: i32,
@@ -104,10 +113,9 @@ pub struct CudaKst {
 
 impl CudaKst {
     pub fn new(device_id: usize) -> Result<Self, CudaKstError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/kst_kernel.ptx"));
         let jit_opts = &[
@@ -117,11 +125,10 @@ impl CudaKst {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaKstError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
@@ -129,14 +136,14 @@ impl CudaKst {
         // SM count for launch shaping
         let sm_count = device
             .get_attribute(DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaKstError::Cuda(e.to_string()))? as i32;
+            .map_err(CudaKstError::Cuda)? as i32;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaKstPolicy::default(),
             sm_count,
         })
@@ -152,16 +159,49 @@ impl CudaKst {
     }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaKstError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaKstError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
 
     #[inline]
-    fn device_mem_ok(bytes: usize) -> bool {
-        match mem_get_info() {
-            Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
             Err(_) => true,
+        }
+    }
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaKstError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            let need = required_bytes
+                .checked_add(headroom_bytes)
+                .ok_or(CudaKstError::OutOfMemory {
+                    required: usize::MAX,
+                    free,
+                    headroom: headroom_bytes,
+                })?;
+            if need <= free {
+                Ok(())
+            } else {
+                Err(CudaKstError::OutOfMemory {
+                    required: need,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
+        } else {
+            Ok(())
         }
     }
 
@@ -183,21 +223,22 @@ impl CudaKst {
 
     #[inline]
     fn copy_f32_to_device_async(&self, src: &[f32]) -> Result<DeviceBuffer<f32>, CudaKstError> {
-        if src.len() * std::mem::size_of::<f32>() >= Self::PIN_THRESHOLD_BYTES {
-            let h_pinned = LockedBuffer::from_slice(src)
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-            let mut d = unsafe {
-                DeviceBuffer::uninitialized_async(src.len(), &self.stream)
-                    .map_err(|e| CudaKstError::Cuda(e.to_string()))?
-            };
+        if src
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in copy_f32_to_device_async".into(),
+            ))?
+            >= Self::PIN_THRESHOLD_BYTES
+        {
+            let h_pinned = LockedBuffer::from_slice(src)?;
+        let mut d = unsafe { DeviceBuffer::uninitialized_async(src.len(), &self.stream)? };
             unsafe {
-                d.async_copy_from(&h_pinned, &self.stream)
-                    .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+                d.async_copy_from(&h_pinned, &self.stream)?;
             }
             Ok(d)
         } else {
-            unsafe { DeviceBuffer::from_slice_async(src, &self.stream) }
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))
+            unsafe { DeviceBuffer::from_slice_async(src, &self.stream) }.map_err(Into::into)
         }
     }
 
@@ -206,7 +247,11 @@ impl CudaKst {
 
     fn pack_params_async(&self, combos: &[KstParams]) -> Result<PackedParamPtrs, CudaKstError> {
         let rows = combos.len();
-        let total = rows * 9;
+        let total = rows
+            .checked_mul(9)
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in packed parameter buffer".into(),
+            ))?;
         let mut host = Vec::<i32>::with_capacity(total);
         host.resize(total, 0);
         let (s1s, rem) = host.split_at_mut(rows);
@@ -230,15 +275,12 @@ impl CudaKst {
             sgs[i] = c.signal_period.unwrap() as i32;
         }
 
-        let h_pinned = LockedBuffer::from_slice(&host)
-            .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+        let h_pinned = LockedBuffer::from_slice(&host)?;
         let mut d = unsafe {
-            DeviceBuffer::uninitialized_async(total, &self.stream)
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(total, &self.stream)?
         };
         unsafe {
-            d.async_copy_from(&h_pinned, &self.stream)
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+            d.async_copy_from(&h_pinned, &self.stream)?;
         }
 
         let base = d.as_device_ptr();
@@ -262,11 +304,35 @@ impl CudaKst {
 
     fn expand_grid(range: &KstBatchRange) -> Vec<KstParams> {
         fn axis(t: (usize, usize, usize)) -> Vec<usize> {
-            if t.2 == 0 || t.0 == t.1 {
-                vec![t.0]
-            } else {
-                (t.0..=t.1).step_by(t.2).collect()
+            let (start, end, step) = t;
+            if step == 0 {
+                return vec![start];
             }
+            if start == end {
+                return vec![start];
+            }
+            let mut out = Vec::new();
+            if start < end {
+                let mut v = start;
+                while v <= end {
+                    out.push(v);
+                    let next = match v.checked_add(step) {
+                        Some(n) if n > v => n,
+                        _ => break,
+                    };
+                    v = next;
+                }
+            } else {
+                let mut v = start;
+                while v >= end {
+                    out.push(v);
+                    if v - end < step {
+                        break;
+                    }
+                    v -= step;
+                }
+            }
+            out
         }
         let s1 = axis(range.sma_period1);
         let s2 = axis(range.sma_period2);
@@ -360,27 +426,46 @@ impl CudaKst {
         }
 
         let rows = combos.len();
-        let req_bytes = len * 4
-            + (9 * rows) * 4
-            + 2 * rows * len * 4
-            + 64 * 1024 * 1024; // prices + packed periods + outputs + headroom
-        if !Self::device_mem_ok(req_bytes) {
-            return Err(CudaKstError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
-        }
+        let prices_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in prices_bytes".into(),
+            ))?;
+        let params_bytes = rows
+            .checked_mul(9)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<i32>()))
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in params_bytes".into(),
+            ))?;
+        let out_bytes = rows
+            .checked_mul(len)
+            .and_then(|x| x.checked_mul(2))
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in output bytes".into(),
+            ))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in total VRAM estimate".into(),
+            ))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
         // Prices: use pinned H->D path when large
         let d_prices: DeviceBuffer<f32> = self.copy_f32_to_device_async(prices)?;
         // Pack all parameter arrays into one pinned transfer
         let packed = self.pack_params_async(&combos)?;
 
+        let out_len = rows
+            .checked_mul(len)
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in device output buffers".into(),
+            ))?;
         let mut d_line: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(out_len, &self.stream) }?;
         let mut d_signal: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(out_len, &self.stream) }?;
 
         self.launch_batch_packed(
             &d_prices,
@@ -480,10 +565,10 @@ impl CudaKst {
             let func = self
                 .module
                 .get_function("kst_batch_f32")
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaKstError::MissingKernelSymbol { name: "kst_batch_f32" })?;
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+                .map_err(CudaKstError::Cuda)?;
         }
         Ok(())
     }
@@ -533,22 +618,42 @@ impl CudaKst {
             first_valids[s] = fv;
         }
 
-        let req = data_tm_f32.len() * 4 + cols * 4 + 2 * data_tm_f32.len() * 4 + 64 * 1024 * 1024;
-        if !Self::device_mem_ok(req) {
-            return Err(CudaKstError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
-        }
+        let elems = data_tm_f32.len();
+        let prices_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in time-major prices_bytes".into(),
+            ))?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in first_valids bytes".into(),
+            ))?;
+        let out_bytes = elems
+            .checked_mul(2)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in time-major outputs".into(),
+            ))?;
+        let required = prices_bytes
+            .checked_add(first_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in total VRAM estimate".into(),
+            ))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
         let d_prices_tm: DeviceBuffer<f32> = self.copy_f32_to_device_async(data_tm_f32)?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(CudaKstError::Cuda)?;
+        let out_len = cols
+            .checked_mul(rows)
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in many-series device outputs".into(),
+            ))?;
         let mut d_line_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(out_len, &self.stream) }?;
         let mut d_sig_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(out_len, &self.stream) }?;
 
         self.launch_many_series(
             &d_prices_tm,
@@ -646,10 +751,12 @@ impl CudaKst {
             let func = self
                 .module
                 .get_function("kst_many_series_one_param_f32")
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaKstError::MissingKernelSymbol {
+                    name: "kst_many_series_one_param_f32",
+                })?;
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+                .map_err(CudaKstError::Cuda)?;
         }
         Ok(())
     }

@@ -13,34 +13,53 @@
 
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::DeviceArrayF32;
-use crate::indicators::macd::{expand_grid as expand_grid_host, MacdBatchRange, MacdParams};
+use crate::indicators::macd::{expand_grid as expand_grid_host, MacdBatchRange, MacdError, MacdParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaMacdError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] CudaError),
+    #[error("Out of memory on device: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
-    Unsupported(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Launch configuration too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device mismatch: buffer device {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaMacdError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaMacdError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaMacdError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-            CudaMacdError::Unsupported(e) => write!(f, "Unsupported: {}", e),
-        }
-    }
+
+/// VRAM-backed array handle for MACD CUDA outputs.
+pub struct DeviceArrayF32Macd {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
 }
-impl std::error::Error for CudaMacdError {}
+impl DeviceArrayF32Macd {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    #[inline]
+    pub fn len(&self) -> usize { self.rows * self.cols }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CudaMacdPolicy {
@@ -60,7 +79,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaMacd {
     module: Module,
     stream: Stream,
-    _ctx: Context,
+    _context: Arc<Context>,
+    device_id: u32,
     policy: CudaMacdPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -72,33 +92,31 @@ pub struct CudaMacd {
 
 impl CudaMacd {
     pub fn new(device_id: usize) -> Result<Self, CudaMacdError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let ctx = Context::new(device).map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
         let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))? as u32;
+            .get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
         let max_grid_x = device
-            .get_attribute(DeviceAttribute::MaxGridDimX)
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))? as u32;
+            .get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/macd_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])?,
+            },
+        };
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _ctx: ctx,
+            _context: context,
+            device_id: device_id as u32,
             policy: CudaMacdPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -108,6 +126,21 @@ impl CudaMacd {
             max_grid_x,
         })
     }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaMacdError> {
+        if let Ok((free, _)) = mem_get_info() {
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaMacdError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
+        }
+        Ok(())
+    }
+
 
     #[inline]
     pub fn set_policy(&mut self, p: CudaMacdPolicy) { self.policy = p; }
@@ -129,7 +162,7 @@ impl CudaMacd {
     ) -> Result<(DeviceMacdTriplet, Vec<MacdParams>), CudaMacdError> {
         let len = data_f32.len();
         if len == 0 {
-            return Err(CudaMacdError::InvalidInput("empty series".into()));
+            return Err(CudaMacdError::InvalidInput("input data is empty".into()));
         }
         let first_valid = data_f32
             .iter()
@@ -139,24 +172,23 @@ impl CudaMacd {
         // Enforce EMA path for now (parity with scalar classic kernel)
         let ma0 = &sweep.ma_type.0;
         if !ma0.eq_ignore_ascii_case("ema") {
-            return Err(CudaMacdError::Unsupported(format!(
+            return Err(CudaMacdError::InvalidInput(format!(
                 "CUDA MACD currently supports ma_type=\"ema\" only (got \"{}\")",
                 ma0
             )));
         }
 
-        let combos = expand_grid_host(sweep);
-        if combos.is_empty() {
-            return Err(CudaMacdError::InvalidInput("no parameter combos".into()));
-        }
+        let combos = expand_grid_host(sweep)
+            .map_err(|e: MacdError| CudaMacdError::InvalidInput(e.to_string()))?;
         if combos.is_empty() {
             return Err(CudaMacdError::InvalidInput("no parameter combos".into()));
         }
 
         // Host param arrays
-        let mut fasts: Vec<i32> = Vec::with_capacity(combos.len());
-        let mut slows: Vec<i32> = Vec::with_capacity(combos.len());
-        let mut signals: Vec<i32> = Vec::with_capacity(combos.len());
+        let rows = combos.len();
+        let mut fasts: Vec<i32> = Vec::with_capacity(rows);
+        let mut slows: Vec<i32> = Vec::with_capacity(rows);
+        let mut signals: Vec<i32> = Vec::with_capacity(rows);
         for prm in &combos {
             let f = prm.fast_period.unwrap_or(12) as i32;
             let s = prm.slow_period.unwrap_or(26) as i32;
@@ -176,73 +208,103 @@ impl CudaMacd {
             signals.push(g);
         }
 
-        // VRAM estimate: prices + params + 3 outputs
-        let rows = combos.len();
-        let bytes_prices = len * std::mem::size_of::<f32>();
-        let bytes_params = 3 * rows * std::mem::size_of::<i32>();
-        let bytes_out    = 3 * rows * len * std::mem::size_of::<f32>();
-        let required     = bytes_prices + bytes_params + bytes_out;
-        let headroom     = 64usize * 1024 * 1024;
-        let fits = match mem_get_info() { Ok((free, _)) => required.saturating_add(headroom) <= free, Err(_) => true };
-
-        if !fits {
-            return Err(CudaMacdError::Cuda(
-                "insufficient device memory for full MACD outputs; reduce parameter combos or compute in tiled fashion to host".into()
-            ));
-        }
+        // VRAM estimate: prices + params + 3 outputs (checked arithmetic)
+        let item_f32 = std::mem::size_of::<f32>();
+        let item_i32 = std::mem::size_of::<i32>();
+        let bytes_prices = len
+            .checked_mul(item_f32)
+            .ok_or_else(|| CudaMacdError::InvalidInput("series_len bytes overflow".into()))?;
+        let bytes_params = rows
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(item_i32))
+            .ok_or_else(|| CudaMacdError::InvalidInput("params bytes overflow".into()))?;
+        let elems_out = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaMacdError::InvalidInput("rows*len overflow".into()))?;
+        let bytes_out = elems_out
+            .checked_mul(item_f32)
+            .ok_or_else(|| CudaMacdError::InvalidInput("output bytes overflow".into()))?;
+        let required = bytes_prices
+            .checked_add(bytes_params)
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaMacdError::InvalidInput("total bytes overflow".into()))?;
+        let headroom = 64usize * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
 
         // Upload inputs and params once
-        let d_prices = DeviceBuffer::from_slice(data_f32).map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let d_f = DeviceBuffer::from_slice(&fasts).map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let d_s = DeviceBuffer::from_slice(&slows).map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let d_g = DeviceBuffer::from_slice(&signals).map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let d_f = DeviceBuffer::from_slice(&fasts)?;
+        let d_s = DeviceBuffer::from_slice(&slows)?;
+        let d_g = DeviceBuffer::from_slice(&signals)?;
 
         // Allocate final outputs once
-        let mut d_macd: DeviceBuffer<f32>  = unsafe { DeviceBuffer::uninitialized(rows * len) }
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let mut d_sig: DeviceBuffer<f32>   = unsafe { DeviceBuffer::uninitialized(rows * len) }
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let mut d_hist: DeviceBuffer<f32>  = unsafe { DeviceBuffer::uninitialized(rows * len) }
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+        let mut d_macd: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems_out) }?;
+        let mut d_sig: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems_out) }?;
+        let mut d_hist: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems_out) }?;
 
         // Single launch over all combos (grid‑stride)
-        let func = self.module.get_function("macd_batch_f32")
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+        let func = self
+            .module
+            .get_function("macd_batch_f32")
+            .map_err(|_| CudaMacdError::MissingKernelSymbol { name: "macd_batch_f32" })?;
         let (grid, block, block_x_used) = self.launch_1d(rows, self.policy.batch_block_x);
-        unsafe { (*(self as *const _ as *mut CudaMacd)).last_batch = Some(BatchKernelSelected::Plain { block_x: block_x_used }); }
         unsafe {
-            let mut p_ptr    = d_prices.as_device_ptr().as_raw();
-            let mut f_ptr    = d_f.as_device_ptr().as_raw();
-            let mut s_ptr    = d_s.as_device_ptr().as_raw();
-            let mut g_ptr    = d_g.as_device_ptr().as_raw();
-            let mut len_i    = len as i32;
-            let mut first_i  = first_valid as i32;
-            let mut rows_i   = rows as i32;
+            (*(self as *const _ as *mut CudaMacd)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x: block_x_used });
+        }
+        unsafe {
+            let mut p_ptr = d_prices.as_device_ptr().as_raw();
+            let mut f_ptr = d_f.as_device_ptr().as_raw();
+            let mut s_ptr = d_s.as_device_ptr().as_raw();
+            let mut g_ptr = d_g.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut rows_i = rows as i32;
             let mut macd_ptr = d_macd.as_device_ptr().as_raw();
-            let mut sig_ptr  = d_sig.as_device_ptr().as_raw();
+            let mut sig_ptr = d_sig.as_device_ptr().as_raw();
             let mut hist_ptr = d_hist.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
-                &mut p_ptr   as *mut _ as *mut c_void,
-                &mut f_ptr   as *mut _ as *mut c_void,
-                &mut s_ptr   as *mut _ as *mut c_void,
-                &mut g_ptr   as *mut _ as *mut c_void,
-                &mut len_i   as *mut _ as *mut c_void,
+                &mut p_ptr as *mut _ as *mut c_void,
+                &mut f_ptr as *mut _ as *mut c_void,
+                &mut s_ptr as *mut _ as *mut c_void,
+                &mut g_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
                 &mut first_i as *mut _ as *mut c_void,
-                &mut rows_i  as *mut _ as *mut c_void,
+                &mut rows_i as *mut _ as *mut c_void,
                 &mut macd_ptr as *mut _ as *mut c_void,
-                &mut sig_ptr  as *mut _ as *mut c_void,
+                &mut sig_ptr as *mut _ as *mut c_void,
                 &mut hist_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
-        self.stream.synchronize().map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         self.maybe_log_batch_debug();
 
         let outputs = DeviceMacdTriplet {
-            macd:   DeviceArrayF32 { buf: d_macd, rows, cols: len },
-            signal: DeviceArrayF32 { buf: d_sig,  rows, cols: len },
-            hist:   DeviceArrayF32 { buf: d_hist, rows, cols: len },
+            macd: DeviceArrayF32Macd {
+                buf: d_macd,
+                rows,
+                cols: len,
+                ctx: Arc::clone(&self._context),
+                device_id: self.device_id,
+            },
+            signal: DeviceArrayF32Macd {
+                buf: d_sig,
+                rows,
+                cols: len,
+                ctx: Arc::clone(&self._context),
+                device_id: self.device_id,
+            },
+            hist: DeviceArrayF32Macd {
+                buf: d_hist,
+                rows,
+                cols: len,
+                ctx: Arc::clone(&self._context),
+                device_id: self.device_id,
+            },
         };
         Ok((outputs, combos))
     }
@@ -258,27 +320,19 @@ impl CudaMacd {
         if cols == 0 || rows == 0 {
             return Err(CudaMacdError::InvalidInput("cols or rows is zero".into()));
         }
-        if cols == 0 || rows == 0 {
-            return Err(CudaMacdError::InvalidInput("cols or rows is zero".into()));
-        }
-        if data_tm_f32.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMacdError::InvalidInput("rows*cols overflow".into()))?;
+        if data_tm_f32.len() != expected {
             return Err(CudaMacdError::InvalidInput(format!(
                 "data length {} != cols*rows {}",
                 data_tm_f32.len(),
-                cols * rows
-            )));
-            return Err(CudaMacdError::InvalidInput(format!(
-                "data length {} != cols*rows {}",
-                data_tm_f32.len(),
-                cols * rows
+                expected
             )));
         }
         let ma = params.ma_type.as_deref().unwrap_or("ema");
         if !ma.eq_ignore_ascii_case("ema") {
-            return Err(CudaMacdError::Unsupported(
-                "many-series MACD supports ma_type=\"ema\" only".into(),
-            ));
-            return Err(CudaMacdError::Unsupported(
+            return Err(CudaMacdError::InvalidInput(
                 "many-series MACD supports ma_type=\"ema\" only".into(),
             ));
         }
@@ -300,8 +354,8 @@ impl CudaMacd {
                     break;
                 }
             }
-            let fv =
-                fv.ok_or_else(|| CudaMacdError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv = fv
+                .ok_or_else(|| CudaMacdError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fv < slow {
                 return Err(CudaMacdError::InvalidInput(format!(
                     "series {} lacks data: needed >= {}, valid = {}",
@@ -314,37 +368,50 @@ impl CudaMacd {
         }
 
         // VRAM estimate: data + first_valids + 3 outs
-        let bytes_data  = cols * rows * std::mem::size_of::<f32>();
-        let bytes_first = cols * std::mem::size_of::<i32>();
-        let bytes_out   = 3 * cols * rows * std::mem::size_of::<f32>();
-        let required    = bytes_data + bytes_first + bytes_out;
-        let headroom    = 64usize * 1024 * 1024;
-        let fits = match mem_get_info() { Ok((free, _)) => required.saturating_add(headroom) <= free, Err(_) => true };
-
-        if !fits {
-            return Err(CudaMacdError::Cuda(
-                "insufficient device memory for many-series MACD outputs; reduce columns/rows or stream results to host".into()
-            ));
-        }
+        let item_f32 = std::mem::size_of::<f32>();
+        let item_i32 = std::mem::size_of::<i32>();
+        let bytes_data = expected
+            .checked_mul(item_f32)
+            .ok_or_else(|| CudaMacdError::InvalidInput("data bytes overflow".into()))?;
+        let bytes_first = cols
+            .checked_mul(item_i32)
+            .ok_or_else(|| CudaMacdError::InvalidInput("first_valid bytes overflow".into()))?;
+        let elems_out = expected
+            .checked_mul(3)
+            .ok_or_else(|| CudaMacdError::InvalidInput("output elements overflow".into()))?;
+        let bytes_out = elems_out
+            .checked_mul(item_f32)
+            .ok_or_else(|| CudaMacdError::InvalidInput("output bytes overflow".into()))?;
+        let required = bytes_data
+            .checked_add(bytes_first)
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaMacdError::InvalidInput("total bytes overflow".into()))?;
+        let headroom = 64usize * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
 
         // Device buffers
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let mut d_macd: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
-        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_macd: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(expected) }?;
+        let mut d_sig: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(expected) }?;
+        let mut d_hist: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(expected) }?;
 
         let func = self
             .module
             .get_function("macd_many_series_one_param_f32")
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+            .map_err(|_| {
+                CudaMacdError::MissingKernelSymbol {
+                    name: "macd_many_series_one_param_f32",
+                }
+            })?;
         let (grid, block, block_x_used) = self.launch_1d(cols, self.policy.many_block_x);
-        unsafe { (*(self as *const _ as *mut CudaMacd)).last_many = Some(ManySeriesKernelSelected::OneD { block_x: block_x_used }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaMacd)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x: block_x_used });
+        }
         unsafe {
             let mut p_ptr = d_prices.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
@@ -354,7 +421,6 @@ impl CudaMacd {
             let mut sig_i = signal as i32;
             let mut first_ptr = d_first.as_device_ptr().as_raw();
             let mut macd_ptr = d_macd.as_device_ptr().as_raw();
-            let mut sig_ptr = d_sig.as_device_ptr().as_raw();
             let mut sig_ptr = d_sig.as_device_ptr().as_raw();
             let mut hist_ptr = d_hist.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
@@ -369,27 +435,41 @@ impl CudaMacd {
                 &mut sig_ptr as *mut _ as *mut c_void,
                 &mut hist_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         self.maybe_log_many_debug();
         Ok(DeviceMacdTriplet {
-            macd: DeviceArrayF32 { buf: d_macd, rows, cols },
-            signal: DeviceArrayF32 { buf: d_sig, rows, cols },
-            hist: DeviceArrayF32 { buf: d_hist, rows, cols },
+            macd: DeviceArrayF32Macd {
+                buf: d_macd,
+                rows,
+                cols,
+                ctx: Arc::clone(&self._context),
+                device_id: self.device_id,
+            },
+            signal: DeviceArrayF32Macd {
+                buf: d_sig,
+                rows,
+                cols,
+                ctx: Arc::clone(&self._context),
+                device_id: self.device_id,
+            },
+            hist: DeviceArrayF32Macd {
+                buf: d_hist,
+                rows,
+                cols,
+                ctx: Arc::clone(&self._context),
+                device_id: self.device_id,
+            },
         })
     }
 }
 
 /// MACD triple outputs (macd, signal, hist) retained on device.
 pub struct DeviceMacdTriplet {
-    pub macd: DeviceArrayF32,
-    pub signal: DeviceArrayF32,
-    pub hist: DeviceArrayF32,
+    pub macd: DeviceArrayF32Macd,
+    pub signal: DeviceArrayF32Macd,
+    pub hist: DeviceArrayF32Macd,
 }
 
 impl CudaMacd {

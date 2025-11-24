@@ -12,6 +12,8 @@
 //! ## Returns
 //! - **`Ok(DtiOutput)`** containing a `Vec<f64>` of DTI values ranging from -100 to 100
 //!
+//! **Decision log**: SIMD (AVX2/AVX512) and CUDA wrappers are enabled; CUDA paths return VRAM handles used by Python via CAI v3 + DLPack v1.x, and all paths preserve existing numerical outputs.
+//!
 //! ## Developer Notes
 //! ### Implementation Status
 //! - AVX2/AVX512: Enabled. Dual-chain 2-lane vectorization for numerator/denominator EMAs.
@@ -37,6 +39,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -208,8 +212,8 @@ impl DtiBuilder {
 
 #[derive(Debug, Error)]
 pub enum DtiError {
-    #[error("dti: Empty data provided.")]
-    EmptyData,
+    #[error("dti: Input data slice is empty.")]
+    EmptyInputData,
     #[error("dti: Candle field error: {0}")]
     CandleFieldError(String),
     #[error("dti: Invalid period: period = {period}, data length = {data_len}")]
@@ -220,6 +224,12 @@ pub enum DtiError {
     AllValuesNaN,
     #[error("dti: Length mismatch: high length = {high}, low length = {low}")]
     LengthMismatch { high: usize, low: usize },
+    #[error("dti: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("dti: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("dti: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
 }
 
 #[inline]
@@ -254,7 +264,7 @@ pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result
     };
 
     if high.is_empty() || low.is_empty() {
-        return Err(DtiError::EmptyData);
+        return Err(DtiError::EmptyInputData);
     }
     let len = high.len();
     if low.len() != len {
@@ -264,10 +274,7 @@ pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result
         });
     }
     if dst.len() != len {
-        return Err(DtiError::InvalidPeriod {
-            period: dst.len(),
-            data_len: len,
-        });
+        return Err(DtiError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
     let first_valid_idx = (0..len)
@@ -344,7 +351,7 @@ pub fn dti_with_kernel(input: &DtiInput, kernel: Kernel) -> Result<DtiOutput, Dt
     };
 
     if high.is_empty() || low.is_empty() {
-        return Err(DtiError::EmptyData);
+        return Err(DtiError::EmptyInputData);
     }
     let len = high.len();
     if low.len() != len {
@@ -1316,7 +1323,287 @@ pub fn dti_batch_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaDti;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::oscillators::dti_wrapper::DeviceArrayF32Dti;
+
+// Local CUDA device array Python wrapper with CAI v3 + DLPack (DTI-specific)
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DtiDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32Dti,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DtiDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted; wrapper synchronizes before returning
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        // Discover allocation device from pointer attributes; fall back to current device.
+        let mut device_ordinal: i32 = self.inner.device_id as i32;
+        unsafe {
+            let attr = cust::sys::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
+            let mut value = std::mem::MaybeUninit::<i32>::uninit();
+            let err = cust::sys::cuPointerGetAttribute(
+                value.as_mut_ptr() as *mut std::ffi::c_void,
+                attr,
+                self.inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
+            );
+            if err == cust::sys::CUresult::CUDA_SUCCESS {
+                device_ordinal = value.assume_init();
+            } else {
+                let _ = cust::sys::cuCtxGetDevice(&mut device_ordinal);
+            }
+        }
+        Ok((2, device_ordinal))
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<&pyo3::types::PyAny>,
+        _dl_device: Option<&pyo3::types::PyAny>,
+        _copy: Option<&pyo3::types::PyAny>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLVersion { major: i32, minor: i32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned { dl_managed_tensor: DLManagedTensor, version: DLVersion }
+
+        struct HolderLegacy {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32Dti,
+            retained: cust::sys::CUcontext,
+            device_id: i32,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32Dti,
+            retained: cust::sys::CUcontext,
+            device_id: i32,
+        }
+
+        unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            let holder = (*p).manager_ctx as *mut HolderLegacy;
+            if !holder.is_null() {
+                let ctx = (*holder).retained;
+                if !ctx.is_null() {
+                    let _ = cust::sys::cuCtxPushCurrent(ctx);
+                    let dev = (*holder).device_id;
+                    drop(Box::from_raw(holder));
+                    let mut _out: cust::sys::CUcontext = std::ptr::null_mut();
+                    let _ = cust::sys::cuCtxPopCurrent(&mut _out);
+                    let _ = cust::sys::cuDevicePrimaryCtxRelease(dev);
+                }
+            }
+            drop(Box::from_raw(p));
+        }
+
+        unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() { return; }
+            let holder = (*p).dl_managed_tensor.manager_ctx as *mut HolderV1;
+            if !holder.is_null() {
+                let ctx = (*holder).retained;
+                if !ctx.is_null() {
+                    let _ = cust::sys::cuCtxPushCurrent(ctx);
+                    let dev = (*holder).device_id;
+                    drop(Box::from_raw(holder));
+                    let mut _out: cust::sys::CUcontext = std::ptr::null_mut();
+                    let _ = cust::sys::cuCtxPopCurrent(&mut _out);
+                    let _ = cust::sys::cuDevicePrimaryCtxRelease(dev);
+                }
+            }
+            drop(Box::from_raw(p));
+        }
+
+        unsafe extern "C" fn cap_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char) as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter { del(ptr); }
+                let used = b"used_dltensor\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+        unsafe extern "C" fn cap_destructor_v1(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char) as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                let mt = &mut (*ptr).dl_managed_tensor;
+                if let Some(del) = mt.deleter { del(mt); }
+                let used = b"used_dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        let (kdl, alloc_dev) = self.__dlpack_device__()?; // (2, device_id)
+        let _ = kdl;
+
+        let mut retained: cust::sys::CUcontext = null_mut();
+        unsafe {
+            let _ = cust::sys::cuDevicePrimaryCtxRetain(&mut retained, alloc_dev);
+        }
+
+        let ctx_arc = self.inner.ctx.clone();
+        let dummy = DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32Dti { buf: dummy, rows: 0, cols: 0, ctx: ctx_arc, device_id: alloc_dev as u32 },
+        );
+
+        let want_v1 = if let Some(t) = max_version {
+            t.getattr("__iter")
+                .ok()
+                .and_then(|_| t.extract::<(i32, i32)>().ok())
+                .map(|(maj, _)| maj >= 1)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let data_ptr = if inner.rows == 0 || inner.cols == 0 {
+            std::ptr::null_mut()
+        } else {
+            inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+        };
+
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    dl_managed_tensor: DLManagedTensor {
+                        dl_tensor: DLTensor {
+                            data: data_ptr,
+                            device: DLDevice { device_type: 2, device_id: alloc_dev },
+                            ndim: 2,
+                            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                            shape: null_mut(),
+                            strides: null_mut(),
+                            byte_offset: 0,
+                        },
+                        manager_ctx: null_mut(),
+                        deleter: Some(|mt| {
+                            if !mt.is_null() {
+                                let outer = (mt as *mut u8).offset(-(std::mem::size_of::<DLVersion>() as isize))
+                                    as *mut DLManagedTensorVersioned;
+                                deleter_v1(outer);
+                            }
+                        }),
+                    },
+                    version: DLVersion { major: 1, minor: 0 },
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                arr: inner,
+                retained,
+                device_id: alloc_dev,
+            });
+            holder.managed.dl_managed_tensor.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_managed_tensor.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            holder.managed.dl_managed_tensor.manager_ctx =
+                &mut *holder as *mut HolderV1 as *mut std::ffi::c_void;
+            let _ = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_v1),
+                )
+            };
+            if capsule.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mut holder = Box::new(HolderLegacy {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice { device_type: 2, device_id: alloc_dev },
+                        ndim: 2,
+                        dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                        shape: null_mut(),
+                        strides: null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: null_mut(),
+                    deleter: Some(deleter_legacy),
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                arr: inner,
+                retained,
+                device_id: alloc_dev,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            holder.managed.manager_ctx =
+                &mut *holder as *mut HolderLegacy as *mut std::ffi::c_void;
+            let _ = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_legacy),
+                )
+            };
+            if capsule.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "dti_cuda_batch_dev")]
@@ -1329,7 +1616,7 @@ pub fn dti_cuda_batch_dev_py<'py>(
     s_range: (usize, usize, usize),
     u_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+) -> PyResult<(DtiDeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
     use crate::cuda::cuda_available;
     use numpy::IntoPyArray;
     if !cuda_available() {
@@ -1354,7 +1641,7 @@ pub fn dti_cuda_batch_dev_py<'py>(
     dict.set_item("r", rr.into_pyarray(py))?;
     dict.set_item("s", ss.into_pyarray(py))?;
     dict.set_item("u", uu.into_pyarray(py))?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((DtiDeviceArrayF32Py { inner }, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1368,7 +1655,7 @@ pub fn dti_cuda_many_series_one_param_dev_py(
     s: usize,
     u: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DtiDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use numpy::PyUntypedArrayMethods;
     if !cuda_available() {
@@ -1378,8 +1665,14 @@ pub fn dti_cuda_many_series_one_param_dev_py(
     let low_flat = low_tm_f32.as_slice()?;
     let rows = high_tm_f32.shape()[0];
     let cols = high_tm_f32.shape()[1];
+    let elems = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("matrix size overflow"))?;
     if low_tm_f32.shape() != [rows, cols] {
         return Err(PyValueError::new_err("high/low shapes mismatch"));
+    }
+    if high_tm_f32.len() != elems || low_tm_f32.len() != elems {
+        return Err(PyValueError::new_err("high/low flattened sizes mismatch"));
     }
     let params = DtiParams {
         r: Some(r),
@@ -1391,7 +1684,7 @@ pub fn dti_cuda_many_series_one_param_dev_py(
         cuda.dti_many_series_one_param_time_major_dev(high_flat, low_flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DtiDeviceArrayF32Py { inner })
 }
 
 #[derive(Clone, Debug)]
@@ -1505,64 +1798,59 @@ impl DtiBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &DtiBatchRange) -> Vec<DtiParams> {
-    // Calculate capacity without allocating intermediate vectors
-    fn count_steps((start, end, step): (usize, usize, usize)) -> usize {
+    #[inline(always)]
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {
-            1
+            return vec![start];
+        }
+        let mut v = Vec::new();
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                match cur.checked_add(step) {
+                    Some(nxt) => {
+                        if nxt > end { break; }
+                        cur = nxt;
+                    }
+                    None => break,
+                }
+            }
         } else {
-            ((end - start) / step) + 1
-        }
-    }
-
-    let r_count = count_steps(r.r);
-    let s_count = count_steps(r.s);
-    let u_count = count_steps(r.u);
-    let mut out = Vec::with_capacity(r_count * s_count * u_count);
-
-    // Generate parameters inline without intermediate allocations
-    let r_step = if r.r.2 == 0 { usize::MAX } else { r.r.2 };
-    let s_step = if r.s.2 == 0 { usize::MAX } else { r.s.2 };
-    let u_step = if r.u.2 == 0 { usize::MAX } else { r.u.2 };
-
-    let mut rr = r.r.0;
-    loop {
-        let mut ssv = r.s.0;
-        loop {
-            let mut uu = r.u.0;
+            let mut cur = start;
             loop {
-                out.push(DtiParams {
-                    r: Some(rr),
-                    s: Some(ssv),
-                    u: Some(uu),
-                });
-
-                if uu >= r.u.1 {
-                    break;
-                }
-                uu = (uu + u_step).min(r.u.1);
-                if uu > r.u.1 {
-                    break;
+                if cur < end { break; }
+                v.push(cur);
+                if cur == end { break; }
+                match cur.checked_sub(step) {
+                    Some(nxt) => {
+                        if nxt < end { break; }
+                        cur = nxt;
+                    }
+                    None => break,
                 }
             }
-
-            if ssv >= r.s.1 {
-                break;
-            }
-            ssv = (ssv + s_step).min(r.s.1);
-            if ssv > r.s.1 {
-                break;
-            }
         }
-
-        if rr >= r.r.1 {
-            break;
-        }
-        rr = (rr + r_step).min(r.r.1);
-        if rr > r.r.1 {
-            break;
-        }
+        v
     }
 
+    let rr = axis_usize(r.r);
+    let ss = axis_usize(r.s);
+    let uu = axis_usize(r.u);
+
+    let cap = rr
+        .len()
+        .checked_mul(ss.len())
+        .and_then(|x| x.checked_mul(uu.len()))
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
+    for &rv in &rr {
+        for &sv in &ss {
+            for &uv in &uu {
+                out.push(DtiParams { r: Some(rv), s: Some(sv), u: Some(uv) });
+            }
+        }
+    }
     out
 }
 
@@ -1576,12 +1864,7 @@ pub fn dti_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(DtiError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            });
-        }
+        other => return Err(DtiError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1622,10 +1905,7 @@ fn dti_batch_inner(
 ) -> Result<DtiBatchOutput, DtiError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(DtiError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(DtiError::InvalidRange { start: 0, end: 0, step: 0 });
     }
     let len = high.len();
     if low.len() != len {
@@ -1650,6 +1930,11 @@ fn dti_batch_inner(
     }
     let rows = combos.len();
     let cols = len;
+    let expected = rows.checked_mul(cols).ok_or(DtiError::InvalidRange {
+        start: 0,
+        end: 0,
+        step: 0,
+    })?;
 
     // Calculate warmup periods for each combo (first_valid + 1 since DTI needs at least 2 points)
     let warmup_periods: Vec<usize> = combos.iter().map(|_| first_valid + 1).collect();
@@ -1660,7 +1945,7 @@ fn dti_batch_inner(
 
     // Convert to mutable slice for computation
     let uninit_ptr = buf_mu.as_mut_ptr();
-    let values = unsafe { std::slice::from_raw_parts_mut(uninit_ptr as *mut f64, rows * cols) };
+    let values = unsafe { std::slice::from_raw_parts_mut(uninit_ptr as *mut f64, expected) };
 
     // Precompute base x and |x| once across rows to reduce redundant work
     let start = first_valid + 1;
@@ -1748,8 +2033,7 @@ fn dti_batch_inner(
 
     // Convert back to Vec for output
     let values = unsafe {
-        let capacity = rows * cols;
-        Vec::from_raw_parts(uninit_ptr as *mut f64, capacity, capacity)
+        Vec::from_raw_parts(uninit_ptr as *mut f64, expected, expected)
     };
     std::mem::forget(buf_mu);
 
@@ -1772,10 +2056,7 @@ pub fn dti_batch_inner_into(
 ) -> Result<Vec<DtiParams>, DtiError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(DtiError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(DtiError::InvalidRange { start: 0, end: 0, step: 0 });
     }
     let len = high.len();
     if low.len() != len {
@@ -1801,11 +2082,11 @@ pub fn dti_batch_inner_into(
 
     let rows = combos.len();
     let cols = len;
-    if out.len() != rows * cols {
-        return Err(DtiError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(DtiError::InvalidRange { start: 0, end: 0, step: 0 })?;
+    if out.len() != expected {
+        return Err(DtiError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     // Prefix-init using helpers, zero extra copies
@@ -2067,30 +2348,28 @@ pub fn dti_batch_into(
             u: (u_start, u_end, u_step),
         };
 
-        // Calculate total combinations
-        let r_count = if r_step == 0 {
-            1
-        } else {
-            ((r_end - r_start) / r_step) + 1
-        };
-        let s_count = if s_step == 0 {
-            1
-        } else {
-            ((s_end - s_start) / s_step) + 1
-        };
-        let u_count = if u_step == 0 {
-            1
-        } else {
-            ((u_end - u_start) / u_step) + 1
-        };
-        let total_rows = r_count * s_count * u_count;
+        // Calculate total combinations (robust; reversed bounds supported; zero step -> static)
+        fn axis_count(start: usize, end: usize, step: usize) -> usize {
+            if step == 0 || start == end { return 1; }
+            if start < end { ((end - start) / step) + 1 } else { ((start - end) / step) + 1 }
+        }
+        let r_count = axis_count(r_start, r_end, r_step);
+        let s_count = axis_count(s_start, s_end, s_step);
+        let u_count = axis_count(u_start, u_end, u_step);
+        let total_rows = r_count
+            .checked_mul(s_count)
+            .and_then(|x| x.checked_mul(u_count))
+            .ok_or(JsValue::from_str("range expansion overflow in dti_batch_into"))?;
+        let total_len = total_rows
+            .checked_mul(len)
+            .ok_or(JsValue::from_str("size overflow in dti_batch_into"))?;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, total_rows * len);
+        let out = std::slice::from_raw_parts_mut(out_ptr, total_len);
 
         // Check for aliasing
         if out_ptr as *const f64 == high_ptr || out_ptr as *const f64 == low_ptr {
             // Need temporary buffer for aliased operation
-            let mut temp_values = vec![0.0; total_rows * len];
+            let mut temp_values = vec![0.0; total_len];
             let combos =
                 dti_batch_inner_into(high, low, &sweep, Kernel::Auto, false, &mut temp_values)
                     .map_err(|e| JsValue::from_str(&e.to_string()))?;

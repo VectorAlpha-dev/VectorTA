@@ -1003,15 +1003,15 @@ impl AroonBatchOutput {
             .position(|c| c.length.unwrap_or(14) == p.length.unwrap_or(14))
     }
     pub fn up_for(&self, p: &AroonParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| {
-            let start = row * self.cols;
-            &self.up[start..start + self.cols]
+        self.row_for_params(p).and_then(|row| {
+            row.checked_mul(self.cols)
+                .and_then(|start| self.up.get(start..start + self.cols))
         })
     }
     pub fn down_for(&self, p: &AroonParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| {
-            let start = row * self.cols;
-            &self.down[start..start + self.cols]
+        self.row_for_params(p).and_then(|row| {
+            row.checked_mul(self.cols)
+                .and_then(|start| self.down.get(start..start + self.cols))
         })
     }
 }
@@ -1185,12 +1185,18 @@ fn aroon_batch_inner_into(
 
     let rows = combos.len();
     let cols = len;
-
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(AroonError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
+        })?;
     // Validate output buffer sizes
-    if out_up.len() != rows * cols || out_down.len() != rows * cols {
-        return Err(AroonError::InvalidLength {
-            length: out_up.len(),
-            data_len: rows * cols,
+    if out_up.len() != expected || out_down.len() != expected {
+        return Err(AroonError::OutputLengthMismatch {
+            expected,
+            got: out_up.len().max(out_down.len()),
         });
     }
 
@@ -1353,16 +1359,24 @@ impl AroonDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producer streams synchronize before returning VRAM handles.
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
-    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
-        use pyo3::ffi;
-        use std::ffi::CString;
-        use std::os::raw::{c_char, c_void};
+    #[pyo3(signature=(_stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        _stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
 
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
@@ -1379,59 +1393,99 @@ impl AroonDeviceArrayF32Py {
             byte_offset: u64,
         }
         #[repr(C)]
-        struct DLManagedTensor {
-            dl_tensor: DLTensor,
-            manager_ctx: *mut c_void,
-            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
-        }
+        struct DLManagedTensor { dl_tensor: DLTensor, manager_ctx: *mut c_void, deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)> }
         #[repr(C)]
-        struct Manager { py_self: *mut ffi::PyObject, shape: *mut [i64; 2] }
+        struct DLManagedTensorVersioned { manager: *mut DLManagedTensor, version: u32 }
+        #[repr(C)]
+        struct ManagerCtx { shape: *mut i64, strides: *mut i64, _shape: Box<[i64; 2]>, _strides: Box<[i64; 2]>, _self_ref: PyObject }
 
-        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
             if p.is_null() { return; }
-            unsafe {
-                let mgr = (*p).manager_ctx as *mut Manager;
+            let mt = Box::from_raw(p);
+            let ctx = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx.is_null() { drop(Box::from_raw(ctx)); }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            // Only free if still named "dltensor"
+            let name = b"dltensor\0";
+            let ptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter { del(ptr); }
+                let used = b"used_dltensor\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_versioned(capsule: *mut pyffi::PyObject) {
+            // Only free if still named "dltensor_versioned"
+            let name = b"dltensor_versioned\0";
+            let vptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensorVersioned;
+            if !vptr.is_null() {
+                let mgr = (*vptr).manager;
                 if !mgr.is_null() {
-                    let mgr_box = Box::from_raw(mgr);
-                    let g = ffi::PyGILState_Ensure();
-                    ffi::Py_DECREF(mgr_box.py_self);
-                    ffi::PyGILState_Release(g);
-                    if !mgr_box.shape.is_null() { let _ = Box::from_raw(mgr_box.shape); }
+                    if let Some(del) = (*mgr).deleter { del(mgr); }
                 }
-                let _ = Box::from_raw(p);
+                let used = b"used_dltensor_versioned\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                let _ = Box::from_raw(vptr);
             }
         }
 
         let rows = slf.inner.rows as i64;
         let cols = slf.inner.cols as i64;
+        let total_elems = (rows as i128) * (cols as i128);
+
+        // Element-based strides per DLPack v1.2+
         let mut shape = Box::new([rows, cols]);
-        let shape_ptr: *mut [i64; 2] = &mut *shape;
-        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
-        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        // Keep this object (and its Context Arc) alive for the capsule lifetime
+        let self_ref = unsafe { PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx { shape: shape_ptr, strides: strides_ptr, _shape: shape, _strides: strides, _self_ref: self_ref });
         let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
 
-        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
-        let dl = DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
-                ndim: 2,
-                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                shape: shape_ptr as *mut i64,
-                strides: std::ptr::null_mut(),
-                byte_offset: 0,
-            },
-            manager_ctx: mgr_ptr,
-            deleter: Some(dlpack_deleter),
+        let data_ptr: *mut c_void = if total_elems == 0 {
+            std::ptr::null_mut()
+        } else {
+            slf.inner.device_ptr() as usize as *mut c_void
         };
-        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
-        let name = CString::new("dltensor").unwrap();
-        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
-        if capsule.is_null() {
-            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
-            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        let tensor = DLTensor {
+            data: data_ptr,
+            device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
+
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned { manager: Box::into_raw(mt), version: 1 });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor_versioned));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err("failed to create versioned DLPack capsule"));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err("failed to create DLPack capsule"));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
     }
 }
 
@@ -2944,10 +2998,13 @@ pub fn aroon_batch_unified_js(
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = high.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows * cols overflow"))?;
 
     // compute into two separate flat buffers
-    let mut up = vec![0.0; rows * cols];
-    let mut down = vec![0.0; rows * cols];
+    let mut up = vec![0.0; total];
+    let mut down = vec![0.0; total];
 
     aroon_batch_inner_into(
         high,
@@ -3044,10 +3101,13 @@ pub fn aroon_batch_config_js(
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = high.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("rows * cols overflow"))?;
 
     // compute into two separate flat buffers
-    let mut up = vec![0.0; rows * cols];
-    let mut down = vec![0.0; rows * cols];
+    let mut up = vec![0.0; total];
+    let mut down = vec![0.0; total];
 
     aroon_batch_inner_into(
         high,

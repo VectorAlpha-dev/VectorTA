@@ -10,7 +10,7 @@
 //!
 //! ## Returns
 //! - **`Ok(VidyaOutput)`** containing a `Vec<f64>` of adaptive moving average values matching input length.
-//! - **`Err(VidyaError)`** on invalid parameters or insufficient data.
+//! - **`Err(VidyaError)`** on invalid parameters, invalid ranges, or insufficient data.
 //!
 //! ## Developer Notes
 //! - Decision: Streaming kernel tightened per GUIDE. Uses mul_add for sums/EMA, one-sqrt ratio, and mod-free long-ring wrap; outputs match scalar/batch.
@@ -26,19 +26,14 @@
 //! - **Batch Support**: ✓ Parallel batch over parameter grid. Row-specific SIMD not attempted as
 //!   there is no clear shared precompute beyond single prefix sums; per-row sequential dependency
 //!   dominates.
-//! - **WebAssembly**: Has SIMD128 helper matching scalar logic for parity.
-//! - **Bindings Test Status (2025-10-30)**:
-//!   - Python: binding unit tests pass; accuracy checks use the same last-5 reference
-//!     values as Rust with ≤1e-1 absolute tolerance.
-//!   - WASM: single-series APIs (`vidya_js`, `vidya_into`) pass and match Rust references.
-//!     Batch bindings (`vidya_batch`/`vidya_batch_into`) currently panic in WASM due to an
-//!     allocation/rows mismatch in the binding; corresponding WASM batch tests are skipped
-//!     until the binding is fixed. This is a binding issue, not a kernel/numerics issue.
+//! - **CUDA / Python Status (2025-11)**: CUDA wrapper present for batch and many-series variants;
+//!   VRAM handles are exposed to Python with CUDA Array Interface v3 and DLPack v1.x (__dlpack__
+//!   + versioned capsules) while preserving scalar numerical outputs.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaVidya;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::DeviceArrayF32;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -63,6 +58,8 @@ use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
 use paste::paste;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
@@ -277,20 +274,22 @@ impl VidyaBuilder {
 
 #[derive(Debug, Error)]
 pub enum VidyaError {
-    #[error("vidya: Empty data provided.")]
-    EmptyData,
+    #[error("vidya: Input data slice is empty.")]
+    EmptyInputData,
     #[error("vidya: All values are NaN.")]
     AllValuesNaN,
+    #[error("vidya: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
     #[error("vidya: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("vidya: Invalid parameters. short_period={short} (must be >= 2), long_period={long} (must be >= short_period), alpha={alpha} (must be 0.0-1.0)")]
-    InvalidParameters {
-        short: usize,
-        long: usize,
-        alpha: f64,
-    },
-    #[error("vidya: Output length mismatch: dst_len = {dst_len}, data_len = {data_len}")]
-    InvalidOutputLength { dst_len: usize, data_len: usize },
+    #[error("vidya: Invalid alpha: {alpha}")]
+    InvalidAlpha { alpha: f64 },
+    #[error("vidya: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("vidya: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("vidya: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -305,25 +304,27 @@ pub fn vidya_with_kernel(input: &VidyaInput, kernel: Kernel) -> Result<VidyaOutp
     };
 
     if data.is_empty() {
-        return Err(VidyaError::EmptyData);
+        return Err(VidyaError::EmptyInputData);
     }
 
     let short_period = input.get_short_period();
     let long_period = input.get_long_period();
     let alpha = input.get_alpha();
 
-    if short_period < 2
-        || long_period < short_period
-        || long_period < 2
-        || alpha < 0.0
-        || alpha > 1.0
-        || long_period > data.len()
-    {
-        return Err(VidyaError::InvalidParameters {
-            short: short_period,
-            long: long_period,
-            alpha,
+    if short_period < 2 {
+        return Err(VidyaError::InvalidPeriod {
+            period: short_period,
+            data_len: data.len(),
         });
+    }
+    if long_period < short_period || long_period < 2 || long_period > data.len() {
+        return Err(VidyaError::InvalidPeriod {
+            period: long_period,
+            data_len: data.len(),
+        });
+    }
+    if !(0.0..=1.0).contains(&alpha) || alpha.is_nan() || alpha.is_infinite() {
+        return Err(VidyaError::InvalidAlpha { alpha });
     }
 
     let first = data
@@ -377,13 +378,13 @@ pub fn vidya_into_slice(
     };
 
     if data.is_empty() {
-        return Err(VidyaError::EmptyData);
+        return Err(VidyaError::EmptyInputData);
     }
 
     if dst.len() != data.len() {
-        return Err(VidyaError::InvalidOutputLength {
-            dst_len: dst.len(),
-            data_len: data.len(),
+        return Err(VidyaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -391,18 +392,20 @@ pub fn vidya_into_slice(
     let long_period = input.get_long_period();
     let alpha = input.get_alpha();
 
-    if short_period < 2
-        || long_period < short_period
-        || long_period < 2
-        || alpha < 0.0
-        || alpha > 1.0
-        || long_period > data.len()
-    {
-        return Err(VidyaError::InvalidParameters {
-            short: short_period,
-            long: long_period,
-            alpha,
+    if short_period < 2 {
+        return Err(VidyaError::InvalidPeriod {
+            period: short_period,
+            data_len: data.len(),
         });
+    }
+    if long_period < short_period || long_period < 2 || long_period > data.len() {
+        return Err(VidyaError::InvalidPeriod {
+            period: long_period,
+            data_len: data.len(),
+        });
+    }
+    if !(0.0..=1.0).contains(&alpha) || alpha.is_nan() || alpha.is_infinite() {
+        return Err(VidyaError::InvalidAlpha { alpha });
     }
 
     let first = data
@@ -878,17 +881,14 @@ impl VidyaStream {
         let long_period = params.long_period.unwrap_or(5);
         let alpha = params.alpha.unwrap_or(0.2);
 
-        if short_period < 2
-            || long_period < short_period
-            || long_period < 2
-            || alpha < 0.0
-            || alpha > 1.0
-        {
-            return Err(VidyaError::InvalidParameters {
-                short: short_period,
-                long: long_period,
-                alpha,
+        if short_period < 2 || long_period < short_period || long_period < 2 {
+            return Err(VidyaError::InvalidPeriod {
+                period: long_period,
+                data_len: 0,
             });
+        }
+        if !(0.0..=1.0).contains(&alpha) || alpha.is_nan() || alpha.is_infinite() {
+            return Err(VidyaError::InvalidAlpha { alpha });
         }
         Ok(Self {
             short_period,
@@ -1067,15 +1067,14 @@ pub fn vidya_batch_with_kernel(
     sweep: &VidyaBatchRange,
     k: Kernel,
 ) -> Result<VidyaBatchOutput, VidyaError> {
+    if data.is_empty() {
+        return Err(VidyaError::EmptyInputData);
+    }
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(VidyaError::InvalidParameters {
-                short: 0,
-                long: 0,
-                alpha: 0.0,
-            })
+        other => {
+            return Err(VidyaError::InvalidKernelForBatch(other));
         }
     };
 
@@ -1114,35 +1113,98 @@ impl VidyaBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &VidyaBatchRange) -> Vec<VidyaParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &VidyaBatchRange) -> Result<Vec<VidyaParams>, VidyaError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, VidyaError> {
         if step == 0 || start == end {
-            let mut v = Vec::with_capacity(1);
-            v.push(start);
-            return v;
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.max(1);
+            while x <= end {
+                v.push(x);
+                x = x.saturating_add(st);
+            }
+            if v.is_empty() {
+                return Err(VidyaError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(VidyaError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, VidyaError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            let mut v = Vec::with_capacity(1);
-            v.push(start);
-            return v;
+            return Ok(vec![start]);
         }
-        let count = ((end - start) / step).ceil() as usize + 1;
-        let mut v = Vec::with_capacity(count);
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(VidyaError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
+        let st = step.abs();
+        while x + 1e-12 >= end {
             v.push(x);
-            x += step;
+            x -= st;
         }
-        v
+        if v.is_empty() {
+            return Err(VidyaError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let short_periods = axis_usize(r.short_period);
-    let long_periods = axis_usize(r.long_period);
-    let alphas = axis_f64(r.alpha);
 
-    let mut out = Vec::with_capacity(short_periods.len() * long_periods.len() * alphas.len());
+    let short_periods = axis_usize(r.short_period)?;
+    let long_periods = axis_usize(r.long_period)?;
+    let alphas = axis_f64(r.alpha)?;
+
+    let cap = short_periods
+        .len()
+        .checked_mul(long_periods.len())
+        .and_then(|x| x.checked_mul(alphas.len()))
+        .ok_or_else(|| VidyaError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &sp in &short_periods {
         for &lp in &long_periods {
             for &a in &alphas {
@@ -1154,7 +1216,7 @@ fn expand_grid(r: &VidyaBatchRange) -> Vec<VidyaParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1182,13 +1244,9 @@ fn vidya_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<VidyaBatchOutput, VidyaError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(VidyaError::InvalidParameters {
-            short: 0,
-            long: 0,
-            alpha: 0.0,
-        });
+    let combos = expand_grid(sweep)?;
+    if data.is_empty() {
+        return Err(VidyaError::EmptyInputData);
     }
     let first = data
         .iter()
@@ -1204,6 +1262,12 @@ fn vidya_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+
+    let _ = rows.checked_mul(cols).ok_or_else(|| VidyaError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
 
     // Calculate warmup periods for each parameter combination
     let warmup_periods: Vec<usize> = combos
@@ -2127,13 +2191,9 @@ pub fn vidya_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<VidyaParams>, VidyaError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(VidyaError::InvalidParameters {
-            short: 0,
-            long: 0,
-            alpha: 0.0,
-        });
+    let combos = expand_grid(sweep)?;
+    if data.is_empty() {
+        return Err(VidyaError::EmptyInputData);
     }
 
     let first = data
@@ -2150,6 +2210,20 @@ pub fn vidya_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| VidyaError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
+    if out.len() < expected {
+        return Err(VidyaError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Calculate warmup periods for each parameter combination
     let warmup_periods: Vec<usize> = combos
@@ -2277,11 +2351,14 @@ pub fn vidya_batch_py<'py>(
         alpha: alpha_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -2334,6 +2411,211 @@ pub fn vidya_batch_py<'py>(
 
 // ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "VidyaDeviceArrayF32", unsendable)]
+pub struct VidyaDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: std::sync::Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl VidyaDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producer synchronizes before returning handle.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature=(_stream=None, max_version=None, _dl_device=None, _copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        _stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _self_ref: PyObject,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx.is_null() {
+                drop(Box::from_raw(ctx));
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_versioned(capsule: *mut pyffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let vptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                as *mut DLManagedTensorVersioned;
+            if !vptr.is_null() {
+                let mgr = (*vptr).manager;
+                if !mgr.is_null() {
+                    if let Some(del) = (*mgr).deleter {
+                        del(mgr);
+                    }
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                let _ = Box::from_raw(vptr);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let total_elems = (rows as i128) * (cols as i128);
+
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let self_ref = unsafe { PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _self_ref: self_ref,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr: *mut c_void = if total_elems == 0 {
+            std::ptr::null_mut()
+        } else {
+            slf.inner.device_ptr() as usize as *mut c_void
+        };
+        let tensor = DLTensor {
+            data: data_ptr,
+            device: DLDevice {
+                device_type: 2,
+                device_id: slf.device_id as i32,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: tensor,
+            manager_ctx: mgr_ptr,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor_versioned));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create versioned DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err("failed to create DLPack capsule"));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "vidya_cuda_batch_dev")]
 #[pyo3(signature = (data, short_period_range, long_period_range, alpha_range, device_id=0))]
 pub fn vidya_cuda_batch_dev_py(
@@ -2343,7 +2625,7 @@ pub fn vidya_cuda_batch_dev_py(
     long_period_range: (usize, usize, usize),
     alpha_range: (f64, f64, f64),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<VidyaDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2354,12 +2636,18 @@ pub fn vidya_cuda_batch_dev_py(
         long_period: long_period_range,
         alpha: alpha_range,
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda = CudaVidya::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vidya_batch_dev(slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let arr = cuda
+            .vidya_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, cuda.context_arc_clone(), cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(VidyaDeviceArrayF32Py {
+        inner,
+        _ctx: ctx_arc,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2374,7 +2662,7 @@ pub fn vidya_cuda_many_series_one_param_dev_py(
     long_period: usize,
     alpha: f64,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<VidyaDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2391,12 +2679,18 @@ pub fn vidya_cuda_many_series_one_param_dev_py(
         long_period: Some(long_period),
         alpha: Some(alpha),
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda = CudaVidya::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vidya_many_series_one_param_time_major_dev(slice, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let arr = cuda
+            .vidya_many_series_one_param_time_major_dev(slice, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, cuda.context_arc_clone(), cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(VidyaDeviceArrayF32Py {
+        inner,
+        _ctx: ctx_arc,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(feature = "wasm")]
@@ -2557,8 +2851,11 @@ pub fn vidya_batch_into(
         };
 
         // Calculate expected output size
-        let combos = expand_grid(&sweep);
-        let total_size = combos.len() * len;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let total_size = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
         let kernel = detect_best_kernel();

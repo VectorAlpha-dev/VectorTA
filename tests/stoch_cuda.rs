@@ -8,6 +8,10 @@ use my_project::indicators::stoch::{
 };
 use my_project::utilities::data_loader::Candles;
 use my_project::utilities::enums::Kernel;
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+
+static CUDA_TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn gen_series(n: usize) -> Vec<f64> {
     (0..n)
@@ -33,6 +37,7 @@ fn synth_hlc(close: &[f64]) -> (Vec<f64>, Vec<f64>) {
 
 #[test]
 fn stoch_cuda_batch_matches_cpu() {
+    let _guard = CUDA_TEST_MUTEX.lock().unwrap();
     if !cuda_available() {
         eprintln!("CUDA not available; skipping stoch_cuda_batch_matches_cpu");
         return;
@@ -98,6 +103,7 @@ fn stoch_cuda_batch_matches_cpu() {
 
 #[test]
 fn stoch_cuda_many_series_time_major_matches_cpu() {
+    let _guard = CUDA_TEST_MUTEX.lock().unwrap();
     if !cuda_available() {
         eprintln!("CUDA not available; skipping stoch_cuda_many_series_time_major_matches_cpu");
         return;

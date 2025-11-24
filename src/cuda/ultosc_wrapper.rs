@@ -21,22 +21,28 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaUltoscError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaUltoscError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaUltoscError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaUltoscError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaUltoscError {}
 
 // ---- PODs mirroring CUDA float2/int3 for coalesced vector IO ----
 #[repr(C, align(8))]
@@ -99,7 +105,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaUltosc {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaUltoscPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -109,36 +116,41 @@ pub struct CudaUltosc {
 
 impl CudaUltosc {
     pub fn new(device_id: usize) -> Result<Self, CudaUltoscError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ultosc_kernel.ptx"));
-        let module = Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        )
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaUltoscPolicy::default(),
             last_batch: None,
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
         })
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     pub fn set_policy(&mut self, p: CudaUltoscPolicy) {
@@ -175,6 +187,51 @@ impl CudaUltosc {
         } else {
             true
         }
+    }
+    #[inline]
+    fn validate_launch(&self, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32) -> Result<(), CudaUltoscError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaUltoscError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
     }
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -228,25 +285,44 @@ impl CudaUltosc {
 
         // VRAM estimate + headroom (~64MB)
         let headroom = 64 * 1024 * 1024usize;
-        let bytes_required = 2 * (len + 1) * std::mem::size_of::<Float2>() // pcmtl + ptr
-            + combos.len() * std::mem::size_of::<Int3>() // packed periods
-            + combos.len() * len * std::mem::size_of::<f32>(); // out
+        let prefix_bytes = (len
+            .checked_add(1)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<Float2>()))
+            .and_then(|v| v.checked_mul(2)))
+        .ok_or_else(|| CudaUltoscError::InvalidInput("prefix bytes overflow".into()))?;
+        let combos_len = combos.len();
+        let periods_bytes = combos_len
+            .checked_mul(std::mem::size_of::<Int3>())
+            .ok_or_else(|| CudaUltoscError::InvalidInput("period bytes overflow".into()))?;
+        let out_elems = combos_len
+            .checked_mul(len)
+            .ok_or_else(|| CudaUltoscError::InvalidInput("output element count overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaUltoscError::InvalidInput("output bytes overflow".into()))?;
+        let bytes_required = prefix_bytes
+            .checked_add(periods_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaUltoscError::InvalidInput("total bytes overflow".into()))?;
         if !Self::will_fit(bytes_required, headroom) {
-            return Err(CudaUltoscError::Cuda(format!(
-                "insufficient VRAM: need ~{} MiB incl. headroom",
-                (bytes_required + headroom + (1 << 20) - 1) / (1 << 20)
-            )));
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaUltoscError::OutOfMemory {
+                    required: bytes_required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaUltoscError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
         // Device staging (async)
-        let d_pcmtl: DeviceBuffer<Float2> = unsafe {
-            DeviceBuffer::from_slice_async(&pcmtl, &self.stream)
-        }
-        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let d_ptr: DeviceBuffer<Float2> = unsafe {
-            DeviceBuffer::from_slice_async(&ptr, &self.stream)
-        }
-        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let d_pcmtl: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::from_slice_async(&pcmtl, &self.stream)? };
+        let d_ptr: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::from_slice_async(&ptr, &self.stream)? };
 
         // pack periods into Int3
         let mut periods = Vec::with_capacity(combos.len());
@@ -257,16 +333,11 @@ impl CudaUltosc {
                 z: c.timeperiod3.unwrap_or(28) as i32,
             });
         }
-        let d_periods: DeviceBuffer<Int3> = unsafe {
-            DeviceBuffer::from_slice_async(&periods, &self.stream)
-        }
-        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let d_periods: DeviceBuffer<Int3> =
+            unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream)? };
 
-        let out_elems = combos.len() * len;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(out_elems, &self.stream)
-        }
-        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
 
         self.launch_batch(
             &d_pcmtl,
@@ -277,6 +348,7 @@ impl CudaUltosc {
             combos.len(),
             &mut d_out,
         )?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -303,7 +375,7 @@ impl CudaUltosc {
         let func = self
             .module
             .get_function("ultosc_batch_f32")
-            .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaUltoscError::MissingKernelSymbol { name: "ultosc_batch_f32" })?;
 
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
@@ -315,7 +387,11 @@ impl CudaUltosc {
         let mut launched: usize = 0;
         while launched < nrows {
             let chunk = (nrows - launched).min(max_grid_y);
-            let grid: GridSize = (grid_x.max(1), chunk as u32, 1).into();
+            let gx = grid_x.max(1);
+            let gy = chunk as u32;
+            let gz = 1u32;
+            self.validate_launch(gx, gy, gz, block_x, 1, 1)?;
+            let grid: GridSize = (gx, gy, gz).into();
             let block: BlockSize = (block_x, 1, 1).into();
             unsafe {
                 (*(self as *const _ as *mut CudaUltosc)).last_batch =
@@ -341,9 +417,7 @@ impl CudaUltosc {
                     &mut nrows_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
             launched += chunk;
         }
@@ -383,7 +457,7 @@ impl CudaUltosc {
         let first = first_valid
             .ok_or_else(|| CudaUltoscError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = expand_grid_ultosc(sweep);
+        let combos = expand_grid_ultosc(sweep)?;
         if combos.is_empty() {
             return Err(CudaUltoscError::InvalidInput(
                 "no parameter combinations".into(),
@@ -443,20 +517,50 @@ impl CudaUltosc {
             rows,
             &prep.first_valids,
         );
-        let d_pcmtl_tm: DeviceBuffer<Float2> = unsafe {
-            DeviceBuffer::from_slice_async(&pcmtl_tm, &self.stream)
+
+        // VRAM estimate + headroom (~64MB)
+        let headroom = 64 * 1024 * 1024usize;
+        let prefix_bytes = pcmtl_tm
+            .len()
+            .checked_add(ptr_tm.len())
+            .and_then(|v| v.checked_mul(std::mem::size_of::<Float2>()))
+            .ok_or_else(|| CudaUltoscError::InvalidInput("prefix bytes overflow".into()))?;
+        let meta_bytes = prep
+            .first_valids
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaUltoscError::InvalidInput("meta bytes overflow".into()))?;
+        let out_elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaUltoscError::InvalidInput("matrix size overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaUltoscError::InvalidInput("output bytes overflow".into()))?;
+        let bytes_required = prefix_bytes
+            .checked_add(meta_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaUltoscError::InvalidInput("total bytes overflow".into()))?;
+        if !Self::will_fit(bytes_required, headroom) {
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaUltoscError::OutOfMemory {
+                    required: bytes_required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaUltoscError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
-        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let d_ptr_tm: DeviceBuffer<Float2> = unsafe {
-            DeviceBuffer::from_slice_async(&ptr_tm, &self.stream)
-        }
-        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&prep.first_valids)
-            .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(cols * rows, &self.stream)
-        }
-        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+
+        let d_pcmtl_tm: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::from_slice_async(&pcmtl_tm, &self.stream)? };
+        let d_ptr_tm: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::from_slice_async(&ptr_tm, &self.stream)? };
+        let d_first: DeviceBuffer<i32> = DeviceBuffer::from_slice(&prep.first_valids)?;
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
 
         self.launch_many_series(
             &d_pcmtl_tm,
@@ -469,6 +573,7 @@ impl CudaUltosc {
             &d_first,
             &mut d_out_tm,
         )?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
@@ -496,7 +601,11 @@ impl CudaUltosc {
         let func = self
             .module
             .get_function("ultosc_many_series_one_param_f32")
-            .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+            .map_err(|_| {
+                CudaUltoscError::MissingKernelSymbol {
+                    name: "ultosc_many_series_one_param_f32",
+                }
+            })?;
 
         match self.policy.many_series {
             ManySeriesKernelPolicy::Auto | ManySeriesKernelPolicy::OneD { .. } => {
@@ -505,7 +614,11 @@ impl CudaUltosc {
                     _ => 256,
                 };
                 let grid_x = ((rows as u32) + block_x - 1) / block_x;
-                let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
+                let gx = grid_x.max(1);
+                let gy = cols as u32;
+                let gz = 1u32;
+                self.validate_launch(gx, gy, gz, block_x, 1, 1)?;
+                let grid: GridSize = (gx, gy, gz).into();
                 let block: BlockSize = (block_x, 1, 1).into();
                 unsafe {
                     (*(self as *const _ as *mut CudaUltosc)).last_many =
@@ -532,9 +645,7 @@ impl CudaUltosc {
                         &mut first_ptr as *mut _ as *mut c_void,
                         &mut out_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&func, grid, block, 0, args)
-                        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+                    self.stream.launch(&func, grid, block, 0, args)?;
                 }
             }
             ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
@@ -542,7 +653,11 @@ impl CudaUltosc {
                 let block: BlockSize = (tx, ty, 1).into();
                 let grid_x = ((rows as u32) + tx - 1) / tx;
                 let grid_y = ((cols as u32) + ty - 1) / ty;
-                let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+                let gx = grid_x.max(1);
+                let gy = grid_y.max(1);
+                let gz = 1u32;
+                self.validate_launch(gx, gy, gz, tx, ty, 1)?;
+                let grid: GridSize = (gx, gy, gz).into();
                 unsafe {
                     (*(self as *const _ as *mut CudaUltosc)).last_many =
                         Some(ManySeriesKernelSelected::Tiled2D { tx, ty });
@@ -568,9 +683,7 @@ impl CudaUltosc {
                         &mut first_ptr as *mut _ as *mut c_void,
                         &mut out_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&func, grid, block, 0, args)
-                        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+                    self.stream.launch(&func, grid, block, 0, args)?;
                 }
             }
         }
@@ -598,7 +711,10 @@ impl CudaUltosc {
                 "matrix dims must be positive".into(),
             ));
         }
-        if high_tm.len() != cols * rows {
+        let expected_len = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaUltoscError::InvalidInput("matrix size overflow".into()))?;
+        if high_tm.len() != expected_len {
             return Err(CudaUltoscError::InvalidInput(
                 "matrix shape mismatch".into(),
             ));
@@ -739,18 +855,62 @@ fn build_prefix_sums_time_major_ulthlc(
 }
 
 // Local copy of expand_grid to avoid relying on private items in the indicator
-fn expand_grid_ultosc(r: &UltOscBatchRange) -> Vec<UltOscParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid_ultosc(r: &UltOscBatchRange) -> Result<Vec<UltOscParams>, CudaUltoscError> {
+    fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaUltoscError> {
         if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect()
+            return Ok(vec![start]);
         }
+        let s = step.max(1);
+        let mut v = Vec::new();
+        if start <= end {
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                if cur == end {
+                    break;
+                }
+                let next = cur
+                    .checked_add(s)
+                    .ok_or_else(|| CudaUltoscError::InvalidInput(format!("axis overflow: start={} end={} step={}", start, end, step)))?;
+                if next <= cur || next > end {
+                    break;
+                }
+                cur = next;
+            }
+        } else {
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                if cur == end {
+                    break;
+                }
+                let next = match cur.checked_sub(s) {
+                    Some(n) => n,
+                    None => break,
+                };
+                if next < end {
+                    break;
+                }
+                cur = next;
+            }
+        }
+        if v.is_empty() {
+            return Err(CudaUltoscError::InvalidInput(format!(
+                "invalid range: start={} end={} step={}",
+                start, end, step
+            )));
+        }
+        Ok(v)
     }
-    let t1 = axis(r.timeperiod1);
-    let t2 = axis(r.timeperiod2);
-    let t3 = axis(r.timeperiod3);
-    let mut out = Vec::with_capacity(t1.len() * t2.len() * t3.len());
+    let t1 = axis(r.timeperiod1)?;
+    let t2 = axis(r.timeperiod2)?;
+    let t3 = axis(r.timeperiod3)?;
+    let cap = t1
+        .len()
+        .checked_mul(t2.len())
+        .and_then(|v| v.checked_mul(t3.len()))
+        .ok_or_else(|| CudaUltoscError::InvalidInput("parameter grid size overflow".into()))?;
+    let mut out = Vec::with_capacity(cap);
     for &a in &t1 {
         for &b in &t2 {
             for &c in &t3 {
@@ -762,7 +922,7 @@ fn expand_grid_ultosc(r: &UltOscBatchRange) -> Vec<UltOscParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 // ---------------- Benches ----------------

@@ -19,6 +19,7 @@
 //! - SIMD: AVX2/AVX512 paths delegate to scalar; time-recursive recurrence limits gains.
 //! - Scalar: Incremental SMA update, cached reciprocal per call, modulo-free ring indices.
 //! - Batch: Uses uninitialized helpers; NaN warmup prefixes mirror batch semantics.
+//! - Decision log: SIMD present but delegates to scalar; CUDA wrapper reuses the shared DeviceArrayF32 handle; Python interop uses ALMA’s DeviceArrayF32Py for CAI v3 + DLPack v1.x; numerical outputs unchanged.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -182,13 +183,19 @@ impl MeanAdBuilder {
 #[derive(Debug, Error)]
 pub enum MeanAdError {
     #[error("mean_ad: Empty data provided.")]
-    EmptyData,
+    EmptyInputData,
     #[error("mean_ad: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("mean_ad: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("mean_ad: All values are NaN.")]
     AllValuesNaN,
+    #[error("mean_ad: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("mean_ad: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("mean_ad: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 #[inline]
@@ -206,7 +213,7 @@ pub fn mean_ad_with_kernel(
     };
 
     if data.is_empty() {
-        return Err(MeanAdError::EmptyData);
+        return Err(MeanAdError::EmptyInputData);
     }
 
     let period = input.get_period();
@@ -399,12 +406,7 @@ pub fn mean_ad_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(MeanAdError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            });
-        }
+        other => return Err(MeanAdError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -481,26 +483,66 @@ impl MeanAdBatchOutput {
             .position(|c| c.period.unwrap_or(5) == p.period.unwrap_or(5))
     }
     pub fn values_for(&self, p: &MeanAdParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| {
-            let start = row * self.cols;
-            &self.values[start..start + self.cols]
+        self.row_for_params(p).and_then(|row| {
+            let start = row.checked_mul(self.cols)?;
+            self.values.get(start..start + self.cols)
         })
     }
 }
 
 #[inline(always)]
-fn expand_grid(r: &MeanAdBatchRange) -> Vec<MeanAdParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &MeanAdBatchRange) -> Result<Vec<MeanAdParams>, MeanAdError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, MeanAdError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let st = step.max(1);
+            let v: Vec<usize> = (start..=end).step_by(st).collect();
+            if v.is_empty() {
+                return Err(MeanAdError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
+        }
+        // reversed bounds
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(MeanAdError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    periods
-        .into_iter()
-        .map(|p| MeanAdParams { period: Some(p) })
-        .collect()
+
+    let periods = axis_usize(r.period)?;
+    if periods.is_empty() {
+        return Err(MeanAdError::InvalidRange {
+            start: r.period.0.to_string(),
+            end: r.period.1.to_string(),
+            step: r.period.2.to_string(),
+        });
+    }
+
+    let mut out = Vec::with_capacity(periods.len());
+    for p in periods {
+        out.push(MeanAdParams { period: Some(p) });
+    }
+    Ok(out)
 }
 
 #[inline(always)]
@@ -529,13 +571,7 @@ fn mean_ad_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<MeanAdParams>, MeanAdError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(MeanAdError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -603,13 +639,7 @@ fn mean_ad_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<MeanAdBatchOutput, MeanAdError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(MeanAdError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1676,11 +1706,15 @@ pub fn mean_ad_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
-    let rows = combos.len();
+    let combos_for_shape =
+        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let rows = combos_for_shape.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("mean_ad_batch_py: size overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
@@ -1808,7 +1842,7 @@ pub fn mean_ad_into_slice(
     };
 
     if data.is_empty() {
-        return Err(MeanAdError::EmptyData);
+        return Err(MeanAdError::EmptyInputData);
     }
     if period > data.len() {
         return Err(MeanAdError::InvalidPeriod {
@@ -1817,9 +1851,9 @@ pub fn mean_ad_into_slice(
         });
     }
     if dst.len() != data.len() {
-        return Err(MeanAdError::NotEnoughValidData {
-            needed: data.len(),
-            valid: dst.len(),
+        return Err(MeanAdError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -2050,7 +2084,8 @@ pub fn mean_ad_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
@@ -2058,7 +2093,10 @@ pub fn mean_ad_batch_into(
             return Err(JsValue::from_str("Output pointer must be 8-byte aligned"));
         }
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("mean_ad_batch_into: size overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         // Detect kernel
         let kernel = detect_best_batch_kernel();

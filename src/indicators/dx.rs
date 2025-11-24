@@ -16,6 +16,7 @@
 //!
 //! ## Developer Notes
 //! - SIMD status: loop-carried Wilder smoothing makes time-wise SIMD ineffective; keep AVX2/AVX512 as stubs delegating to scalar.
+//! - CUDA status: FP64-accumulation kernels mirror scalar DX; Python VRAM handle uses CAI v3 and DLPack v1.x with primary-context lifetime guards.
 //! - Streaming: implemented via `DxStream`, matching batch numerics within tight tolerance (<1e-9).
 //! - Scalar path: single-pass, loop-jammed; relies on caller-provided warmup NaN prefix; minimal branching; hoists invariants.
 //! - Memory: uses `alloc_with_nan_prefix`/`init_matrix_prefixes` for zero-copy warmup handling.
@@ -197,7 +198,7 @@ impl DxBuilder {
 #[derive(Debug, Error)]
 pub enum DxError {
     #[error("dx: Empty data provided for DX.")]
-    EmptyData,
+    EmptyInputData,
     #[error("dx: Could not select candle field: {0}")]
     SelectCandleFieldError(String),
     #[error("dx: Invalid period: period = {period}, data length = {data_len}")]
@@ -206,6 +207,14 @@ pub enum DxError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("dx: All high, low, and close values are NaN.")]
     AllValuesNaN,
+    #[error("dx: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("dx: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("dx: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("dx: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline(always)]
@@ -230,7 +239,7 @@ fn dx_prepare<'a>(
     };
     let len = high.len().min(low.len()).min(close.len());
     if len == 0 {
-        return Err(DxError::EmptyData);
+        return Err(DxError::EmptyInputData);
     }
     let period = input.get_period();
     if period == 0 || period > len {
@@ -716,17 +725,42 @@ impl DxBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &DxBatchRange) -> Vec<DxParams> {
+fn expand_grid_checked(r: &DxBatchRange) -> Result<Vec<DxParams>, DxError> {
     let (start, end, step) = r.period;
+    // Zero step means a static value (single element); also if start==end
     if step == 0 || start == end {
-        return vec![DxParams {
-            period: Some(start),
-        }];
+        return Ok(vec![DxParams { period: Some(start) }]);
     }
-    (start..=end)
-        .step_by(step)
-        .map(|p| DxParams { period: Some(p) })
-        .collect()
+
+    // Build an inclusive range supporting reversed bounds
+    let mut out: Vec<usize> = Vec::new();
+    if start < end {
+        let mut v = start;
+        while v <= end {
+            out.push(v);
+            match v.checked_add(step) {
+                Some(next) if next != v => v = next,
+                _ => break,
+            }
+        }
+    } else {
+        // reversed
+        let mut v = start;
+        // ensure we won’t wrap below zero in unsigned math
+        loop {
+            out.push(v);
+            if v <= end { break; }
+            let dec = v.saturating_sub(step);
+            if dec == v { break; }
+            v = dec;
+        }
+        // normalize order ascending for combos (stable with other indicators)
+        out.sort_unstable();
+    }
+    if out.is_empty() {
+        return Err(DxError::InvalidRange { start, end, step });
+    }
+    Ok(out.into_iter().map(|p| DxParams { period: Some(p) }).collect())
 }
 
 pub fn dx_batch_with_kernel(
@@ -739,12 +773,7 @@ pub fn dx_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(DxError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(DxError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -788,13 +817,8 @@ fn dx_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<DxParams>, DxError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(DxError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos_vec = expand_grid_checked(sweep)?;
+    let combos = combos_vec;
 
     let len = high.len().min(low.len()).min(close.len());
     let first = (0..len)
@@ -809,8 +833,14 @@ fn dx_batch_inner_into(
     }
 
     let rows = combos.len();
-    if out.len() != rows * len {
-        panic!("out buffer wrong size");
+    let total = rows
+        .checked_mul(len)
+        .ok_or_else(|| DxError::InvalidInput("rows*cols overflow".into()))?;
+    if out.len() != total {
+        return Err(DxError::OutputLengthMismatch {
+            expected: total,
+            got: out.len(),
+        });
     }
 
     let actual = match kern {
@@ -1007,12 +1037,15 @@ fn dx_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<DxBatchOutput, DxError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_checked(sweep)?;
     let rows = combos.len();
     let cols = high.len().min(low.len()).min(close.len());
     if cols == 0 {
-        return Err(DxError::EmptyData);
+        return Err(DxError::EmptyInputData);
     }
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| DxError::InvalidInput("rows*cols overflow".into()))?;
 
     let first = (0..cols)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
@@ -1116,7 +1149,8 @@ unsafe fn dx_row_avx512_long(
 
 #[inline(always)]
 pub fn expand_grid_dx(r: &DxBatchRange) -> Vec<DxParams> {
-    expand_grid(r)
+    // Retain legacy name for external callers; fall back to empty on error
+    expand_grid_checked(r).unwrap_or_else(|_| vec![])
 }
 
 #[cfg(test)]
@@ -1957,7 +1991,8 @@ pub fn dx_batch_py<'py>(
     let l = low.as_slice()?;
     let c = close.as_slice()?;
     let sweep = DxBatchRange::from_tuple(period_range);
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_checked(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     // Use the minimum input length to mirror core logic
     let cols = h.len().min(l.len()).min(c.len());
@@ -1986,7 +2021,11 @@ pub fn dx_batch_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::dx_wrapper::CudaDx;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32 as DeviceArrayF32Cuda;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context as CudaContext;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "dx_cuda_batch_dev")]
@@ -1998,7 +2037,7 @@ pub fn dx_cuda_batch_dev_py<'py>(
     close_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+) -> PyResult<(DxDeviceArrayF32Py, Bound<'py, PyDict>)> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2007,9 +2046,13 @@ pub fn dx_cuda_batch_dev_py<'py>(
     let l = low_f32.as_slice()?;
     let c = close_f32.as_slice()?;
     let sweep = DxBatchRange::from_tuple(period_range);
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaDx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.dx_batch_dev(h, l, c, &sweep)
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda
+            .dx_batch_dev(h, l, c, &sweep)
+            .map(|(arr, combos)| (arr, combos, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
@@ -2021,7 +2064,7 @@ pub fn dx_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((DxDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id }, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2036,7 +2079,7 @@ pub fn dx_cuda_many_series_one_param_dev_py(
     rows: usize,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DxDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2044,12 +2087,281 @@ pub fn dx_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaDx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.dx_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda
+            .dx_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
+            .map(|arr| (arr, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DxDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id })
+}
+
+// CUDA device array class with context guard and CAI v3 + DLPack
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DxDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32Cuda,
+    pub(crate) _ctx: Arc<CudaContext>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DxDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = &self.inner;
+        let d = PyDict::new(py);
+        // shape: (rows, cols)
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        // typestr: little-endian float32
+        d.set_item("typestr", "<f4")?;
+        // Explicit strides for row-major FP32: (row stride in bytes, item stride in bytes)
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let size = inner.rows.saturating_mul(inner.cols);
+        let ptr = if size == 0 { 0usize } else { inner.device_ptr() as usize };
+        d.set_item("data", (ptr, false))?;
+        // Stream omitted: producing kernels synchronize before returning the handle.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        // Prefer allocation device via pointer attributes; fallback to stored id.
+        unsafe {
+            use cust::sys::{cuPointerGetAttribute, CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL};
+            let mut dev_ordinal: i32 = -1;
+            let mut ptr = self.inner.device_ptr() as *mut std::ffi::c_void;
+            let res = cuPointerGetAttribute(
+                &mut dev_ordinal as *mut _ as *mut std::ffi::c_void,
+                CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
+                ptr,
+            );
+            if res == cust::sys::CUresult::CUDA_SUCCESS && dev_ordinal >= 0 {
+                return Ok((2, dev_ordinal));
+            }
+            Ok((2, self.device_id as i32))
+        }
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<PyObject>,
+        max_version: Option<(i32, i32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLPackVersion { major: u32, minor: u32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        // Capsule kind based on negotiation
+        let use_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        // Ignore stream: producer is synchronized before returning the handle.
+        let _ = stream;
+
+        // Move VRAM buffer into the manager so consumer owns it
+        let dummy = cust::memory::DeviceBuffer::<f32>::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32Cuda { buf: dummy, rows: 0, cols: 0 },
+        );
+
+        // Determine allocation device and retain primary context so DeviceBuffer free is valid
+        let (dev_type, dev_id) = self.__dlpack_device__()?;
+        debug_assert_eq!(dev_type, 2);
+        let mut retained: cust::sys::CUcontext = std::ptr::null_mut();
+        unsafe {
+            let dev = dev_id as i32;
+            let _ = cust::sys::cuDevicePrimaryCtxRetain(&mut retained as *mut _, dev);
+        }
+
+        // Common tensor state
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let size = (rows as usize).saturating_mul(cols as usize);
+        let data_ptr = if size == 0 {
+            std::ptr::null_mut()
+        } else {
+            inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+        };
+
+        struct Manager {
+            ctx: cust::sys::CUcontext,
+            device_id: i32,
+            _buf: cust::memory::DeviceBuffer<f32>,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+        }
+
+        unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() {
+                return;
+            }
+            let mgr = (*p).manager_ctx as *mut Manager;
+            if !mgr.is_null() {
+                let ctx = (*mgr).ctx;
+                let dev_id = (*mgr).device_id;
+                let mut old: cust::sys::CUcontext = std::ptr::null_mut();
+                let _ = cust::sys::cuCtxPushCurrent(ctx);
+                let _boxed: Box<Manager> = Box::from_raw(mgr);
+                let _ = cust::sys::cuCtxPopCurrent(&mut old as *mut _);
+                let _ = cust::sys::cuDevicePrimaryCtxRelease(dev_id);
+                // _boxed dropped here
+            }
+            let _ = Box::from_raw(p);
+        }
+
+        unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mgr = (*p).manager_ctx as *mut Manager;
+            if !mgr.is_null() {
+                let ctx = (*mgr).ctx;
+                let dev_id = (*mgr).device_id;
+                let mut old: cust::sys::CUcontext = std::ptr::null_mut();
+                let _ = cust::sys::cuCtxPushCurrent(ctx);
+                let _boxed: Box<Manager> = Box::from_raw(mgr);
+                let _ = cust::sys::cuCtxPopCurrent(&mut old as *mut _);
+                let _ = cust::sys::cuDevicePrimaryCtxRelease(dev_id);
+            }
+            let _ = Box::from_raw(p);
+        }
+
+        unsafe extern "C" fn capsule_dtor(capsule: *mut pyo3::ffi::PyObject) {
+            let vname = std::ffi::CString::new("dltensor_versioned").unwrap();
+            let legacy = std::ffi::CString::new("dltensor").unwrap();
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, vname.as_ptr());
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensorVersioned;
+                if let Some(del) = (*mt).deleter {
+                    del(mt)
+                }
+                return;
+            }
+            let ptr2 = pyo3::ffi::PyCapsule_GetPointer(capsule, legacy.as_ptr());
+            if !ptr2.is_null() {
+                let mt = ptr2 as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt)
+                }
+            }
+        }
+
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1]);
+        let mgr = Box::new(Manager {
+            ctx: retained,
+            device_id: dev_id,
+            _buf: inner.buf,
+            _shape: shape,
+            _strides: strides,
+        });
+        let mgr_ptr = Box::into_raw(mgr);
+
+        if use_versioned {
+            let mut mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 2 },
+                manager_ctx: mgr_ptr as *mut _,
+                deleter: Some(deleter_v1),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: dev_type, device_id: dev_id },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 },
+                    strides: unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 },
+                    byte_offset: 0,
+                },
+            });
+            let raw = Box::into_raw(mt);
+            let name = std::ffi::CString::new("dltensor_versioned").unwrap();
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    raw as *mut std::ffi::c_void,
+                    name.as_ptr(),
+                    Some(capsule_dtor),
+                )
+            };
+            if cap.is_null() {
+                unsafe { deleter_v1(raw) };
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        } else {
+            let mut mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: dev_type, device_id: dev_id },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 },
+                    strides: unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 },
+                    byte_offset: 0,
+                },
+                manager_ctx: mgr_ptr as *mut _,
+                deleter: Some(deleter_legacy),
+            });
+            let raw = Box::into_raw(mt);
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    raw as *mut std::ffi::c_void,
+                    name.as_ptr(),
+                    Some(capsule_dtor),
+                )
+            };
+            if cap.is_null() {
+                unsafe { deleter_legacy(raw) };
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        }
+    }
 }
 
 #[cfg(feature = "python")]
@@ -2083,10 +2395,7 @@ impl DxStreamPy {
 pub fn dx_into_slice(dst: &mut [f64], input: &DxInput, kern: Kernel) -> Result<(), DxError> {
     let (h, l, c, len, first, chosen) = dx_prepare(input, kern)?;
     if dst.len() != len {
-        return Err(DxError::InvalidPeriod {
-            period: dst.len(),
-            data_len: len,
-        });
+        return Err(DxError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
     unsafe {
         match chosen {
@@ -2225,14 +2534,15 @@ pub fn dx_batch_unified_js(
     let sweep = DxBatchRange::from_tuple(cfg.period_range);
 
     // allocate with helpers and compute via inner into
-    let rows = expand_grid(&sweep).len();
+    let rows = expand_grid_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?.len();
     let cols = high.len().min(low.len()).min(close.len());
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     let first = (0..cols)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .ok_or_else(|| JsValue::from_str("AllValuesNaN"))?;
-    let warm: Vec<usize> = expand_grid(&sweep)
+    let warm: Vec<usize> = expand_grid_checked(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?
         .iter()
         .map(|p| first + p.period.unwrap() - 1)
         .collect();

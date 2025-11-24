@@ -22,21 +22,25 @@ use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CudaCmoError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaCmoError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaCmoError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaCmoError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaCmoError {}
 
 // Minimal policy surface mirroring common wrappers
 #[derive(Clone, Copy, Debug)]
@@ -78,7 +82,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaCmo {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: std::sync::Arc<Context>,
+    device_id: u32,
     policy: CudaCmoPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -88,31 +93,33 @@ pub struct CudaCmo {
 
 impl CudaCmo {
     pub fn new(device_id: usize) -> Result<Self, CudaCmoError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = std::sync::Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cmo_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])?
+            }
+        };
 
         // Favor L1 (read-mostly working sets)
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaCmoPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -134,9 +141,7 @@ impl CudaCmo {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaCmoError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
 
     #[inline]
@@ -221,7 +226,26 @@ impl CudaCmo {
             if step == 0 || start == end {
                 return vec![start];
             }
-            (start..=end).step_by(step).collect()
+            let mut vals = Vec::new();
+            if start < end {
+                let mut x = start;
+                while x <= end {
+                    vals.push(x);
+                    let next = x.saturating_add(step);
+                    if next == x { break; }
+                    x = next;
+                }
+            } else {
+                let mut x = start;
+                loop {
+                    vals.push(x);
+                    if x <= end { break; }
+                    let next = x.saturating_sub(step);
+                    if next >= x { break; }
+                    x = next;
+                }
+            }
+            vals
         }
         let periods: Vec<usize> = axis_usize(sweep.period);
         if periods.is_empty() {
@@ -260,7 +284,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
         let mut func: Function = self
             .module
             .get_function("cmo_batch_f32")
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCmoError::MissingKernelSymbol { name: "cmo_batch_f32" })?;
 
         // Prefer L1 for this function
         let _ = func.set_cache_config(CacheConfig::PreferL1);
@@ -282,6 +306,10 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        if block_x > 1024 {
+            return Err(CudaCmoError::LaunchConfigTooLarge { gx: grid_x.max(1), gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
 
         // Record selection for debug/introspection
         unsafe {
@@ -305,9 +333,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -322,14 +348,18 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
 
         // Rough VRAM estimate (prices + periods + out)
         let rows = combos.len();
-        let bytes = (len * std::mem::size_of::<f32>())   /* prices */
-            + (rows * std::mem::size_of::<i32>())        /* periods */
-            + (rows * len * std::mem::size_of::<f32>()); /* out */
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaCmoError::InvalidInput("size overflow".into()))?;
+        let bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .and_then(|b| b.checked_add(rows.checked_mul(std::mem::size_of::<i32>()).unwrap_or(usize::MAX)))
+            .and_then(|b| b.checked_add(out_elems.checked_mul(std::mem::size_of::<f32>()).unwrap_or(usize::MAX)))
+            .ok_or_else(|| CudaCmoError::InvalidInput("size overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // 64MB
         if !Self::will_fit(bytes, headroom) {
-            return Err(CudaCmoError::InvalidInput(
-                "insufficient VRAM for CMO batch".into(),
-            ));
+            let (free, _) = mem_get_info().unwrap_or((0, 0));
+            return Err(CudaCmoError::OutOfMemory { required: bytes, free, headroom });
         }
 
         let periods_i32: Vec<i32> = combos
@@ -338,42 +368,23 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             .collect();
 
         // Async path with pinned buffers
-        let h_prices =
-            LockedBuffer::from_slice(prices).map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let h_p = LockedBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+        let h_prices = LockedBuffer::from_slice(prices)?;
+        let h_p = LockedBuffer::from_slice(&periods_i32)?;
 
-        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let mut d_periods = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let mut d_periods = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let mut d_out =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }
-                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
+        let mut d_periods = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }?;
 
         unsafe {
-            d_prices
-                .async_copy_from(&h_prices, &self.stream)
-                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-            d_periods
-                .async_copy_from(&h_p, &self.stream)
-                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+            d_prices.async_copy_from(&h_prices, &self.stream)?;
+            d_periods.async_copy_from(&h_p, &self.stream)?;
         }
 
         self.launch_batch_kernel(&d_prices, &d_periods, len, rows, first_valid, &mut d_out)?;
-        self.launch_batch_kernel(&d_prices, &d_periods, len, rows, first_valid, &mut d_out)?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols: len,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols: len })
     }
 
     // ---- Many-series × one-param (time-major) ----
@@ -436,7 +447,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
         let func = self
             .module
             .get_function("cmo_many_series_one_param_f32")
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCmoError::MissingKernelSymbol { name: "cmo_many_series_one_param_f32" })?;
 
         // Default 256; clamp to warp-multiple when cols is small
         let block_x: u32 = match std::env::var("CMO_MS_BLOCK_X").ok().as_deref() {
@@ -453,6 +464,9 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        if block_x > 1024 {
+            return Err(CudaCmoError::LaunchConfigTooLarge { gx: grid_x.max(1), gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
 
         // Record selection and maybe log
         unsafe {
@@ -476,9 +490,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
                 &mut period_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -494,46 +506,40 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
         // VRAM guard (inputs + first_valids + outputs) + 64MB headroom
-        let bytes = (data_tm_f32.len() * std::mem::size_of::<f32>())
-            + (first_valids.len() * std::mem::size_of::<i32>())
-            + (data_tm_f32.len() * std::mem::size_of::<f32>());
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaCmoError::InvalidInput("size overflow".into()))?;
+        let bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .and_then(|b| b.checked_add(first_valids.len().checked_mul(std::mem::size_of::<i32>()).unwrap_or(usize::MAX)))
+            .and_then(|b| b.checked_add(elems.checked_mul(std::mem::size_of::<f32>()).unwrap_or(usize::MAX)))
+            .ok_or_else(|| CudaCmoError::InvalidInput("size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(bytes, headroom) {
-            return Err(CudaCmoError::InvalidInput(
-                "insufficient VRAM for CMO many-series".into(),
-            ));
+            let (free, _) = mem_get_info().unwrap_or((0, 0));
+            return Err(CudaCmoError::OutOfMemory { required: bytes, free, headroom });
         }
 
         // Pinned host buffers + async copies on our NON_BLOCKING stream
-        let h_prices = LockedBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let h_first = LockedBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+        let h_prices = LockedBuffer::from_slice(data_tm_f32)?;
+        let h_first = LockedBuffer::from_slice(&first_valids)?;
 
-        let mut d_prices_tm =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let mut d_first =
-            unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
-                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let mut d_out_tm =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+        let mut d_prices_tm = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }?;
+        let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }?;
+        let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }?;
 
         unsafe {
             d_prices_tm
                 .async_copy_from(&h_prices, &self.stream)
-                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+                .map_err(Into::into)?;
             d_first
                 .async_copy_from(&h_first, &self.stream)
-                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+                .map_err(Into::into)?;
         }
 
         self.launch_many_series_kernel(&d_prices_tm, &d_first, cols, rows, period, &mut d_out_tm)?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
     }
 }

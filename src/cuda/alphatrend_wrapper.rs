@@ -185,10 +185,13 @@ impl CudaAlphaTrend {
         unique_periods: &[usize],
         mom_map: &HashMap<usize, Vec<f32>>,
         len: usize,
-    ) -> (Vec<u32>, usize) {
+    ) -> Result<(Vec<u32>, usize), CudaAlphaTrendError> {
         let n_rows = unique_periods.len();
         let n_words = (len + 31) / 32;
-        let mut bits = vec![0u32; n_rows * n_words];
+        let total = n_rows
+            .checked_mul(n_words)
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("n_rows*n_words overflow".into()))?;
+        let mut bits = vec![0u32; total];
 
         for (row_idx, &p) in unique_periods.iter().enumerate() {
             let row = mom_map.get(&p).expect("momentum row missing");
@@ -200,7 +203,7 @@ impl CudaAlphaTrend {
                 bits[row_idx * n_words + w] |= bit << b;
             }
         }
-        (bits, n_words)
+        Ok((bits, n_words))
     }
 
     // ---- helpers: expand grid ----
@@ -372,7 +375,12 @@ impl CudaAlphaTrend {
             let mut ncomb_i = n_combos as i32;
             let mut nmrows_i = n_mrows as i32;
             // offset outputs by combo_offset * len
-            let out_off_bytes = (combo_offset * len * std::mem::size_of::<f32>()) as u64;
+            let off_elems = combo_offset
+                .checked_mul(len)
+                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("combo_offset*len overflow".into()))?;
+            let out_off_bytes = off_elems
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("byte offset overflow".into()))? as u64;
             let mut k1_ptr = d_k1.as_device_ptr().as_raw().wrapping_add(out_off_bytes);
             let mut k2_ptr = d_k2.as_device_ptr().as_raw().wrapping_add(out_off_bytes);
             let args: &mut [*mut c_void] = &mut [
@@ -422,7 +430,7 @@ impl CudaAlphaTrend {
         let func_atr = self
             .module
             .get_function("atr_table_from_tr_f32")
-            .map_err(CudaAlphaTrendError::Cuda)?;
+            .map_err(|_| CudaAlphaTrendError::MissingKernelSymbol { name: "atr_table_from_tr_f32" })?;
 
         let n_pr = unique_periods.len();
         let len_i = len as i32;
@@ -433,7 +441,10 @@ impl CudaAlphaTrend {
         let d_periods_u = DeviceBuffer::from_slice(&periods_i32)
             .map_err(CudaAlphaTrendError::Cuda)?;
 
-        let mut d_atr_table: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_pr * len) }
+        let atr_elems = n_pr
+            .checked_mul(len)
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("n_pr*len overflow".into()))?;
+        let mut d_atr_table: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(atr_elems) }
             .map_err(CudaAlphaTrendError::Cuda)?;
 
         unsafe {
@@ -464,7 +475,7 @@ impl CudaAlphaTrend {
         let func = self
             .module
             .get_function("alphatrend_batch_from_precomputed_f32")
-            .map_err(CudaAlphaTrendError::Cuda)?;
+            .map_err(|_| CudaAlphaTrendError::MissingKernelSymbol { name: "alphatrend_batch_from_precomputed_f32" })?;
 
         let block_x = match policy { BatchKernelPolicy::OneD { block_x } => block_x, _ => 128 };
         let needed_x = ((n_combos_chunk as u32) + block_x - 1) / block_x;
@@ -490,7 +501,12 @@ impl CudaAlphaTrend {
             let mut npr_i = n_pr as i32;
             let mut nmrows_i = n_pr as i32;
 
-            let out_off_bytes = (combo_offset * len * std::mem::size_of::<f32>()) as u64;
+            let off_elems = combo_offset
+                .checked_mul(len)
+                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("combo_offset*len overflow".into()))?;
+            let out_off_bytes = off_elems
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("byte offset overflow".into()))? as u64;
             let mut k1_ptr = d_k1.as_device_ptr().as_raw().wrapping_add(out_off_bytes);
             let mut k2_ptr = d_k2.as_device_ptr().as_raw().wrapping_add(out_off_bytes);
 
@@ -598,26 +614,66 @@ impl CudaAlphaTrend {
             .collect();
 
         // Pack momentum to 1-bit
-        let (mask_bits_u32, n_words) = Self::pack_momentum_rows_to_bits(&unique, &mom_map, len);
+        let (mask_bits_u32, n_words) = Self::pack_momentum_rows_to_bits(&unique, &mom_map, len)?;
 
         // VRAM estimate for fast path
-        let bytes_fast = (len * 4 * 3)
-            + (unique.len() * len * 4)
-            + (n_mrows * n_words * 4)
-            + ((coeffs.len() + periods.len() + map_rows.len() * 2) * 4)
-            + (combos.len() * len * 4 * 2);
+        let bytes_prices_tr = len
+            .checked_mul(4)
+            .and_then(|v| v.checked_mul(3))
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
+        let bytes_atr = unique
+            .len()
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(4))
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
+        let bytes_mask = n_mrows
+            .checked_mul(n_words)
+            .and_then(|v| v.checked_mul(4))
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
+        let meta_elems = coeffs.len() + periods.len() + map_rows.len() * 2;
+        let bytes_meta = meta_elems
+            .checked_mul(4)
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
+        let combo_elems = combos
+            .len()
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(2))
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
+        let bytes_out = combo_elems
+            .checked_mul(4)
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
+        let bytes_fast = bytes_prices_tr
+            .checked_add(bytes_atr)
+            .and_then(|v| v.checked_add(bytes_mask))
+            .and_then(|v| v.checked_add(bytes_meta))
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
 
         if let Err(e) = Self::will_fit(bytes_fast, 64 * 1024 * 1024) {
             // ---- Baseline fallback (still avoids uploading close) ----
-            let mut momentum_flat = Vec::<f32>::with_capacity(n_mrows * len);
+            let flat_elems = n_mrows
+                .checked_mul(len)
+                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("n_mrows*len overflow".into()))?;
+            let mut momentum_flat = Vec::<f32>::with_capacity(flat_elems);
             for &p in &unique {
                 momentum_flat.extend_from_slice(mom_map.get(&p).expect("row"));
             }
 
-            let bytes_base = (len * 4 * 3)
-                + momentum_flat.len() * 4
-                + ((coeffs.len() + periods.len() + map_rows.len()) * 4)
-                + (combos.len() * len * 4 * 2);
+            let bytes_base_prices_tr = bytes_prices_tr;
+            let bytes_base_mom = momentum_flat
+                .len()
+                .checked_mul(4)
+                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
+            let meta_elems_base = coeffs.len() + periods.len() + map_rows.len();
+            let bytes_base_meta = meta_elems_base
+                .checked_mul(4)
+                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
+            let bytes_base_out = bytes_out;
+            let bytes_base = bytes_base_prices_tr
+                .checked_add(bytes_base_mom)
+                .and_then(|v| v.checked_add(bytes_base_meta))
+                .and_then(|v| v.checked_add(bytes_base_out))
+                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
 
             Self::will_fit(bytes_base, 64 * 1024 * 1024)?;
 
@@ -630,7 +686,6 @@ impl CudaAlphaTrend {
             let d_periods = DeviceBuffer::from_slice(&periods).map_err(CudaAlphaTrendError::Cuda)?;
 
             let rows = combos.len();
-            let elems = rows * len;
             let elems = rows
                 .checked_mul(len)
                 .ok_or_else(|| CudaAlphaTrendError::InvalidInput("rows*len overflow".into()))?;
@@ -760,10 +815,13 @@ impl CudaAlphaTrend {
         period: usize,
         no_volume: bool,
     ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaAlphaTrendError> {
-        if high_tm_f32.len() != cols * rows
-            || low_tm_f32.len() != cols * rows
-            || close_tm_f32.len() != cols * rows
-            || volume_tm_f32.len() != cols * rows
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("cols*rows overflow".into()))?;
+        if high_tm_f32.len() != elems
+            || low_tm_f32.len() != elems
+            || close_tm_f32.len() != elems
+            || volume_tm_f32.len() != elems
         {
             return Err(CudaAlphaTrendError::InvalidInput(
                 "inconsistent time-major shapes".into(),
@@ -775,7 +833,7 @@ impl CudaAlphaTrend {
 
         // Build first_valid per series and TR_tm (time-major)
         let mut first_valids = vec![0i32; cols];
-        let mut tr_tm = vec![f32::NAN; cols * rows];
+        let mut tr_tm = vec![f32::NAN; elems];
         for s in 0..cols {
             let mut fv: Option<usize> = None;
             for t in 0..rows {
@@ -800,7 +858,7 @@ impl CudaAlphaTrend {
 
         // Momentum_tm (RSI or MFI) per series.
         // Note: host-side computation for correctness; may be optimized in future.
-        let mut momentum_tm = vec![f32::NAN; cols * rows];
+        let mut momentum_tm = vec![f32::NAN; elems];
         if no_volume {
             // RSI on close per series
             for s in 0..cols {
@@ -853,9 +911,21 @@ impl CudaAlphaTrend {
         }
 
         // VRAM estimate
-        let bytes = 4 * cols * rows * 2 // tr_tm + momentum_tm
-            + 4 * cols                  // first_valids
-            + 4 * cols * rows * 2; // k1 + k2 outputs
+        let bytes_tr_mom = elems
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(4))
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
+        let bytes_first = cols
+            .checked_mul(4)
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
+        let bytes_out = elems
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(4))
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
+        let bytes = bytes_tr_mom
+            .checked_add(bytes_first)
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(bytes, 64 * 1024 * 1024)?;
 
         // Upload
@@ -870,9 +940,9 @@ impl CudaAlphaTrend {
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(CudaAlphaTrendError::Cuda)?;
 
-        let mut d_k1_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+        let mut d_k1_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(CudaAlphaTrendError::Cuda)?;
-        let mut d_k2_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+        let mut d_k2_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(CudaAlphaTrendError::Cuda)?;
 
         // Launch

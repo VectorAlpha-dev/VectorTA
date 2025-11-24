@@ -15,6 +15,7 @@
 //! - Streaming: O(n) with O(1) MyRSI update, O(period) NET update.
 //! - Batch: Row-specific optimized variant not implemented (future work).
 //! - Memory: Uses `alloc_with_nan_prefix` and `make_uninit_matrix` patterns.
+//! - Decision log: SIMD enabled; CUDA wrapper returns VRAM handles; Python interop uses CAI v3 + DLPack v1.x with stable scalar reference outputs.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -214,6 +215,15 @@ pub enum NetMyrsiError {
 
     #[error("net_myrsi: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+
+    #[error("net_myrsi: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("net_myrsi: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+
+    #[error("net_myrsi: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // ==================== CORE COMPUTATION ====================
@@ -791,9 +801,9 @@ pub fn net_myrsi_into_slice(
     let (data, period, first, chosen) = net_myrsi_prepare(input, kern)?;
 
     if dst.len() != data.len() {
-        return Err(NetMyrsiError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(NetMyrsiError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -819,10 +829,9 @@ pub fn net_myrsi_into(input: &NetMyrsiInput, out: &mut [f64]) -> Result<(), NetM
     let (data, period, first, chosen) = net_myrsi_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        // Mirror existing length-mismatch handling used by into-slice helpers in this crate
-        return Err(NetMyrsiError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
+        return Err(NetMyrsiError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
         });
     }
 
@@ -1001,19 +1010,63 @@ impl NetMyrsiBatchOutput {
     }
 
     pub fn values_for(&self, p: &NetMyrsiParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|r| {
-            let s = r * self.cols;
-            &self.values[s..s + self.cols]
+        self.row_for_params(p).and_then(|r| {
+            let start = r.checked_mul(self.cols)?;
+            let end = start.checked_add(self.cols)?;
+            self.values.get(start..end)
         })
     }
 }
 
 #[inline(always)]
-fn expand_grid_period((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid_period((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, NetMyrsiError> {
+    // Step == 0 → treat as a static value; identical bounds also collapse.
     if step == 0 || start == end {
-        return vec![start];
+        return Ok(vec![start]);
     }
-    (start..=end).step_by(step).collect()
+
+    // Forward range
+    if start < end {
+        let mut v = Vec::new();
+        let mut x = start;
+        let st = step.max(1);
+        while x <= end {
+            v.push(x);
+            x = x
+                .checked_add(st)
+                .ok_or_else(|| NetMyrsiError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                })?;
+        }
+        if v.is_empty() {
+            return Err(NetMyrsiError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        return Ok(v);
+    }
+
+    // Reversed bounds: walk downwards using an isize accumulator.
+    let mut v = Vec::new();
+    let mut x = start as isize;
+    let end_i = end as isize;
+    let st = (step as isize).max(1);
+    while x >= end_i {
+        v.push(x as usize);
+        x -= st;
+    }
+    if v.is_empty() {
+        return Err(NetMyrsiError::InvalidRange {
+            start: start.to_string(),
+            end: end.to_string(),
+            step: step.to_string(),
+        });
+    }
+    Ok(v)
 }
 
 pub fn net_myrsi_batch_with_kernel(
@@ -1024,15 +1077,12 @@ pub fn net_myrsi_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(NetMyrsiError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+        other => {
+            return Err(NetMyrsiError::InvalidKernelForBatch(other));
         }
     };
 
-    let periods = expand_grid_period(sweep.period);
+    let periods = expand_grid_period(sweep.period)?;
     let combos: Vec<NetMyrsiParams> = periods
         .into_iter()
         .map(|p| NetMyrsiParams { period: Some(p) })
@@ -1055,6 +1105,13 @@ fn net_myrsi_batch_inner(
         .ok_or(NetMyrsiError::AllValuesNaN)?;
     let cols = data.len();
     let rows = combos.len();
+
+    // Guard rows * cols against overflow so helpers never panic.
+    let _ = rows.checked_mul(cols).ok_or_else(|| NetMyrsiError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
 
     // validate all periods upfront
     let max_needed = combos
@@ -1123,6 +1180,21 @@ fn net_myrsi_batch_inner_into(
         .ok_or(NetMyrsiError::AllValuesNaN)?;
     let cols = data.len();
     let rows = combos.len();
+
+    // out must be rows * cols to hold all combinations.
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| NetMyrsiError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
+    if out.len() != expected {
+        return Err(NetMyrsiError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // upfront validation
     let max_needed = combos
@@ -1214,7 +1286,8 @@ pub fn net_myrsi_batch_py<'py>(
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     let slice_in = data.as_slice()?;
 
-    let periods = expand_grid_period(period_range);
+    let periods = expand_grid_period(period_range)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let combos: Vec<NetMyrsiParams> = periods
         .into_iter()
         .map(|p| NetMyrsiParams { period: Some(p) })
@@ -1222,7 +1295,10 @@ pub fn net_myrsi_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let len = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [len], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -1260,7 +1336,6 @@ pub fn net_myrsi_cuda_batch_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    use numpy::IntoPyArray;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1268,16 +1343,17 @@ pub fn net_myrsi_cuda_batch_dev_py<'py>(
     let sweep = NetMyrsiBatchRange {
         period: period_range,
     };
-    let inner = py
-        .allow_threads(|| {
-            let cuda = crate::cuda::CudaNetMyrsi::new(device_id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.net_myrsi_batch_dev(prices, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?
-        .0;
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = crate::cuda::CudaNetMyrsi::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda.net_myrsi_batch_dev(prices, &sweep)
+            .map(|(inner, _)| (inner, ctx, dev_id))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1300,13 +1376,16 @@ pub fn net_myrsi_cuda_many_series_one_param_dev_py(
     let params = NetMyrsiParams {
         period: Some(period),
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = crate::cuda::CudaNetMyrsi::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.net_myrsi_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 #[cfg(feature = "python")]
@@ -1451,7 +1530,8 @@ pub fn net_myrsi_batch_into(
     }
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
-        let periods = expand_grid_period((period_start, period_end, period_step));
+        let periods = expand_grid_period((period_start, period_end, period_step))
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let combos: Vec<NetMyrsiParams> = periods
             .into_iter()
             .map(|p| NetMyrsiParams { period: Some(p) })

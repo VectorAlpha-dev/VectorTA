@@ -801,7 +801,9 @@ pub fn srwma_batch_inner_into(
     }
 
     let mut inv_norms = vec![0.0; rows];
-    let cap = rows * max_wlen;
+    let cap = rows
+        .checked_mul(max_wlen)
+        .ok_or(SrwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
     let flat_slice = flat_w.as_mut_slice();
@@ -2238,16 +2240,48 @@ impl DeviceArrayF32SrwmaPy {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producing stream is synchronized before returning the handle
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) {
-        (2, self.inner.device_id as i32)
-    }
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.inner.device_id as i32) }
 
-    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+    // __dlpack__(self, stream=None, max_version=None, dl_device=None, copy=None)
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
         use std::ffi::c_void;
+
+        // Validate/accept optional dl_device. We cannot copy; require same device if provided.
+        if let Some((dtype, devid)) = dl_device {
+            if dtype != 2 || devid as u32 != self.inner.device_id {
+                if copy.unwrap_or(false) {
+                    return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                        "__dlpack__ copy path is not implemented",
+                    ));
+                }
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "dl_device mismatch and copy not requested",
+                ));
+            }
+        }
+
+        // Parse stream per Array API semantics (1 legacy default, 2 per-thread default, or pointer int).
+        // Producer is synchronized before returning handles, so no event/wait is required here.
+        if let Some(obj) = stream {
+            if !obj.is_none() {
+                if obj.downcast::<pyo3::types::PyInt>().is_ok() {
+                    // accepted but intentionally unused
+                }
+            }
+        }
 
         #[repr(C)]
         struct DLDevice { device_type: i32, device_id: i32 }
@@ -2269,6 +2303,16 @@ impl DeviceArrayF32SrwmaPy {
             manager_ctx: *mut c_void,
             deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
         }
+        #[repr(C)]
+        struct DLPackVersion { major: u32, minor: u32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
         struct DlpGuard {
             _shape: Box<[i64; 2]>,
             _strides: Box<[i64; 2]>,
@@ -2279,14 +2323,20 @@ impl DeviceArrayF32SrwmaPy {
             unsafe {
                 if p.is_null() { return; }
                 let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
-                if !guard_ptr.is_null() {
-                    drop(Box::from_raw(guard_ptr));
-                }
+                if !guard_ptr.is_null() { drop(Box::from_raw(guard_ptr)); }
+                drop(Box::from_raw(p));
+            }
+        }
+        extern "C" fn managed_deleter_versioned(p: *mut DLManagedTensorVersioned) {
+            unsafe {
+                if p.is_null() { return; }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() { drop(Box::from_raw(guard_ptr)); }
                 drop(Box::from_raw(p));
             }
         }
 
-        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+        extern "C" fn capsule_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
             unsafe {
                 let name = b"dltensor\0";
                 let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
@@ -2298,37 +2348,83 @@ impl DeviceArrayF32SrwmaPy {
                 }
             }
         }
+        extern "C" fn capsule_destructor_versioned(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                let name = b"dltensor_versioned\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                    as *mut DLManagedTensorVersioned;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter { del(ptr); }
+                    let used = b"used_dltensor_versioned\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
 
         let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
         let strides = Box::new([self.inner.cols as i64, 1i64]);
-        let data_ptr = self.inner.device_ptr() as usize as *mut std::ffi::c_void;
-
+        let n_elems = (self.inner.rows as usize).saturating_mul(self.inner.cols as usize);
+        let data_ptr = if n_elems == 0 {
+            std::ptr::null_mut()
+        } else {
+            self.inner.device_ptr() as usize as *mut c_void
+        };
         let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _ctx: self.inner.ctx.clone() });
         let guard_ptr = Box::into_raw(guard);
         let guard_ref = unsafe { &*guard_ptr };
-        let mt = Box::new(DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
-                ndim: 2,
-                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                shape: guard_ref._shape.as_ptr() as *mut i64,
-                strides: guard_ref._strides.as_ptr() as *mut i64,
-                byte_offset: 0,
-            },
-            manager_ctx: guard_ptr as *mut std::ffi::c_void,
-            deleter: Some(managed_deleter),
-        });
-        let mt_raw = Box::into_raw(mt);
-        let name = b"dltensor\0";
-        let capsule = unsafe {
-            pyo3::ffi::PyCapsule_New(mt_raw as *mut std::ffi::c_void, name.as_ptr() as *const _, Some(capsule_destructor))
-        };
-        if capsule.is_null() {
-            unsafe { managed_deleter(mt_raw); }
-            return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        if want_versioned {
+            let mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 0 },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(managed_deleter_versioned),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+            });
+            let raw = Box::into_raw(mt);
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(raw as *mut c_void, name.as_ptr() as *const _, Some(capsule_destructor_versioned))
+            };
+            if capsule.is_null() {
+                unsafe { managed_deleter_versioned(raw); }
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack versioned capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2 /* kDLFloat */, bits: 32, lanes: 1 },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(managed_deleter),
+            });
+            let raw = Box::into_raw(mt);
+            let name = b"dltensor\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(raw as *mut c_void, name.as_ptr() as *const _, Some(capsule_destructor_legacy))
+            };
+            if capsule.is_null() {
+                unsafe { managed_deleter(raw); }
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
     }
 }
 
@@ -2397,9 +2493,12 @@ pub fn srwma_batch_py<'py>(
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("dimensions too large to allocate"))?;
 
     // Pre-allocate NumPy array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Heavy computation without GIL

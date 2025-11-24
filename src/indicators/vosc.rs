@@ -18,6 +18,7 @@
 //! - **Scalar Path**: Tightened with unchecked indexing + loop-jamming (faster, tests unchanged)
 //! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
 //! - **Batch Support**: ✓ Row-specific optimization via shared prefix sums across parameter rows
+//! - **CUDA/Python**: CUDA wrapper uses typed errors, VRAM checks, and returns VRAM handles; Python interop exposes CUDA Array Interface v3 and DLPack v1.x (versioned + legacy) with preserved numerical outputs.
 //! - **Note**: Sliding update per time step is inherently sequential; SIMD adds little benefit here.
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -33,8 +34,382 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
 
+// ==================== PYTHON CUDA HANDLE (CAI v3 + DLPack) ====================
+// For CUDA-enabled Python builds, provide a VOSC-specific VRAM handle that keeps
+// the CUDA context alive and exposes both CAI v3 and DLPack v1.x.
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+mod vosc_python_cuda_handle {
+    use cust::context::Context;
+    use cust::memory::DeviceBuffer;
+    use pyo3::exceptions::PyValueError;
+    use pyo3::prelude::*;
+    use pyo3::types::PyDict;
+    use std::ffi::c_void;
+    use std::sync::Arc;
+
+    #[pyclass(module = "ta_indicators.cuda", unsendable, name = "DeviceArrayF32Py")]
+    pub struct DeviceArrayF32Py {
+        pub(crate) buf: Option<DeviceBuffer<f32>>,
+        pub(crate) rows: usize,
+        pub(crate) cols: usize,
+        pub(crate) _ctx: Arc<Context>,
+        pub(crate) device_id: u32,
+    }
+
+    #[pymethods]
+    impl DeviceArrayF32Py {
+        #[getter]
+        fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+            let d = PyDict::new(py);
+            d.set_item("shape", (self.rows, self.cols))?;
+            d.set_item("typestr", "<f4")?;
+            d.set_item(
+                "strides",
+                (
+                    self.cols * std::mem::size_of::<f32>(),
+                    std::mem::size_of::<f32>(),
+                ),
+            )?;
+            let ptr = self
+                .buf
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+                .as_device_ptr()
+                .as_raw() as usize;
+            d.set_item("data", (ptr, false))?;
+            d.set_item("version", 3)?;
+            Ok(d)
+        }
+
+        fn __dlpack_device__(&self) -> (i32, i32) {
+            let mut device_ordinal: i32 = self.device_id as i32;
+            unsafe {
+                let attr = cust::sys::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
+                let mut value = std::mem::MaybeUninit::<i32>::uninit();
+                let rc = cust::sys::cuPointerGetAttribute(
+                    value.as_mut_ptr() as *mut c_void,
+                    attr,
+                    self.buf
+                        .as_ref()
+                        .map(|b| b.as_device_ptr().as_raw() as *mut c_void)
+                        .unwrap_or(std::ptr::null_mut()),
+                );
+                if rc == cust::sys::CUresult::CUDA_SUCCESS {
+                    device_ordinal = value.assume_init();
+                }
+            }
+            (2, device_ordinal)
+        }
+
+        #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+        fn __dlpack__<'py>(
+            &mut self,
+            py: Python<'py>,
+            _stream: Option<&pyo3::types::PyAny>,
+            max_version: Option<&pyo3::types::PyAny>,
+            dl_device: Option<&pyo3::types::PyAny>,
+            _copy: Option<&pyo3::types::PyAny>,
+        ) -> PyResult<PyObject> {
+            use std::ffi::c_void as Cv;
+            use std::os::raw::c_char;
+
+            if let Some(d) = dl_device {
+                if let Ok((dev_type, dev_id)) = d.extract::<(i32, i32)>() {
+                    if dev_type != 2 {
+                        return Err(PyValueError::new_err("dl_device.type must be CUDA (2)"));
+                    }
+                    if dev_id != self.device_id as i32 {
+                        return Err(PyValueError::new_err(
+                            "dl_device.id does not match allocation device",
+                        ));
+                    }
+                }
+            }
+
+            #[repr(C)]
+            struct DLDevice {
+                device_type: i32,
+                device_id: i32,
+            }
+            #[repr(C)]
+            struct DLDataType {
+                code: u8,
+                bits: u8,
+                lanes: u16,
+            }
+            #[repr(C)]
+            struct DLTensor {
+                data: *mut Cv,
+                device: DLDevice,
+                ndim: i32,
+                dtype: DLDataType,
+                shape: *mut i64,
+                strides: *mut i64,
+                byte_offset: u64,
+            }
+            #[repr(C)]
+            struct DLManagedTensor {
+                dl_tensor: DLTensor,
+                manager_ctx: *mut Cv,
+                deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+            }
+            #[repr(C)]
+            struct DLVersion {
+                major: i32,
+                minor: i32,
+            }
+            #[repr(C)]
+            struct DLManagedTensorVersioned {
+                dl_managed_tensor: DLManagedTensor,
+                version: DLVersion,
+            }
+
+            let (_k, alloc_dev) = self.__dlpack_device__();
+            let mut retained: cust::sys::CUcontext = std::ptr::null_mut();
+            unsafe {
+                let _ = cust::sys::cuDevicePrimaryCtxRetain(&mut retained, alloc_dev);
+            }
+
+            let moved_buf = self
+                .buf
+                .take()
+                .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+            struct HolderLegacy {
+                managed: DLManagedTensor,
+                shape: [i64; 2],
+                strides: [i64; 2],
+                buf: DeviceBuffer<f32>,
+                retained: cust::sys::CUcontext,
+                device_id: i32,
+            }
+            struct HolderV1 {
+                managed: DLManagedTensorVersioned,
+                shape: [i64; 2],
+                strides: [i64; 2],
+                buf: DeviceBuffer<f32>,
+                retained: cust::sys::CUcontext,
+                device_id: i32,
+            }
+
+            unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
+                if p.is_null() {
+                    return;
+                }
+                let holder = (*p).manager_ctx as *mut HolderLegacy;
+                if !holder.is_null() {
+                    let ctx = (*holder).retained;
+                    if !ctx.is_null() {
+                        let _ = cust::sys::cuCtxPushCurrent(ctx);
+                        let dev = (*holder).device_id;
+                        drop(Box::from_raw(holder));
+                        let mut _out: cust::sys::CUcontext = std::ptr::null_mut();
+                        let _ = cust::sys::cuCtxPopCurrent(&mut _out);
+                        let _ = cust::sys::cuDevicePrimaryCtxRelease(dev);
+                    }
+                }
+                drop(Box::from_raw(p));
+            }
+
+            unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+                if p.is_null() {
+                    return;
+                }
+                let holder = (*p).dl_managed_tensor.manager_ctx as *mut HolderV1;
+                if !holder.is_null() {
+                    let ctx = (*holder).retained;
+                    if !ctx.is_null() {
+                        let _ = cust::sys::cuCtxPushCurrent(ctx);
+                        let dev = (*holder).device_id;
+                        drop(Box::from_raw(holder));
+                        let mut _out: cust::sys::CUcontext = std::ptr::null_mut();
+                        let _ = cust::sys::cuCtxPopCurrent(&mut _out);
+                        let _ = cust::sys::cuDevicePrimaryCtxRelease(dev);
+                    }
+                }
+                drop(Box::from_raw(p));
+            }
+
+            unsafe extern "C" fn cap_destructor_legacy(
+                capsule: *mut pyo3::ffi::PyObject,
+            ) {
+                let name = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    name.as_ptr() as *const c_char,
+                ) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter {
+                        del(ptr);
+                    }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+
+            unsafe extern "C" fn cap_destructor_v1(
+                capsule: *mut pyo3::ffi::PyObject,
+            ) {
+                let name = b"dltensor_versioned\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    name.as_ptr() as *const c_char,
+                ) as *mut DLManagedTensorVersioned;
+                if !ptr.is_null() {
+                    let mt = &mut (*ptr).dl_managed_tensor;
+                    if let Some(del) = mt.deleter {
+                        del(mt);
+                    }
+                    let used = b"used_dltensor_versioned\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+
+            let want_v1 = if let Some(t) = max_version {
+                if t.getattr("__iter").is_ok() {
+                    if let Ok((maj, _min)) = t.extract::<(i32, i32)>() {
+                        maj >= 1
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            let rows = self.rows as i64;
+            let cols = self.cols as i64;
+            let data_ptr = if rows == 0 || cols == 0 {
+                std::ptr::null_mut()
+            } else {
+                moved_buf.as_device_ptr().as_raw() as *mut Cv
+            };
+
+            if want_v1 {
+                let mut holder = Box::new(HolderV1 {
+                    managed: DLManagedTensorVersioned {
+                        dl_managed_tensor: DLManagedTensor {
+                            dl_tensor: DLTensor {
+                                data: data_ptr,
+                                device: DLDevice {
+                                    device_type: 2,
+                                    device_id: alloc_dev,
+                                },
+                                ndim: 2,
+                                dtype: DLDataType {
+                                    code: 2,
+                                    bits: 32,
+                                    lanes: 1,
+                                },
+                                shape: std::ptr::null_mut(),
+                                strides: std::ptr::null_mut(),
+                                byte_offset: 0,
+                            },
+                            manager_ctx: std::ptr::null_mut(),
+                            deleter: Some(|mt| {
+                                if !mt.is_null() {
+                                    let outer = (mt as *mut u8)
+                                        .offset(-(std::mem::size_of::<DLVersion>() as isize))
+                                        as *mut DLManagedTensorVersioned;
+                                    deleter_v1(outer);
+                                }
+                            }),
+                        },
+                        version: DLVersion { major: 1, minor: 0 },
+                    },
+                    shape: [rows, cols],
+                    strides: [cols, 1],
+                    buf: moved_buf,
+                    retained,
+                    device_id: alloc_dev,
+                });
+                holder
+                    .managed
+                    .dl_managed_tensor
+                    .dl_tensor
+                    .shape = holder.shape.as_mut_ptr();
+                holder
+                    .managed
+                    .dl_managed_tensor
+                    .dl_tensor
+                    .strides = holder.strides.as_mut_ptr();
+                holder.managed.dl_managed_tensor.manager_ctx =
+                    &mut *holder as *mut HolderV1 as *mut Cv;
+                let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+                let _leak = Box::into_raw(holder);
+                let name = b"dltensor_versioned\0";
+                let capsule = unsafe {
+                    pyo3::ffi::PyCapsule_New(
+                        mt_ptr as *mut Cv,
+                        name.as_ptr() as *const c_char,
+                        Some(cap_destructor_v1),
+                    )
+                };
+                if capsule.is_null() {
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+            } else {
+                let mut holder = Box::new(HolderLegacy {
+                    managed: DLManagedTensor {
+                        dl_tensor: DLTensor {
+                            data: data_ptr,
+                            device: DLDevice {
+                                device_type: 2,
+                                device_id: alloc_dev,
+                            },
+                            ndim: 2,
+                            dtype: DLDataType {
+                                code: 2,
+                                bits: 32,
+                                lanes: 1,
+                            },
+                            shape: std::ptr::null_mut(),
+                            strides: std::ptr::null_mut(),
+                            byte_offset: 0,
+                        },
+                        manager_ctx: std::ptr::null_mut(),
+                        deleter: Some(deleter_legacy),
+                    },
+                    shape: [rows, cols],
+                    strides: [cols, 1],
+                    buf: moved_buf,
+                    retained,
+                    device_id: alloc_dev,
+                });
+                holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+                holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+                holder.managed.manager_ctx =
+                    &mut *holder as *mut HolderLegacy as *mut Cv;
+                let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+                let _leak = Box::into_raw(holder);
+                let name = b"dltensor\0";
+                let capsule = unsafe {
+                    pyo3::ffi::PyCapsule_New(
+                        mt_ptr as *mut Cv,
+                        name.as_ptr() as *const c_char,
+                        Some(cap_destructor_legacy),
+                    )
+                };
+                if capsule.is_null() {
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+            }
+        }
+    }
+
+    pub use DeviceArrayF32Py as VoscDeviceArrayF32Py;
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+use self::vosc_python_cuda_handle::VoscDeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -199,18 +574,22 @@ impl VoscBuilder {
 
 #[derive(Debug, Error)]
 pub enum VoscError {
-    #[error("vosc: Empty data provided for VOSC.")]
-    EmptyData,
-    #[error("vosc: Invalid short period: short_period = {period}, data length = {data_len}")]
-    InvalidShortPeriod { period: usize, data_len: usize },
-    #[error("vosc: Invalid long period: long_period = {period}, data length = {data_len}")]
-    InvalidLongPeriod { period: usize, data_len: usize },
+    #[error("vosc: empty input data")]
+    EmptyInputData,
+    #[error("vosc: invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
     #[error("vosc: short_period > long_period")]
     ShortPeriodGreaterThanLongPeriod,
     #[error("vosc: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("vosc: All values are NaN.")]
     AllValuesNaN,
+    #[error("vosc: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("vosc: invalid batch range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("vosc: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -225,20 +604,20 @@ pub fn vosc_with_kernel(input: &VoscInput, kernel: Kernel) -> Result<VoscOutput,
     };
 
     if data.is_empty() {
-        return Err(VoscError::EmptyData);
+        return Err(VoscError::EmptyInputData);
     }
 
     let short_period = input.get_short_period();
     let long_period = input.get_long_period();
 
     if short_period == 0 || short_period > data.len() {
-        return Err(VoscError::InvalidShortPeriod {
+        return Err(VoscError::InvalidPeriod {
             period: short_period,
             data_len: data.len(),
         });
     }
     if long_period == 0 || long_period > data.len() {
-        return Err(VoscError::InvalidLongPeriod {
+        return Err(VoscError::InvalidPeriod {
             period: long_period,
             data_len: data.len(),
         });
@@ -264,7 +643,13 @@ pub fn vosc_with_kernel(input: &VoscInput, kernel: Kernel) -> Result<VoscOutput,
         other => other,
     };
 
-    let warmup_period = first + long_period - 1;
+    let warmup_period = first
+        .checked_add(long_period)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or(VoscError::InvalidPeriod {
+            period: long_period,
+            data_len: data.len(),
+        })?;
     let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
 
     unsafe {
@@ -580,7 +965,13 @@ fn vosc_row_scalar_prefix(
     long_period: usize,
     out: &mut [f64],
 ) {
-    let warm = first + long_period - 1;
+    let warm = match first
+        .checked_add(long_period)
+        .and_then(|v| v.checked_sub(1))
+    {
+        Some(w) => w,
+        None => return,
+    };
     let short_div = 1.0 / (short_period as f64);
     let long_div = 1.0 / (long_period as f64);
     let len = data.len();
@@ -672,15 +1063,9 @@ impl VoscStream {
         let short_period = params.short_period.unwrap_or(2);
         let long_period = params.long_period.unwrap_or(5);
 
-        if short_period == 0 {
-            return Err(VoscError::InvalidShortPeriod {
-                period: short_period,
-                data_len: 0,
-            });
-        }
-        if long_period == 0 {
-            return Err(VoscError::InvalidLongPeriod {
-                period: long_period,
+        if short_period == 0 || long_period == 0 {
+            return Err(VoscError::InvalidPeriod {
+                period: short_period.max(long_period),
                 data_len: 0,
             });
         }
@@ -874,10 +1259,7 @@ pub fn vosc_batch_with_kernel(
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
-            return Err(VoscError::InvalidLongPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(VoscError::InvalidKernelForBatch(k))
         }
     };
     let mut simd = match kernel {
@@ -923,7 +1305,35 @@ fn expand_grid(r: &VoscBatchRange) -> Vec<VoscParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut out = Vec::new();
+        if start <= end {
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(next) if next > v => v = next,
+                    _ => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            loop {
+                out.push(v);
+                if v <= end {
+                    break;
+                }
+                match v.checked_sub(step) {
+                    Some(next) if next < v => {
+                        v = next;
+                        if v < end {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }
+        out
     }
     let shorts = axis_usize(r.short_period);
     let longs = axis_usize(r.long_period);
@@ -968,9 +1378,10 @@ fn vosc_batch_inner(
 ) -> Result<VoscBatchOutput, VoscError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(VoscError::InvalidLongPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(VoscError::InvalidRange {
+            start: sweep.short_period.0,
+            end: sweep.short_period.1,
+            step: sweep.short_period.2,
         });
     }
 
@@ -989,14 +1400,31 @@ fn vosc_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
+    // Guard against rows * cols overflow before allocation
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(VoscError::InvalidRange {
+            start: sweep.short_period.0,
+            end: sweep.short_period.1,
+            step: sweep.short_period.2,
+        })?;
+
     // Use uninitialized memory with proper prefixes, matching ALMA pattern
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     // Calculate warmup periods for each parameter combination
-    let warmup_periods: Vec<usize> = combos
-        .iter()
-        .map(|c| first + c.long_period.unwrap() - 1)
-        .collect();
+    let mut warmup_periods = Vec::with_capacity(combos.len());
+    for c in &combos {
+        let lp = c.long_period.unwrap();
+        let warm = first
+            .checked_add(lp)
+            .and_then(|v| v.checked_sub(1))
+            .ok_or(VoscError::InvalidPeriod {
+                period: lp,
+                data_len: data.len(),
+            })?;
+        warmup_periods.push(warm);
+    }
 
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
@@ -1073,9 +1501,10 @@ fn vosc_batch_inner_into(
 ) -> Result<Vec<VoscParams>, VoscError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(VoscError::InvalidLongPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(VoscError::InvalidRange {
+            start: sweep.short_period.0,
+            end: sweep.short_period.1,
+            step: sweep.short_period.2,
         });
     }
 
@@ -1094,11 +1523,33 @@ fn vosc_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(VoscError::InvalidRange {
+            start: sweep.short_period.0,
+            end: sweep.short_period.1,
+            step: sweep.short_period.2,
+        })?;
+    if out.len() != total {
+        return Err(VoscError::OutputLengthMismatch {
+            expected: total,
+            got: out.len(),
+        });
+    }
+
     // Initialize NaN prefixes in-place using the same helper ALMA uses.
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first + c.long_period.unwrap() - 1)
-        .collect();
+    let mut warm = Vec::with_capacity(combos.len());
+    for c in &combos {
+        let lp = c.long_period.unwrap();
+        let w = first
+            .checked_add(lp)
+            .and_then(|v| v.checked_sub(1))
+            .ok_or(VoscError::InvalidPeriod {
+                period: lp,
+                data_len: data.len(),
+            })?;
+        warm.push(w);
+    }
 
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(
@@ -1919,8 +2370,12 @@ pub fn vosc_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows * cols overflow in vosc_batch_py"))?;
+
     // Pre-allocate uninitialized NumPy array (acceptable for batch operations)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Heavy work without the GIL
@@ -1978,7 +2433,7 @@ pub fn vosc_cuda_batch_dev_py(
     short_period_range: (usize, usize, usize),
     long_period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<VoscDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaVosc;
 
@@ -1990,13 +2445,22 @@ pub fn vosc_cuda_batch_dev_py(
         short_period: short_period_range,
         long_period: long_period_range,
     };
-    let inner = py.allow_threads(|| {
+    let (dev, ctx, dev_id_u32) = py.allow_threads(|| {
         let cuda = CudaVosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vosc_batch_dev(slice_in, &sweep)
-            .map(|(dev, _combos)| dev)
+        let ctx = cuda.context_arc();
+        let dev_id_u32 = cuda.device_id();
+        cuda
+            .vosc_batch_dev(slice_in, &sweep)
+            .map(|(dev, _combos)| (dev, ctx, dev_id_u32))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(VoscDeviceArrayF32Py {
+        buf: Some(dev.buf),
+        rows: dev.rows,
+        cols: dev.cols,
+        _ctx: ctx,
+        device_id: dev_id_u32,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2008,7 +2472,7 @@ pub fn vosc_cuda_many_series_one_param_dev_py(
     short_period: usize,
     long_period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<VoscDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaVosc;
     use numpy::PyUntypedArrayMethods;
@@ -2023,12 +2487,22 @@ pub fn vosc_cuda_many_series_one_param_dev_py(
         short_period: Some(short_period),
         long_period: Some(long_period),
     };
-    let inner = py.allow_threads(|| {
+    let (dev, ctx, dev_id_u32) = py.allow_threads(|| {
         let cuda = CudaVosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vosc_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+        let ctx = cuda.context_arc();
+        let dev_id_u32 = cuda.device_id();
+        cuda
+            .vosc_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map(|dev| (dev, ctx, dev_id_u32))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(VoscDeviceArrayF32Py {
+        buf: Some(dev.buf),
+        rows: dev.rows,
+        cols: dev.cols,
+        _ctx: ctx,
+        device_id: dev_id_u32,
+    })
 }
 
 // ============================================================================
@@ -2043,13 +2517,13 @@ pub fn vosc_into_slice(dst: &mut [f64], input: &VoscInput, kern: Kernel) -> Resu
     };
 
     if data.is_empty() {
-        return Err(VoscError::EmptyData);
+        return Err(VoscError::EmptyInputData);
     }
 
     if dst.len() != data.len() {
-        return Err(VoscError::NotEnoughValidData {
-            needed: data.len(),
-            valid: dst.len(),
+        return Err(VoscError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -2057,13 +2531,13 @@ pub fn vosc_into_slice(dst: &mut [f64], input: &VoscInput, kern: Kernel) -> Resu
     let long_period = input.get_long_period();
 
     if short_period == 0 || short_period > data.len() {
-        return Err(VoscError::InvalidShortPeriod {
+        return Err(VoscError::InvalidPeriod {
             period: short_period,
             data_len: data.len(),
         });
     }
     if long_period == 0 || long_period > data.len() {
-        return Err(VoscError::InvalidLongPeriod {
+        return Err(VoscError::InvalidPeriod {
             period: long_period,
             data_len: data.len(),
         });
@@ -2107,8 +2581,20 @@ pub fn vosc_into_slice(dst: &mut [f64], input: &VoscInput, kern: Kernel) -> Resu
     }
 
     // Warmup NaNs
-    let warm = first + long_period - 1;
-    for v in &mut dst[..warm] {
+    let warm = match first
+        .checked_add(long_period)
+        .and_then(|v| v.checked_sub(1))
+    {
+        Some(w) => w,
+        None => {
+            return Err(VoscError::InvalidPeriod {
+                period: long_period,
+                data_len: data.len(),
+            })
+        }
+    };
+    let limit = warm.min(dst.len());
+    for v in &mut dst[..limit] {
         *v = f64::NAN;
     }
 
@@ -2266,7 +2752,14 @@ pub fn vosc_batch_into(
         let rows = combos.len();
         let cols = len;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        if rows == 0 {
+            return Err(JsValue::from_str("vosc_batch_into: no valid parameter combinations"));
+        }
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("vosc_batch_into: rows * cols overflow"))?;
+
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         // Resolve to regular kernel for row executor, match alma.rs
         vosc_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)

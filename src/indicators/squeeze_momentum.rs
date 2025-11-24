@@ -22,6 +22,7 @@
 //! - Streaming Performance: O(1) per update via rings + accumulators; BB vs KC squeeze classification avoids sqrt (exact). Matches scalar outputs.
 //! - Memory: Uses `alloc_with_nan_prefix`/`make_uninit_matrix` and zero‑copy batching.
 //! - Batch Optimization (ScalarBatch): Shared precompute across rows (TR, SMA(close), TR SMA, rolling highs/lows, RAW → momentum/signal) keyed by unique `length_kc`/`length_bb`, then per‑row band classification; removes redundant work when sweeping params.
+//! - CUDA: PTX batch + many‑series kernels wrapped by `CudaSqueezeMomentum` with VRAM checks and primary‑context RAII; Python bindings reuse `DeviceArrayF32Py` for CUDA Array Interface v3 + DLPack v1.x.
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -231,16 +232,22 @@ impl SqueezeMomentumBuilder {
 
 #[derive(Debug, Error)]
 pub enum SqueezeMomentumError {
-    #[error("smi: Empty data provided for Squeeze Momentum.")]
-    EmptyData,
-    #[error("smi: Invalid length parameter: length = {length}, data length = {data_len}")]
-    InvalidLength { length: usize, data_len: usize },
+    #[error("smi: Input data slice is empty.")]
+    EmptyInputData,
     #[error("smi: High/low/close arrays have inconsistent lengths.")]
     InconsistentDataLength,
     #[error("smi: All values are NaN.")]
     AllValuesNaN,
+    #[error("smi: Invalid length/period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
     #[error("smi: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("smi: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("smi: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("smi: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // --- Main Kernel Selection ---
@@ -274,13 +281,16 @@ pub fn squeeze_momentum_into_slices(
     };
     let n = close.len();
     if n == 0 || high.is_empty() || low.is_empty() {
-        return Err(SqueezeMomentumError::EmptyData);
+        return Err(SqueezeMomentumError::EmptyInputData);
     }
     if high.len() != low.len() || low.len() != close.len() {
         return Err(SqueezeMomentumError::InconsistentDataLength);
     }
     if squeeze_dst.len() != n || momentum_dst.len() != n || signal_dst.len() != n {
-        return Err(SqueezeMomentumError::InconsistentDataLength);
+        return Err(SqueezeMomentumError::OutputLengthMismatch {
+            expected: n,
+            got: squeeze_dst.len().max(momentum_dst.len()).max(signal_dst.len()),
+        });
     }
 
     let lbb = input.params.length_bb.unwrap_or(20);
@@ -288,14 +298,14 @@ pub fn squeeze_momentum_into_slices(
     let mbb = input.params.mult_bb.unwrap_or(2.0);
     let mkc = input.params.mult_kc.unwrap_or(1.5);
     if lbb == 0 || lbb > n {
-        return Err(SqueezeMomentumError::InvalidLength {
-            length: lbb,
+        return Err(SqueezeMomentumError::InvalidPeriod {
+            period: lbb,
             data_len: n,
         });
     }
     if lkc == 0 || lkc > n {
-        return Err(SqueezeMomentumError::InvalidLength {
-            length: lkc,
+        return Err(SqueezeMomentumError::InvalidPeriod {
+            period: lkc,
             data_len: n,
         });
     }
@@ -506,31 +516,99 @@ fn warmups_for(p: &SqueezeMomentumBatchParams) -> (usize, usize, usize) {
     (sq, mo, si)
 }
 
-fn expand_grid_sm(range: &SqueezeMomentumBatchRange) -> Vec<SqueezeMomentumBatchParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
+fn expand_grid_sm(range: &SqueezeMomentumBatchRange) -> Result<Vec<SqueezeMomentumBatchParams>, SqueezeMomentumError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, SqueezeMomentumError> {
+        if step == 0 {
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start == end {
+            return Ok(vec![start]);
+        }
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(next) => {
+                        if next == v {
+                            break;
+                        }
+                        v = next;
+                    }
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            while v >= end {
+                out.push(v);
+                if v == 0 {
+                    break;
+                }
+                let next = v.saturating_sub(step);
+                if next == v {
+                    break;
+                }
+                v = next;
+                if v < end {
+                    break;
+                }
+            }
+        }
+        if out.is_empty() {
+            return Err(SqueezeMomentumError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(out)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, SqueezeMomentumError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        let mut out = Vec::new();
+        if start < end {
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 {
+                out.push(x);
+                x += st;
+            }
+        } else {
+            let mut x = start;
+            let st = step.abs();
+            while x + 1e-12 >= end {
+                out.push(x);
+                x -= st;
+            }
         }
-        v
+        if out.is_empty() {
+            return Err(SqueezeMomentumError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(out)
     }
-    let length_bbs = axis_usize(range.length_bb);
-    let mult_bbs = axis_f64(range.mult_bb);
-    let length_kcs = axis_usize(range.length_kc);
-    let mult_kcs = axis_f64(range.mult_kc);
-    let mut out =
-        Vec::with_capacity(length_bbs.len() * mult_bbs.len() * length_kcs.len() * mult_kcs.len());
+    let length_bbs = axis_usize(range.length_bb)?;
+    let mult_bbs = axis_f64(range.mult_bb)?;
+    let length_kcs = axis_usize(range.length_kc)?;
+    let mult_kcs = axis_f64(range.mult_kc)?;
+    let cap = length_bbs
+        .len()
+        .checked_mul(mult_bbs.len())
+        .and_then(|x| x.checked_mul(length_kcs.len()))
+        .and_then(|x| x.checked_mul(mult_kcs.len()))
+        .ok_or_else(|| SqueezeMomentumError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+    let mut out = Vec::with_capacity(cap);
     for &lbb in &length_bbs {
         for &mbb in &mult_bbs {
             for &lkc in &length_kcs {
@@ -545,7 +623,14 @@ fn expand_grid_sm(range: &SqueezeMomentumBatchRange) -> Vec<SqueezeMomentumBatch
             }
         }
     }
-    out
+    if out.is_empty() {
+        return Err(SqueezeMomentumError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
+        });
+    }
+    Ok(out)
 }
 
 pub fn squeeze_momentum_batch_with_kernel(
@@ -555,13 +640,7 @@ pub fn squeeze_momentum_batch_with_kernel(
     sweep: &SqueezeMomentumBatchRange,
     kernel: Kernel,
 ) -> Result<SqueezeMomentumBatchOutput, SqueezeMomentumError> {
-    let combos = expand_grid_sm(sweep);
-    if combos.is_empty() {
-        return Err(SqueezeMomentumError::InvalidLength {
-            length: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_sm(sweep)?;
     let n = close.len();
     let first_valid = (0..n)
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
@@ -578,14 +657,28 @@ pub fn squeeze_momentum_batch_with_kernel(
         });
     }
 
-    // Map Kernel::Auto to best batch kernel
-    let chosen_kernel = match kernel {
+    // Map Kernel::Auto / *Batch to a concrete non-batch kernel; reject non-batch.
+    let batch_kernel = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => kernel,
+        other => return Err(SqueezeMomentumError::InvalidKernelForBatch(other)),
+    };
+    let chosen_kernel = match batch_kernel {
+        Kernel::ScalarBatch => Kernel::Scalar,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::Avx512Batch => Kernel::Avx512,
         other => other,
     };
 
     let rows = combos.len();
     let cols = n;
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| SqueezeMomentumError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
 
     // allocate three uninit matrices and mark NaN warmups with init_matrix_prefixes
     let mut buf_sq = make_uninit_matrix(rows, cols);
@@ -608,7 +701,7 @@ pub fn squeeze_momentum_batch_with_kernel(
     let mut si =
         unsafe { core::slice::from_raw_parts_mut(buf_si.as_mut_ptr() as *mut f64, rows * cols) };
 
-    if matches!(chosen_kernel, Kernel::ScalarBatch) {
+    if matches!(batch_kernel, Kernel::ScalarBatch) {
         // Optimized scalar batch: shared precompute across unique window sizes
         squeeze_momentum_batch_fill_scalar_shared(high, low, close, &combos, sq, mo, si);
     } else {
@@ -694,27 +787,41 @@ pub fn squeeze_momentum_batch_inner_into(
     out_momentum: &mut [f64],
     out_signal: &mut [f64],
 ) -> Result<Vec<SqueezeMomentumBatchParams>, SqueezeMomentumError> {
-    let combos = expand_grid_sm(sweep);
-    if combos.is_empty() {
-        return Err(SqueezeMomentumError::InvalidLength {
-            length: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_sm(sweep)?;
 
-    // Map Kernel::Auto to best batch kernel
-    let chosen_kernel = match kernel {
+    // Map Kernel::Auto / *Batch to a concrete non-batch kernel; reject non-batch.
+    let batch_kernel = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => kernel,
+        other => return Err(SqueezeMomentumError::InvalidKernelForBatch(other)),
+    };
+    let chosen_kernel = match batch_kernel {
+        Kernel::ScalarBatch => Kernel::Scalar,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::Avx512Batch => Kernel::Avx512,
         other => other,
     };
 
     let rows = combos.len();
     let cols = close.len();
-    if out_squeeze.len() != rows * cols
-        || out_momentum.len() != rows * cols
-        || out_signal.len() != rows * cols
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| SqueezeMomentumError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
+    if out_squeeze.len() != expected
+        || out_momentum.len() != expected
+        || out_signal.len() != expected
     {
-        return Err(SqueezeMomentumError::InconsistentDataLength);
+        return Err(SqueezeMomentumError::OutputLengthMismatch {
+            expected,
+            got: out_squeeze
+                .len()
+                .max(out_momentum.len())
+                .max(out_signal.len()),
+        });
     }
 
     // mark warmups in-place via MaybeUninit cast + init_matrix_prefixes
@@ -739,7 +846,7 @@ pub fn squeeze_momentum_batch_inner_into(
         init_matrix_prefixes(si_mu, cols, &warm_si);
     }
 
-    if matches!(chosen_kernel, Kernel::ScalarBatch) {
+    if matches!(batch_kernel, Kernel::ScalarBatch) {
         // Shared-precompute scalar batch fill
         let combos_ref: &[SqueezeMomentumBatchParams] = &combos;
         squeeze_momentum_batch_fill_scalar_shared(
@@ -1652,8 +1759,8 @@ impl SqueezeMomentumStream {
     pub fn try_new(params: SqueezeMomentumParams) -> Result<Self, SqueezeMomentumError> {
         let rp = params.resolve();
         if rp.length_bb == 0 || rp.length_kc == 0 {
-            return Err(SqueezeMomentumError::InvalidLength {
-                length: rp.length_bb.max(rp.length_kc),
+            return Err(SqueezeMomentumError::InvalidPeriod {
+                period: rp.length_bb.max(rp.length_kc),
                 data_len: 0,
             });
         }
@@ -2196,16 +2303,19 @@ pub fn squeeze_momentum_cuda_batch_dev_py(
         length_kc: length_kc_range,
         mult_kc: mult_kc_range,
     };
-    let (sq, mo, si) = py.allow_threads(|| {
+    let (sq, mo, si, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaSqueezeMomentum::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.squeeze_momentum_batch_dev(h, l, c, &sweep)
+            .map(|(sq, mo, si)| (sq, mo, si, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: sq },
-        DeviceArrayF32Py { inner: mo },
-        DeviceArrayF32Py { inner: si },
+        DeviceArrayF32Py { inner: sq, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
+        DeviceArrayF32Py { inner: mo, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
+        DeviceArrayF32Py { inner: si, _ctx: Some(ctx), device_id: Some(dev_id) },
     ))
 }
 
@@ -2231,18 +2341,21 @@ pub fn squeeze_momentum_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let (sq, mo, si) = py.allow_threads(|| {
+    let (sq, mo, si, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaSqueezeMomentum::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.squeeze_momentum_many_series_one_param_time_major_dev(
             h, l, c, cols, rows, length_bb, mult_bb, length_kc, mult_kc,
         )
+        .map(|(sq, mo, si)| (sq, mo, si, ctx, dev_id))
         .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: sq },
-        DeviceArrayF32Py { inner: mo },
-        DeviceArrayF32Py { inner: si },
+        DeviceArrayF32Py { inner: sq, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
+        DeviceArrayF32Py { inner: mo, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
+        DeviceArrayF32Py { inner: si, _ctx: Some(ctx), device_id: Some(dev_id) },
     ))
 }
 

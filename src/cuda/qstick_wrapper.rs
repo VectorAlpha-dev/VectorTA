@@ -11,7 +11,7 @@
 
 use crate::indicators::qstick::{QstickBatchRange, QstickParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -20,25 +20,35 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
 // Reuse the common VRAM handle from ALMA
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaQstickError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error(
+        "out of memory: required={required}B, free={free}B, headroom={headroom}B"
+    )]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
+    )]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("device mismatch: buffer on {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaQstickError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaQstickError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaQstickError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaQstickError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -82,7 +92,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaQstick {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaQstickPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -93,10 +103,9 @@ pub struct CudaQstick {
 
 impl CudaQstick {
     pub fn new(device_id: usize) -> Result<Self, CudaQstickError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/qstick_kernel.ptx"));
         // Follow ALMA JIT policy: determine target from context + O2, fallback
@@ -113,21 +122,19 @@ impl CudaQstick {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaQstickError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaQstickPolicy::default(),
             last_batch: None,
@@ -150,9 +157,16 @@ impl CudaQstick {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaQstickError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaQstickError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaQstickError::from)
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     #[inline]
@@ -193,15 +207,56 @@ impl CudaQstick {
         }
     }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom: usize) -> bool {
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaQstickError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
-        if let Ok((free, _total)) = mem_get_info() {
-            required_bytes.saturating_add(headroom) <= free
+        if let Some((free, _)) = Self::device_mem_info() {
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaQstickError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
         } else {
-            true
+            Ok(())
         }
+    }
+
+    #[inline]
+    fn validate_launch(&self, grid: (u32, u32, u32), block: (u32, u32, u32)) -> Result<(), CudaQstickError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
+        let (gx, gy, gz) = grid;
+        let (bx, by, bz) = block;
+        if bx == 0
+            || by == 0
+            || bz == 0
+            || gx == 0
+            || gy == 0
+            || gz == 0
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaQstickError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
     }
     #[inline]
     fn pick_tiled_block(&self, len: usize) -> u32 {
@@ -254,21 +309,49 @@ impl CudaQstick {
 
         // Expand grid
         let (start, end, step) = sweep.period;
-        let combos: Vec<QstickParams> = if step == 0 || start == end {
-            vec![QstickParams {
-                period: Some(start),
-            }]
-        } else {
-            (start..=end)
-                .step_by(step)
-                .map(|p| QstickParams { period: Some(p) })
-                .collect()
-        };
-        if combos.is_empty() {
-            return Err(CudaQstickError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
+        fn axis_usize(
+            (start, end, step): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaQstickError> {
+            if step == 0 || start == end {
+                return Ok(vec![start]);
+            }
+            let mut v = Vec::new();
+            if start < end {
+                let mut cur = start;
+                while cur <= end {
+                    v.push(cur);
+                    let next = cur.saturating_add(step);
+                    if next == cur {
+                        break;
+                    }
+                    cur = next;
+                }
+            } else {
+                let mut cur = start;
+                while cur >= end {
+                    v.push(cur);
+                    let next = cur.saturating_sub(step);
+                    if next == cur {
+                        break;
+                    }
+                    cur = next;
+                    if cur == 0 && end > 0 {
+                        break;
+                    }
+                }
+            }
+            if v.is_empty() {
+                return Err(CudaQstickError::InvalidInput(
+                    "empty period range".into(),
+                ));
+            }
+            Ok(v)
         }
+        let periods = axis_usize((start, end, step))?;
+        let combos: Vec<QstickParams> = periods
+            .into_iter()
+            .map(|p| QstickParams { period: Some(p) })
+            .collect();
         for c in &combos {
             let p = c.period.unwrap_or(0);
             if p == 0 || p > len {
@@ -325,7 +408,7 @@ impl CudaQstick {
                 .module
                 .get_function(func_name)
                 .or_else(|_| self.module.get_function("qstick_batch_prefix_f32"))
-                .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaQstickError::MissingKernelSymbol { name: "qstick_batch_prefix_f32" })?;
             unsafe {
                 (*(self as *const _ as *mut CudaQstick)).last_batch =
                     Some(BatchKernelSelected::Tiled1x { tile });
@@ -334,6 +417,7 @@ impl CudaQstick {
 
             let grid_x = ((len as u32) + tile - 1) / tile;
             let block: BlockSize = (tile, 1, 1).into();
+            self.validate_launch((grid_x.max(1), 1, 1), (tile, 1, 1))?;
             let mut start = 0usize;
             while start < n_combos {
                 let chunk = (n_combos - start).min(MAX_GRID_Y);
@@ -359,9 +443,9 @@ impl CudaQstick {
                         &mut n_i as *mut _ as *mut c_void,
                         &mut out_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&func, grid, block, 0, args)
-                        .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                        .map_err(CudaQstickError::from)?;
                 }
                 start += chunk;
             }
@@ -369,7 +453,7 @@ impl CudaQstick {
             let func = self
                 .module
                 .get_function("qstick_batch_prefix_f32")
-                .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaQstickError::MissingKernelSymbol { name: "qstick_batch_prefix_f32" })?;
             unsafe {
                 (*(self as *const _ as *mut CudaQstick)).last_batch =
                     Some(BatchKernelSelected::Plain { block_x });
@@ -378,6 +462,7 @@ impl CudaQstick {
 
             let grid_x = ((len as u32) + block_x - 1) / block_x;
             let block: BlockSize = (block_x, 1, 1).into();
+            self.validate_launch((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
             let mut start = 0usize;
             while start < n_combos {
                 let chunk = (n_combos - start).min(MAX_GRID_Y);
@@ -403,9 +488,9 @@ impl CudaQstick {
                         &mut n_i as *mut _ as *mut c_void,
                         &mut out_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&func, grid, block, 0, args)
-                        .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                        .map_err(CudaQstickError::from)?;
                 }
                 start += chunk;
             }
@@ -430,7 +515,7 @@ impl CudaQstick {
         let func = self
             .module
             .get_function("qstick_many_series_one_param_f32")
-            .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaQstickError::MissingKernelSymbol { name: "qstick_many_series_one_param_f32" })?;
 
         unsafe {
             (*(self as *const _ as *mut CudaQstick)).last_many =
@@ -441,6 +526,7 @@ impl CudaQstick {
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch((grid_x.max(1), cols as u32, 1), (block_x, 1, 1))?;
 
         unsafe {
             let mut p_ptr = d_prefix_tm.as_device_ptr().as_raw();
@@ -459,7 +545,7 @@ impl CudaQstick {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+                .map_err(CudaQstickError::from)?;
         }
         Ok(())
     }
@@ -474,30 +560,35 @@ impl CudaQstick {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(open_f32, close_f32, sweep)?;
 
         // VRAM estimate: prefix (len+1) + periods + outputs
-        let bytes_required = (len + 1) * 4                    // prefix
-            + combos.len() * 4                                // periods
-            + combos.len() * len * 4; // outputs
+        let bytes_prefix = (len + 1)
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
+        let bytes_periods = combos
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
+        let bytes_out = combos
+            .len()
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
+        let bytes_required = bytes_prefix
+            .checked_add(bytes_periods)
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
         let headroom = env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(64 * 1024 * 1024);
-        if !Self::will_fit(bytes_required, headroom) {
-            return Err(CudaQstickError::InvalidInput(format!(
-                "insufficient VRAM: need ~{} MB (incl headroom)",
-                (bytes_required + headroom) / (1024 * 1024)
-            )));
-        }
+        Self::will_fit(bytes_required, headroom)?;
 
         // Build prefix on host
         let (prefix, _fv2, _l2) = Self::build_diff_prefix_f32(open_f32, close_f32);
-        let d_prefix =
-            DeviceBuffer::from_slice(&prefix).map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+        let d_prefix = DeviceBuffer::from_slice(&prefix)?;
         let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream)
-                .map_err(|e| CudaQstickError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream)?
         };
 
         self.launch_batch_kernel(
@@ -508,9 +599,7 @@ impl CudaQstick {
             combos.len(),
             &mut d_out,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -583,27 +672,31 @@ impl CudaQstick {
             Self::prepare_many_series_inputs(open_tm_f32, close_tm_f32, cols, rows, period)?;
 
         // VRAM estimate: prefix (rows+1)*cols + first_valids + output rows*cols
-        let bytes_required = (rows + 1) * cols * 4    // prefix
-            + cols * 4                                // first_valids
-            + rows * cols * 4; // output
+        let bytes_prefix = (rows + 1)
+            .checked_mul(cols)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
+        let bytes_first = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
+        let bytes_out = rows
+            .checked_mul(cols)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
+        let bytes_required = bytes_prefix
+            .checked_add(bytes_first)
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
         let headroom = env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(64 * 1024 * 1024);
-        if !Self::will_fit(bytes_required, headroom) {
-            return Err(CudaQstickError::InvalidInput(format!(
-                "insufficient VRAM: need ~{} MB (incl headroom)",
-                (bytes_required + headroom) / (1024 * 1024)
-            )));
-        }
+        Self::will_fit(bytes_required, headroom)?;
 
-        let d_prefix_tm = DeviceBuffer::from_slice(&prefix_tm)
-            .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+        let d_prefix_tm = DeviceBuffer::from_slice(&prefix_tm)?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
-                .map_err(|e| CudaQstickError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(rows * cols, &self.stream)?
         };
 
         self.launch_many_series_kernel(
@@ -614,9 +707,7 @@ impl CudaQstick {
             period,
             &mut d_out_tm,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaQstickError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
             rows,

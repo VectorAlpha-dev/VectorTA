@@ -18,6 +18,7 @@
 //! - **AVX2/AVX512 Kernels**: Implemented for row init; runtime selection remains but single-series uses the scalar core.
 //! - **Streaming**: Implemented with O(1) update performance (maintains running sum)
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
+//! - **Decision log**: SIMD disabled for single-series; CUDA batch/many-series wrappers enabled and matched to scalar within FP32 tolerance; Python interop exposes CUDA Array Interface v3 and DLPack v1.x without changing numerical outputs.
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -47,7 +48,13 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::pfe_wrapper::CudaPfe;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 impl<'a> AsRef<[f64]> for PfeInput<'a> {
     #[inline(always)]
@@ -204,6 +211,14 @@ pub enum PfeError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("pfe: Invalid smoothing: {smoothing}")]
     InvalidSmoothing { smoothing: usize },
+    #[error("pfe: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("pfe: invalid range: start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("pfe: invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("pfe: invalid input: {0}")]
+    InvalidInput(&'static str),
 }
 
 #[inline(always)]
@@ -363,9 +378,9 @@ pub fn pfe_with_kernel(input: &PfeInput, kernel: Kernel) -> Result<PfeOutput, Pf
 pub fn pfe_into(input: &PfeInput, out: &mut [f64]) -> Result<(), PfeError> {
     let (data, period, smoothing, first, chosen) = pfe_prepare(input, Kernel::Auto)?;
     if out.len() != data.len() {
-        return Err(PfeError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
+        return Err(PfeError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
         });
     }
 
@@ -385,9 +400,9 @@ pub fn pfe_into(input: &PfeInput, out: &mut [f64]) -> Result<(), PfeError> {
 pub fn pfe_into_slice(dst: &mut [f64], input: &PfeInput, k: Kernel) -> Result<(), PfeError> {
     let (data, period, smoothing, first, chosen) = pfe_prepare(input, k)?;
     if dst.len() != data.len() {
-        return Err(PfeError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(PfeError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
     pfe_compute_into(data, period, smoothing, first, chosen, dst);
@@ -410,10 +425,7 @@ pub fn pfe_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(PfeError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(PfeError::InvalidKernelForBatch(k));
         }
     };
     let simd = match kernel {
@@ -514,17 +526,69 @@ impl PfeBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &PfeBatchRange) -> Vec<PfeParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &PfeBatchRange) -> Result<Vec<PfeParams>, PfeError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, PfeError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.max(1);
+            loop {
+                v.push(x);
+                let next = match x.checked_add(st) {
+                    Some(nx) if nx > x && nx <= end => nx,
+                    _ => break,
+                };
+                x = next;
+            }
+            if v.is_empty() {
+                return Err(PfeError::InvalidRange {
+                    start,
+                    end,
+                    step,
+                });
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
+        let mut x = start;
+        let st = step.max(1);
+        loop {
+            v.push(x);
+            if x <= end {
+                break;
+            }
+            let next = x.saturating_sub(st);
+            if next >= x {
+                break;
+            }
+            x = next;
+        }
+        if v.is_empty() {
+            return Err(PfeError::InvalidRange {
+                start,
+                end,
+                step,
+            });
+        }
+        Ok(v)
     }
-    let periods = axis(r.period);
-    let smoothings = axis(r.smoothing);
 
-    let mut out = Vec::with_capacity(periods.len() * smoothings.len());
+    let periods = axis_usize(r.period)?;
+    let smoothings = axis_usize(r.smoothing)?;
+
+    let cap = periods
+        .len()
+        .checked_mul(smoothings.len())
+        .ok_or(PfeError::InvalidRange {
+            start: periods.len(),
+            end: smoothings.len(),
+            step: 0,
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &s in &smoothings {
             out.push(PfeParams {
@@ -533,7 +597,7 @@ fn expand_grid(r: &PfeBatchRange) -> Vec<PfeParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -562,11 +626,12 @@ pub fn pfe_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<PfeParams>, PfeError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(PfeError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(PfeError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -585,12 +650,39 @@ pub fn pfe_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(PfeError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 0,
+        })?;
+    if out.len() != expected {
+        return Err(PfeError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
+
     // Initialize warmup NaNs for all rows efficiently
     for (row, combo) in combos.iter().enumerate() {
         let warmup = first + combo.period.unwrap();
-        let row_start = row * cols;
-        for i in 0..warmup {
-            out[row_start + i] = f64::NAN;
+        let row_start = row
+            .checked_mul(cols)
+            .ok_or(PfeError::InvalidRange {
+                start: row,
+                end: cols,
+                step: 0,
+            })?;
+        let end = row_start
+            .checked_add(warmup.min(cols))
+            .ok_or(PfeError::InvalidRange {
+                start: row_start,
+                end: warmup.min(cols),
+                step: 0,
+            })?;
+        for i in row_start..end {
+            out[i] = f64::NAN;
         }
     }
 
@@ -638,11 +730,12 @@ fn pfe_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<PfeBatchOutput, PfeError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(PfeError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(PfeError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -660,14 +753,22 @@ fn pfe_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(PfeError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 0,
+        })?;
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
-    let values_slice: &mut [f64] =
-        unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, rows * cols) };
+    let values_slice: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, total)
+    };
 
     // Shared prefix sums across rows for batch speedup
     let mut prefix = vec![0.0f64; cols];
@@ -1247,6 +1348,219 @@ impl PfeStream {
     }
 }
 
+// ---------------- CUDA Python device handle (CAI v3 + DLPack v1.x) ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "PfeDeviceArrayF32", unsendable)]
+pub struct PfeDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    _ctx_guard: Arc<Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl PfeDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = &self.inner;
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (inner.cols * itemsize, itemsize))?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
+
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _self_ref: PyObject,
+            _arr: DeviceArrayF32,
+            _ctx: Arc<Context>,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ = Box::from_raw(ctx_ptr);
+            }
+        }
+
+        // Currently we always produce a tensor on the allocation device and
+        // assume work is synchronized; stream, dl_device and copy are accepted
+        // for API parity but not used in this producer.
+        let _ = (stream, dl_device, copy);
+
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let total = (rows as i128) * (cols as i128);
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let self_ref = unsafe {
+            PyObject::from_borrowed_ptr(py, self as *mut _ as *mut pyo3::ffi::PyObject)
+        };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _self_ref: self_ref,
+            _arr: inner,
+            _ctx: self._ctx_guard.clone(),
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let dl = DLTensor {
+            data: if total == 0 {
+                std::ptr::null_mut()
+            } else {
+                unsafe {
+                    (*(mgr_ptr as *mut ManagerCtx))
+                        ._arr
+                        .buf
+                        .as_device_ptr()
+                        .as_raw() as *mut c_void
+                }
+            },
+            device: DLDevice {
+                device_type: 2,
+                device_id: self._device_id as i32,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: dl,
+            manager_ctx: mgr_ptr,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl PfeDeviceArrayF32Py {
+    pub fn new_from_rust(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self {
+            inner,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+        }
+    }
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "pfe")]
 #[pyo3(signature = (data, period, smoothing, kernel=None))]
@@ -1294,11 +1608,14 @@ pub fn pfe_batch_py<'py>(
         smoothing: smoothing_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("pfe_batch: rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -1351,7 +1668,7 @@ pub fn pfe_cuda_batch_dev_py(
     period_range: (usize, usize, usize),
     smoothing_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<PfeDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -1361,12 +1678,16 @@ pub fn pfe_cuda_batch_dev_py(
         period: period_range,
         smoothing: smoothing_range,
     };
-    let inner = py.allow_threads(|| {
-        let cuda = CudaPfe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.pfe_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
-    Ok(DeviceArrayF32Py { inner })
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| {
+            let cuda =
+                CudaPfe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let dev = cuda
+                .pfe_batch_dev(slice_in, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, PyErr>((dev, cuda.context_arc(), cuda.device_id()))
+        })?;
+    Ok(PfeDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1380,18 +1701,22 @@ pub fn pfe_cuda_many_series_one_param_dev_py(
     period: usize,
     smoothing: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<PfeDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let tm_slice = data_tm.as_slice()?;
-    let inner = py.allow_threads(|| {
-        let cuda = CudaPfe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.pfe_many_series_one_param_time_major_dev(tm_slice, cols, rows, period, smoothing)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
-    Ok(DeviceArrayF32Py { inner })
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| {
+            let cuda =
+                CudaPfe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let dev = cuda
+                .pfe_many_series_one_param_time_major_dev(tm_slice, cols, rows, period, smoothing)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, PyErr>((dev, cuda.context_arc(), cuda.device_id()))
+        })?;
+    Ok(PfeDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(feature = "python")]
@@ -1537,7 +1862,7 @@ pub fn pfe_batch_into(
     s_start: usize,
     s_end: usize,
     s_step: usize,
-) -> Result<usize, JsValue> {
+    ) -> Result<usize, JsValue> {
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer"));
     }
@@ -1547,12 +1872,18 @@ pub fn pfe_batch_into(
             period: (p_start, p_end, p_step),
             smoothing: (s_start, s_end, s_step),
         };
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let rows = combos.len();
+        let total = len
+            .checked_mul(rows)
+            .ok_or_else(|| JsValue::from_str("pfe_batch_into: rows*cols overflow"))?;
         let combos = pfe_batch_inner_into(
             data,
             &sweep,
             detect_best_kernel(),
             false,
-            std::slice::from_raw_parts_mut(out_ptr, len * expand_grid(&sweep).len()),
+            std::slice::from_raw_parts_mut(out_ptr, total),
         )
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(combos.len())

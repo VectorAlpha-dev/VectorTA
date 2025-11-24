@@ -9,7 +9,7 @@
 //!
 //! ## Errors
 //! - **EmptyData**: bop: Input data is empty.
-//! - **InputLengthsMismatch**: bop: Input arrays have different lengths with specific details.
+//! - **InputLengthsMismatch**: bop: Input lengths mismatch with detailed lengths.
 //!
 //! ## Returns
 //! - **`Ok(BopOutput)`** on success, containing a `Vec<f64>` with the BOP values.
@@ -27,10 +27,10 @@
 //! assert!((out.values[0] - 0.5).abs() < 1e-12);
 //! ```
 //!
-//! ## Developer Notes
-//! - SIMD implemented but disabled by default for BOP; division-bound and underperforms scalar on common CPUs.
-//! - Streaming enabled (O(1)); cold fallback path for denom ≤ 0.0 to improve layout/prediction.
-//! - Memory optimization: ✅ Uses alloc_with_nan_prefix (zero-copy). Batch supported.
+//! ## Decision Log
+//! - SIMD present but disabled by default (division throughput bound); scalar path is consistently faster.
+//! - CUDA wrapper present; Python interop provides CAI v3 + DLPack; results are synchronized before return.
+//! - Memory: uses zero-copy warmup allocation; batch path is 1×N and preserves scalar semantics.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -39,7 +39,7 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyAny, PyDict, PyList};
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -61,7 +61,11 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaBop;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum BopData<'a> {
@@ -125,17 +129,29 @@ pub struct BopOutput {
     pub values: Vec<f64>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone, Copy)]
 pub enum BopError {
-    #[error("bop: Input data is empty.")]
-    EmptyData,
-    #[error("bop: Input lengths mismatch - open: {open_len}, high: {high_len}, low: {low_len}, close: {close_len}")]
+    #[error("bop: Input data is empty")]
+    EmptyInputData,
+    #[error(
+        "bop: Input lengths mismatch - open={open_len} high={high_len} low={low_len} close={close_len}"
+    )]
     InputLengthsMismatch {
         open_len: usize,
         high_len: usize,
         low_len: usize,
         close_len: usize,
     },
+    #[error("bop: output length mismatch: expected={expected} got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("bop: all values are NaN")]
+    AllValuesNaN,
+    #[error("bop: not enough valid data (needed={needed}, valid={valid})")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("bop: invalid range (start={start}, end={end}, step={step})")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("bop: invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -209,7 +225,7 @@ pub fn bop_with_kernel(input: &BopInput, kernel: Kernel) -> Result<BopOutput, Bo
 
     let len = open.len();
     if len == 0 {
-        return Err(BopError::EmptyData);
+        return Err(BopError::EmptyInputData);
     }
     if high.len() != len || low.len() != len || close.len() != len {
         return Err(BopError::InputLengthsMismatch {
@@ -662,7 +678,7 @@ pub fn bop_batch_with_kernel(
 ) -> Result<BopBatchOutput, BopError> {
     let len = open.len();
     if len == 0 {
-        return Err(BopError::EmptyData);
+        return Err(BopError::EmptyInputData);
     }
     if high.len() != len || low.len() != len || close.len() != len {
         return Err(BopError::InputLengthsMismatch {
@@ -679,6 +695,13 @@ pub fn bop_batch_with_kernel(
 
     let rows = 1usize;
     let cols = len;
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(BopError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 1,
+        })?;
 
     // 1×N matrix, zero extra copies
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -689,6 +712,10 @@ pub fn bop_batch_with_kernel(
     let out_f64: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
+    // Reject explicit non-batch kernels passed to batch path to surface clear errors
+    if !matches!(kernel, Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch) {
+        return Err(BopError::InvalidKernelForBatch(kernel));
+    }
     // SIMD underperforms for BOP; prefer scalar batch for Auto.
     let chosen = match kernel {
         Kernel::Auto => Kernel::ScalarBatch,
@@ -739,7 +766,7 @@ fn bop_batch_inner_into(
 ) -> Result<(), BopError> {
     let len = open.len();
     if len == 0 {
-        return Err(BopError::EmptyData);
+        return Err(BopError::EmptyInputData);
     }
     if high.len() != len || low.len() != len || close.len() != len {
         return Err(BopError::InputLengthsMismatch {
@@ -750,11 +777,9 @@ fn bop_batch_inner_into(
         });
     }
     if out.len() != len {
-        return Err(BopError::InputLengthsMismatch {
-            open_len: len,
-            high_len: high.len(),
-            low_len: low.len(),
-            close_len: out.len(),
+        return Err(BopError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
         });
     }
 
@@ -766,8 +791,15 @@ fn bop_batch_inner_into(
     // Fill the warmup period with NaN
     out[..warmup_period].fill(f64::NAN);
 
+    if !matches!(
+        kernel,
+        Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch
+    ) {
+        return Err(BopError::InvalidKernelForBatch(kernel));
+    }
+    // SIMD underperforms for BOP; prefer scalar batch for Auto to match scalar semantics.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         k => k,
     };
 
@@ -1612,6 +1644,201 @@ impl BopStreamPy {
     }
 }
 
+// ---------------- CUDA Python VRAM handle ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct BopDeviceArrayF32Py {
+    pub(crate) buf: DeviceBuffer<f32>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl BopDeviceArrayF32Py {
+    #[inline]
+    fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
+
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.device_ptr() as usize, false))?;
+        // Stream omitted: producing CUDA stream is synchronized before return.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, _dl_device=None, _copy=None))]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<&PyAny>,
+        max_version: Option<(u8, u8)>,
+        _dl_device: Option<&PyAny>,
+        _copy: Option<&PyAny>,
+    ) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct DlpGuard {
+            shape: Box<[i64; 2]>,
+            strides: Box<[i64; 2]>,
+            _ctx: Arc<Context>,
+        }
+
+        extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                let cname = pyo3::ffi::PyCapsule_GetName(capsule);
+                if cname.is_null() {
+                    return;
+                }
+                let rust_cstr = std::ffi::CStr::from_ptr(cname);
+                let name_bytes = rust_cstr.to_bytes();
+                let (get_name, used_name) = if name_bytes == b"dltensor_versioned" {
+                    (b"dltensor_versioned\0", b"used_dltensor_versioned\0")
+                } else {
+                    (b"dltensor\0", b"used_dltensor\0")
+                };
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    get_name.as_ptr() as *const _,
+                ) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter {
+                        del(ptr);
+                    }
+                    pyo3::ffi::PyCapsule_SetName(capsule, used_name.as_ptr() as *const _);
+                }
+            }
+        }
+
+        let _ = stream; // producer is synchronized; ignore consumer stream per Array API.
+
+        let elem_count = self.rows.saturating_mul(self.cols);
+        let data_ptr: *mut c_void = if elem_count == 0 {
+            std::ptr::null_mut()
+        } else {
+            self.device_ptr() as usize as *mut c_void
+        };
+
+        let shape = Box::new([self.rows as i64, self.cols as i64]);
+        let strides = Box::new([self.cols as i64, 1i64]);
+
+        let guard = Box::new(DlpGuard {
+            shape,
+            strides,
+            _ctx: self.ctx.clone(),
+        });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice {
+                    device_type: 2,
+                    device_id: self.device_id as i32,
+                },
+                ndim: 2,
+                dtype: DLDataType {
+                    code: 2,
+                    bits: 32,
+                    lanes: 1,
+                },
+                shape: guard_ref.shape.as_ptr() as *mut i64,
+                strides: guard_ref.strides.as_ptr() as *mut i64,
+                byte_offset: 0,
+            },
+            manager_ctx: guard_ptr as *mut c_void,
+            deleter: Some(managed_deleter),
+        });
+        let mt_raw = Box::into_raw(mt);
+
+        let use_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+        let name = if use_versioned {
+            b"dltensor_versioned\0"
+        } else {
+            b"dltensor\0"
+        };
+
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_raw as *mut c_void,
+                name.as_ptr() as *const _,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe {
+                managed_deleter(mt_raw);
+            }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "bop_batch")]
 #[pyo3(signature = (open, high, low, close, *, kernel=None))]
@@ -1636,15 +1863,18 @@ pub fn bop_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     // For BOP batch, we have only 1 row since BOP has no parameters
-    let rows = 1;
+    let rows = 1usize;
     let cols = open_slice.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("bop_batch: rows*cols overflow"))?;
 
     // Pre-allocate output array (OK for batch operations)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Compute without GIL - write directly to pre-allocated array
-    py.allow_threads(|| {
+    let result = py.allow_threads(|| {
         bop_batch_inner_into(
             open_slice,
             high_slice,
@@ -1653,8 +1883,15 @@ pub fn bop_batch_py<'py>(
             kern,
             slice_out,
         )
-    })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    });
+    if let Err(e) = result {
+        let msg = match e {
+            BopError::EmptyInputData => "Input data is empty".to_string(),
+            BopError::InputLengthsMismatch { .. } => "Input lengths mismatch".to_string(),
+            _ => e.to_string(),
+        };
+        return Err(PyValueError::new_err(msg));
+    }
 
     let d = PyDict::new(py);
     d.set_item("values", out_arr.reshape((rows, cols))?)?;
@@ -1680,14 +1917,20 @@ pub fn bop_into_slice(
 ) -> Result<(), BopError> {
     let len = open.len();
     if len == 0 {
-        return Err(BopError::EmptyData);
+        return Err(BopError::EmptyInputData);
     }
-    if high.len() != len || low.len() != len || close.len() != len || dst.len() != len {
+    if high.len() != len || low.len() != len || close.len() != len {
         return Err(BopError::InputLengthsMismatch {
             open_len: len,
             high_len: high.len(),
             low_len: low.len(),
             close_len: close.len(),
+        });
+    }
+    if dst.len() != len {
+        return Err(BopError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
         });
     }
 
@@ -1852,7 +2095,7 @@ pub fn bop_cuda_batch_dev_py(
     low: numpy::PyReadonlyArray1<'_, f32>,
     close: numpy::PyReadonlyArray1<'_, f32>,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<Py<BopDeviceArrayF32Py>> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -1868,12 +2111,24 @@ pub fn bop_cuda_batch_dev_py(
     {
         return Err(PyValueError::new_err("empty or mismatched OHLC lengths"));
     }
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaBop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.bop_batch_dev(open_slice, high_slice, low_slice, close_slice)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let dev = cuda
+            .bop_batch_dev(open_slice, high_slice, low_slice, close_slice)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((dev, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let handle = BopDeviceArrayF32Py {
+        buf: inner.buf,
+        rows: inner.rows,
+        cols: inner.cols,
+        ctx,
+        device_id: dev_id,
+    };
+    let obj = Py::new(py, handle)?;
+    Ok(obj)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1888,7 +2143,7 @@ pub fn bop_cuda_many_series_one_param_dev_py(
     cols: usize,
     rows: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<Py<BopDeviceArrayF32Py>> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -1907,19 +2162,31 @@ pub fn bop_cuda_many_series_one_param_dev_py(
     {
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaBop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.bop_many_series_one_param_time_major_dev(
-            open_slice,
-            high_slice,
-            low_slice,
-            close_slice,
-            cols,
-            rows,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let dev = cuda
+            .bop_many_series_one_param_time_major_dev(
+                open_slice,
+                high_slice,
+                low_slice,
+                close_slice,
+                cols,
+                rows,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((dev, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let handle = BopDeviceArrayF32Py {
+        buf: inner.buf,
+        rows: inner.rows,
+        cols: inner.cols,
+        ctx,
+        device_id: dev_id,
+    };
+    let obj = Py::new(py, handle)?;
+    Ok(obj)
 }
 
 #[cfg(feature = "wasm")]

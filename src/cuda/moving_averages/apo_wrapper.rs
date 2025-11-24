@@ -249,7 +249,9 @@ impl CudaApo {
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
         // VRAM estimate
-        let elems = num_series * series_len;
+        let elems = num_series
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaApoError::InvalidInput("num_series*series_len overflow".into()))?;
         let in_bytes = elems.checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaApoError::InvalidInput("in bytes overflow".into()))?;
         let first_bytes = first_valids.len().checked_mul(std::mem::size_of::<i32>())
@@ -297,7 +299,15 @@ impl CudaApo {
             BatchKernelPolicy::Auto => 128u32,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
+        let gx = u32::try_from(n_combos).map_err(|_| CudaApoError::LaunchConfigTooLarge {
+            gx: u32::MAX,
+            gy: 1,
+            gz: 1,
+            bx: block_x,
+            by: 1,
+            bz: 1,
+        })?;
+        let grid: GridSize = (gx, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
@@ -306,9 +316,12 @@ impl CudaApo {
             let mut sa_ptr = d_sa.as_device_ptr().as_raw();
             let mut lp_ptr = d_lp.as_device_ptr().as_raw();
             let mut la_ptr = d_la.as_device_ptr().as_raw();
-            let mut len_i = series_len as i32;
-            let mut first_i = first_valid as i32;
-            let mut n_i = n_combos as i32;
+            let mut len_i = i32::try_from(series_len)
+                .map_err(|_| CudaApoError::InvalidInput("series_len too large".into()))?;
+            let mut first_i = i32::try_from(first_valid)
+                .map_err(|_| CudaApoError::InvalidInput("first_valid too large".into()))?;
+            let mut n_i = i32::try_from(n_combos)
+                .map_err(|_| CudaApoError::InvalidInput("n_combos too large".into()))?;
             let mut out_ptr = d_out.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut p_ptr as *mut _ as *mut c_void,
@@ -347,7 +360,15 @@ impl CudaApo {
             ManySeriesKernelPolicy::Auto => 128u32,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
         };
-        let grid: GridSize = (num_series as u32, 1, 1).into();
+        let gx = u32::try_from(num_series).map_err(|_| CudaApoError::LaunchConfigTooLarge {
+            gx: u32::MAX,
+            gy: 1,
+            gz: 1,
+            bx: block_x,
+            by: 1,
+            bz: 1,
+        })?;
+        let grid: GridSize = (gx, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
@@ -357,8 +378,10 @@ impl CudaApo {
             let mut sa_f = short_alpha;
             let mut lp_i = long_period;
             let mut la_f = long_alpha;
-            let mut ns_i = num_series as i32;
-            let mut sl_i = series_len as i32;
+            let mut ns_i = i32::try_from(num_series)
+                .map_err(|_| CudaApoError::InvalidInput("num_series too large".into()))?;
+            let mut sl_i = i32::try_from(series_len)
+                .map_err(|_| CudaApoError::InvalidInput("series_len too large".into()))?;
             let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,

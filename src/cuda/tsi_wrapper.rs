@@ -14,7 +14,7 @@ use crate::cuda::moving_averages::alma_wrapper::{
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::tsi::{TsiBatchRange, TsiParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -22,23 +22,28 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaTsiError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaTsiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaTsiError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaTsiError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaTsiError {}
 
 #[derive(Clone, Copy, Debug)]
 pub struct CudaTsiPolicy {
@@ -57,7 +62,8 @@ impl Default for CudaTsiPolicy {
 pub struct CudaTsi {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaTsiPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -69,10 +75,9 @@ pub struct CudaTsi {
 
 impl CudaTsi {
     pub fn new(device_id: usize) -> Result<Self, CudaTsiError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/tsi_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
@@ -81,20 +86,21 @@ impl CudaTsi {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) =
+                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaTsiError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaTsiPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -110,10 +116,78 @@ impl CudaTsi {
     }
 
     #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
+    }
+
+    #[inline]
+    fn validate_launch_dims(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaTsiError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        let (gx, gy, gz) = grid;
+        let (bx, by, bz) = block;
+        if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 {
+            return Err(CudaTsiError::InvalidInput(
+                "zero-sized grid or block".into(),
+            ));
+        }
+        if gx > max_gx || gy > max_gy || gz > max_gz || bx > max_bx || by > max_by || bz > max_bz
+        {
+            return Err(CudaTsiError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
+    }
+
+    #[inline]
     pub fn synchronize(&self) -> Result<(), CudaTsiError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
     }
 
     // ---------------- One-series × many-params (batch) ----------------
@@ -131,12 +205,7 @@ impl CudaTsi {
             .position(|v| v.is_finite())
             .ok_or_else(|| CudaTsiError::InvalidInput("all values are NaN/inf".into()))?;
 
-        let combos = expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaTsiError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = expand_grid(sweep)?;
         // Validate and marshal params
         let mut longs_i32 = Vec::<i32>::with_capacity(combos.len());
         let mut shorts_i32 = Vec::<i32>::with_capacity(combos.len());
@@ -159,32 +228,61 @@ impl CudaTsi {
         }
 
         // VRAM estimates: choose between plain row-major path and fast path (TM + transpose)
-        let in_bytes = len * std::mem::size_of::<f32>();
-        let params_bytes = 2 * combos.len() * std::mem::size_of::<i32>();
-        let out_bytes = combos.len() * len * std::mem::size_of::<f32>();
-        let plain_required = in_bytes + params_bytes + out_bytes;
-        let fast_extra = (2 * len + (len * combos.len())) * std::mem::size_of::<f32>(); // mom, amom, out_tm
-        let fast_required = plain_required + fast_extra;
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let in_bytes = len
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let params_elems = combos
+            .len()
+            .checked_mul(2usize)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let params_bytes = params_elems
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let out_elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let plain_required = in_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let fast_extra_terms = len
+            .checked_mul(2)
+            .and_then(|v| v.checked_add(out_elems))
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let fast_extra = fast_extra_terms
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let fast_required = plain_required
+            .checked_add(fast_extra)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
         let head = 64usize * 1024 * 1024;
-        let (mut free_ok_plain, mut free_ok_fast) = (true, true);
-        if let Ok((free, _)) = mem_get_info() {
-            free_ok_plain = plain_required.saturating_add(head) <= free;
-            free_ok_fast = fast_required.saturating_add(head) <= free;
-            if !free_ok_plain {
-                return Err(CudaTsiError::InvalidInput("insufficient VRAM".into()));
+        let mut free_ok_plain = CudaTsi::will_fit(plain_required, head);
+        let mut free_ok_fast = CudaTsi::will_fit(fast_required, head);
+        if !free_ok_plain {
+            if let Some((free, _)) = CudaTsi::device_mem_info() {
+                return Err(CudaTsiError::OutOfMemory {
+                    required: plain_required,
+                    free,
+                    headroom: head,
+                });
+            } else {
+                return Err(CudaTsiError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
             }
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices_f32).map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
-        let d_longs =
-            DeviceBuffer::from_slice(&longs_i32).map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
-        let d_shorts =
-            DeviceBuffer::from_slice(&shorts_i32).map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(combos.len() * len)
-                .map_err(|e| CudaTsiError::Cuda(e.to_string()))?
-        };
+        let d_prices = DeviceBuffer::from_slice(prices_f32)?;
+        let d_longs = DeviceBuffer::from_slice(&longs_i32)?;
+        let d_shorts = DeviceBuffer::from_slice(&shorts_i32)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems)? };
 
         // Heuristic: prefer fast param-parallel path on larger sweeps if VRAM allows
         let prefer_fast = combos.len() >= 32 && len >= 4_096 && free_ok_fast;
@@ -219,7 +317,7 @@ impl CudaTsi {
                     block_x,
                 )?;
                 // 3) transpose into row-major layout expected by callers
-                self.launch_transpose_tm_to_rm(&s.out_tm, len, combos.len(), &mut d_out)?;
+            self.launch_transpose_tm_to_rm(&s.out_tm, len, combos.len(), &mut d_out)?;
                 // Put scratch back
                 self.scratch = Some(s);
             }
@@ -274,15 +372,17 @@ impl CudaTsi {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
             _ => 256,
         };
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
+        let gx = n_combos as u32;
+        let grid: GridSize = (gx, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch_dims((gx, 1, 1), (block_x, 1, 1))?;
         self.last_batch = Some(BatchKernelSelected::Plain { block_x });
         self.maybe_log_batch_debug();
 
         let func = self
             .module
             .get_function("tsi_batch_f32")
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTsiError::MissingKernelSymbol { name: "tsi_batch_f32" })?;
 
         unsafe {
             let mut p_ptr = d_prices.as_device_ptr().as_raw();
@@ -301,9 +401,7 @@ impl CudaTsi {
                 &mut combos_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -338,7 +436,10 @@ impl CudaTsi {
         if cols == 0 || rows == 0 {
             return Err(CudaTsiError::InvalidInput("cols/rows zero".into()));
         }
-        if prices_tm_f32.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        if prices_tm_f32.len() != expected {
             return Err(CudaTsiError::InvalidInput("matrix size mismatch".into()));
         }
         if long_period == 0 || short_period == 0 {
@@ -370,25 +471,41 @@ impl CudaTsi {
         // VRAM: inputs + first_valids + output
         let elems = cols
             .checked_mul(rows)
-            .ok_or_else(|| CudaTsiError::InvalidInput("overflow".into()))?;
-        let in_bytes = elems * std::mem::size_of::<f32>();
-        let fv_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = elems * std::mem::size_of::<f32>();
-        if let Ok((free, _)) = mem_get_info() {
-            let head = 64usize * 1024 * 1024;
-            let required = in_bytes + fv_bytes + out_bytes;
-            if required.saturating_add(head) > free {
-                return Err(CudaTsiError::InvalidInput("insufficient VRAM".into()));
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let in_bytes = elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let fv_bytes = cols
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let head = 64usize * 1024 * 1024;
+        let required = in_bytes
+            .checked_add(fv_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        if !CudaTsi::will_fit(required, head) {
+            if let Some((free, _)) = CudaTsi::device_mem_info() {
+                return Err(CudaTsiError::OutOfMemory {
+                    required,
+                    free,
+                    headroom: head,
+                });
+            } else {
+                return Err(CudaTsiError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
             }
         }
 
-        let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(elems).map_err(|e| CudaTsiError::Cuda(e.to_string()))?
-        };
+        let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems)? };
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -432,13 +549,16 @@ impl CudaTsi {
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
         self.last_many = Some(ManySeriesKernelSelected::OneD { block_x });
         self.maybe_log_many_debug();
 
         let func = self
             .module
             .get_function("tsi_many_series_one_param_f32")
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTsiError::MissingKernelSymbol {
+                name: "tsi_many_series_one_param_f32",
+            })?;
 
         unsafe {
             let mut p_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -457,9 +577,7 @@ impl CudaTsi {
                 &mut fv_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -484,12 +602,12 @@ impl CudaTsi {
         if !need_new {
             return Ok(());
         }
-        let mom = unsafe { DeviceBuffer::<f32>::uninitialized(len) }
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
-        let amom = unsafe { DeviceBuffer::<f32>::uninitialized(len) }
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
-        let out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(len * combos) }
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        let elems_tm = len
+            .checked_mul(combos)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let mom = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
+        let amom = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
+        let out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(elems_tm) }?;
         self.scratch = Some(TsiScratch {
             mom,
             amom,
@@ -511,7 +629,9 @@ impl CudaTsi {
         let func = self
             .module
             .get_function("tsi_prepare_momentum_f32")
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTsiError::MissingKernelSymbol {
+                name: "tsi_prepare_momentum_f32",
+            })?;
         unsafe {
             let mut p_ptr = d_prices.as_device_ptr().as_raw();
             let mut len_i = len as i32;
@@ -527,9 +647,8 @@ impl CudaTsi {
             ];
             let grid: GridSize = (1u32, 1u32, 1u32).into();
             let block: BlockSize = (1u32, 1u32, 1u32).into();
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+            self.validate_launch_dims((1, 1, 1), (1, 1, 1))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -549,7 +668,9 @@ impl CudaTsi {
         let func = self
             .module
             .get_function("tsi_one_series_many_params_tm_f32")
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTsiError::MissingKernelSymbol {
+                name: "tsi_one_series_many_params_tm_f32",
+            })?;
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         unsafe {
             let mut mom_ptr = d_mom.as_device_ptr().as_raw();
@@ -572,9 +693,8 @@ impl CudaTsi {
             ];
             let grid: GridSize = (grid_x.max(1), 1u32, 1u32).into();
             let block: BlockSize = (block_x, 1u32, 1u32).into();
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+            self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -589,7 +709,9 @@ impl CudaTsi {
         let func = self
             .module
             .get_function("transpose_tm_to_rm_f32")
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTsiError::MissingKernelSymbol {
+                name: "transpose_tm_to_rm_f32",
+            })?;
         let grid_x = ((cols as u32) + 31) / 32;
         let grid_y = ((rows as u32) + 31) / 32;
         let block: BlockSize = (32u32, 8u32, 1u32).into();
@@ -605,24 +727,61 @@ impl CudaTsi {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
             let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1u32).into();
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+            self.validate_launch_dims((grid_x.max(1), grid_y.max(1), 1), (32, 8, 1))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
 }
 
-fn expand_grid(r: &TsiBatchRange) -> Vec<TsiParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &TsiBatchRange) -> Result<Vec<TsiParams>, CudaTsiError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaTsiError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let vals: Vec<usize> = (start..=end).step_by(step).collect();
+            if vals.is_empty() {
+                return Err(CudaTsiError::InvalidInput(format!(
+                    "invalid range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            return Ok(vals);
+        }
+        let mut v = start;
+        let mut out = Vec::new();
+        loop {
+            out.push(v);
+            let guard = end.saturating_add(step);
+            if v <= guard {
+                break;
+            }
+            v = v.saturating_sub(step);
+        }
+        if out.is_empty() {
+            return Err(CudaTsiError::InvalidInput(format!(
+                "invalid range: start={}, end={}, step={}",
+                start, end, step
+            )));
+        }
+        if *out.last().unwrap() != end {
+            out.push(end);
+        }
+        Ok(out)
     }
-    let longs = axis_usize(r.long_period);
-    let shorts = axis_usize(r.short_period);
-    let mut out = Vec::with_capacity(longs.len() * shorts.len());
+    let longs = axis_usize(r.long_period)?;
+    let shorts = axis_usize(r.short_period)?;
+    if longs.is_empty() || shorts.is_empty() {
+        return Err(CudaTsiError::InvalidInput(
+            "no parameter combinations".into(),
+        ));
+    }
+    let total = longs
+        .len()
+        .checked_mul(shorts.len())
+        .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+    let mut out = Vec::with_capacity(total);
     for &l in &longs {
         for &s in &shorts {
             out.push(TsiParams {
@@ -631,7 +790,7 @@ fn expand_grid(r: &TsiBatchRange) -> Vec<TsiParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 // ---------- Benches ----------

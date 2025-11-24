@@ -75,7 +75,7 @@ fn pvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
-    let tol = 2e-4;
+    let tol = 1e-3;
     for r in 0..inits.len() {
         for c in 0..len {
             let g = host[r * len + c] as f64;

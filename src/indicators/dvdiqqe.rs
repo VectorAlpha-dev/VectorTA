@@ -22,6 +22,7 @@
 //! - Scalar optimized: loop-jammed PVI/NVI build and range computation; no extra volume intermediates.
 //! - Batch (flat) optimized: precomputes volume selection + PVI/NVI once and reuses across rows.
 //! - Streaming update: O(1) enabled; seeds TLs at first ready tick and matches batch warmup parity.
+//! - CUDA wrapper: typed errors + VRAM fit checks; Python interop provides CAI v3 + DLPack with context guard.
 //!
 //! ### TODO
 //! - Consider O(1) streaming update for trailing levels.
@@ -32,7 +33,7 @@
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
@@ -48,7 +49,295 @@ use wasm_bindgen::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::dvdiqqe_wrapper::CudaDvdiqqe;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context as CudaContext;
+
+// Python CUDA VRAM handle for dvdiqqe that keeps a CUDA context alive
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceDvdiqqePlanePy {
+    pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
+    pub(crate) _ctx: std::sync::Arc<CudaContext>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceDvdiqqePlanePy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = &self.inner;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        d.set_item("version", 3)?; // stream omitted (producer synchronizes)
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        Ok((2, self.device_id as i32))
+    }
+
+    // __dlpack__(self, stream=None, max_version=None, dl_device=None, copy=None)
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+        use std::os::raw::c_char;
+
+        // Validate optional dl_device. We cannot copy; require same device if provided.
+        if let Some((dtype, devid)) = dl_device {
+            if dtype != 2 || devid as u32 != self.device_id {
+                if copy.unwrap_or(false) {
+                    return Err(PyNotImplementedError::new_err(
+                        "__dlpack__ copy path is not implemented for dvdiqqe CUDA buffers",
+                    ));
+                }
+                return Err(PyValueError::new_err(
+                    "dl_device mismatch and copy not requested",
+                ));
+            }
+        }
+
+        // Accept Array API stream semantics but reject 0 for CUDA.
+        if let Some(obj) = stream {
+            if !obj.is_none() {
+                if let Ok(i) = obj.extract::<i64>() {
+                    if i == 0 {
+                        return Err(PyValueError::new_err(
+                            "__dlpack__: stream 0 is disallowed for CUDA",
+                        ));
+                    }
+                    // 1 (legacy default), 2 (per-thread default), or pointer are accepted but unused
+                    // because producer work is synchronized before returning.
+                }
+            }
+        }
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLPackVersion {
+            major: u32,
+            minor: u32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: std::sync::Arc<CudaContext>,
+            _arr: crate::cuda::moving_averages::DeviceArrayF32,
+        }
+
+        extern "C" fn managed_deleter_legacy(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+        extern "C" fn managed_deleter_versioned(p: *mut DLManagedTensorVersioned) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        // Capsule destructors honoring rename-to-"used_*" rule per DLPack Python spec.
+        unsafe extern "C" fn capsule_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+        unsafe extern "C" fn capsule_destructor_versioned(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        // Move the underlying VRAM handle into the guard; leave a tiny placeholder in self.
+        let inner = std::mem::replace(
+            &mut self.inner,
+            crate::cuda::moving_averages::DeviceArrayF32 {
+                buf: cust::memory::DeviceBuffer::from_slice(&[])
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                rows: 0,
+                cols: 0,
+            },
+        );
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let n_elems = (inner.rows as usize).saturating_mul(inner.cols as usize);
+        // data must be NULL for size-zero tensors per DLPack C spec
+        let data_ptr: *mut c_void = if n_elems == 0 {
+            std::ptr::null_mut()
+        } else {
+            inner.buf.as_device_ptr().as_raw() as *mut c_void
+        };
+
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1i64]); // strides are in elements for DLPack
+        let guard = Box::new(DlpGuard {
+            _shape: shape,
+            _strides: strides,
+            _ctx: self._ctx.clone(),
+            _arr: inner,
+        });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        if want_versioned {
+            let mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 0 },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(managed_deleter_versioned),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+            });
+            let raw = Box::into_raw(mt);
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    raw as *mut c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor_versioned),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { managed_deleter_versioned(raw); }
+                return Err(PyValueError::new_err(
+                    "failed to create DLPack v1.x capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(managed_deleter_legacy),
+            });
+            let raw = Box::into_raw(mt);
+            let name = b"dltensor\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    raw as *mut c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(capsule_destructor_legacy),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { managed_deleter_legacy(raw as *mut DLManagedTensor); }
+                return Err(PyValueError::new_err(
+                    "failed to create legacy DLPack capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        }
+    }
+}
 use crate::indicators::moving_averages::ema::{ema_with_kernel, EmaInput, EmaParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -239,6 +528,21 @@ pub enum DvdiqqeError {
 
     #[error("Invalid multiplier: {which} multiplier must be positive (got {multiplier})")]
     InvalidMultiplier { multiplier: f64, which: String },
+
+    #[error("dvdiqqe: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("dvdiqqe: Invalid range (usize): start={start} end={end} step={step}")]
+    InvalidRangeUsize { start: usize, end: usize, step: usize },
+
+    #[error("dvdiqqe: Invalid range (f64): start={start} end={end} step={step}")]
+    InvalidRangeF64 { start: f64, end: f64, step: f64 },
+
+    #[error("dvdiqqe: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
+
+    #[error("dvdiqqe: {0}")]
+    InvalidInput(String),
 
     #[error("dvdiqqe: EMA computation failed: {0}")]
     EmaError(String),
@@ -915,31 +1219,19 @@ pub fn dvdiqqe_into_slices(
     let (o, h, l, c, v, period, smoothing, fast, slow, vt, ct, tick, first) =
         dvdiqqe_prepare(input)?;
 
-    // Length checks to mirror alma's quirk
+    // Length checks
     let len = c.len();
     if dvdi_dst.len() != len {
-        return Err(DvdiqqeError::InvalidPeriod {
-            period: dvdi_dst.len(),
-            data_len: len,
-        });
+        return Err(DvdiqqeError::OutputLengthMismatch { expected: len, got: dvdi_dst.len() });
     }
     if fast_tl_dst.len() != len {
-        return Err(DvdiqqeError::InvalidPeriod {
-            period: fast_tl_dst.len(),
-            data_len: len,
-        });
+        return Err(DvdiqqeError::OutputLengthMismatch { expected: len, got: fast_tl_dst.len() });
     }
     if slow_tl_dst.len() != len {
-        return Err(DvdiqqeError::InvalidPeriod {
-            period: slow_tl_dst.len(),
-            data_len: len,
-        });
+        return Err(DvdiqqeError::OutputLengthMismatch { expected: len, got: slow_tl_dst.len() });
     }
     if center_dst.len() != len {
-        return Err(DvdiqqeError::InvalidPeriod {
-            period: center_dst.len(),
-            data_len: len,
-        });
+        return Err(DvdiqqeError::OutputLengthMismatch { expected: len, got: center_dst.len() });
     }
 
     dvdiqqe_compute_into(
@@ -996,7 +1288,15 @@ pub fn dvdiqqe_into_flat(
 ) -> Result<(), DvdiqqeError> {
     let (_, _, _, c, _, _, _, _, _, _, _, _, _) = dvdiqqe_prepare(input)?;
     let len = c.len();
-    assert_eq!(dst_4xlen.len(), 4 * len);
+    let expected = len
+        .checked_mul(4)
+        .ok_or_else(|| DvdiqqeError::InvalidInput("4*len overflow".into()))?;
+    if dst_4xlen.len() != expected {
+        return Err(DvdiqqeError::OutputLengthMismatch {
+            expected,
+            got: dst_4xlen.len(),
+        });
+    }
     let (dvdi, rest) = dst_4xlen.split_at_mut(len);
     let (fast, rest) = rest.split_at_mut(len);
     let (slow, cent) = rest.split_at_mut(len);
@@ -1387,31 +1687,64 @@ impl DvdiqqeBatchBuilder {
 
 /// Expand parameter grid for batch processing
 #[inline(always)]
-fn expand_grid(r: &DvdiqqeBatchRange) -> Vec<DvdiqqeParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &DvdiqqeBatchRange) -> Result<Vec<DvdiqqeParams>, DvdiqqeError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, DvdiqqeError> {
         if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
-    }
-
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step == 0.0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut curr = start;
-        while curr <= end + 1e-12 {
-            v.push(curr);
-            curr += step;
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                match cur.checked_add(step) { Some(n) => cur = n, None => break }
+            }
+        } else {
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                if cur < step { break; }
+                cur -= step;
+                if cur == usize::MAX { break; }
+                if cur == 0 && end > 0 { break; }
+            }
         }
-        v
+        if v.is_empty() {
+            return Err(DvdiqqeError::InvalidRangeUsize { start, end, step });
+        }
+        Ok(v)
     }
 
-    let periods = axis_usize(r.period);
-    let smoothings = axis_usize(r.smoothing_period);
-    let fasts = axis_f64(r.fast_multiplier);
-    let slows = axis_f64(r.slow_multiplier);
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, DvdiqqeError> {
+        if step == 0.0 || start == end {
+            return Ok(vec![start]);
+        }
+        let mut v = Vec::new();
+        if start < end {
+            let mut curr = start;
+            while curr <= end + 1e-12 {
+                v.push(curr);
+                curr += step;
+            }
+        } else {
+            let mut curr = start;
+            let step_abs = step.abs();
+            while curr >= end - 1e-12 {
+                v.push(curr);
+                curr -= step_abs;
+                if !curr.is_finite() { break; }
+            }
+        }
+        if v.is_empty() {
+            return Err(DvdiqqeError::InvalidRangeF64 { start, end, step });
+        }
+        Ok(v)
+    }
+
+    let periods = axis_usize(r.period)?;
+    let smoothings = axis_usize(r.smoothing_period)?;
+    let fasts = axis_f64(r.fast_multiplier)?;
+    let slows = axis_f64(r.slow_multiplier)?;
 
     let mut combos = Vec::new();
     for &p in &periods {
@@ -1431,7 +1764,10 @@ fn expand_grid(r: &DvdiqqeBatchRange) -> Vec<DvdiqqeParams> {
             }
         }
     }
-    combos
+    if combos.is_empty() {
+        return Err(DvdiqqeError::InvalidInput("empty sweep".into()));
+    }
+    Ok(combos)
 }
 
 /// Batch calculation with kernel
@@ -1447,10 +1783,12 @@ pub fn dvdiqqe_batch_with_kernel(
     center_type: &str,
     tick_size: f64,
 ) -> Result<DvdiqqeBatchOutput, DvdiqqeError> {
+    if !matches!(k, Kernel::Auto) && !k.is_batch() {
+        return Err(DvdiqqeError::InvalidKernelForBatch(k));
+    }
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
-        other if other.is_batch() => other,
-        _ => k,
+        other => other,
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1485,10 +1823,12 @@ pub fn dvdiqqe_batch_with_kernel_flat(
     center_type: &str,
     tick_size: f64,
 ) -> Result<DvdiqqeBatchOutputFlat, DvdiqqeError> {
+    if !matches!(k, Kernel::Auto) && !k.is_batch() {
+        return Err(DvdiqqeError::InvalidKernelForBatch(k));
+    }
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
-        other if other.is_batch() => other,
-        _ => k,
+        other => other,
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1624,13 +1964,7 @@ fn dvdiqqe_batch_inner_flat(
     center_type: &str,
     tick_size: f64,
 ) -> Result<DvdiqqeBatchOutputFlat, DvdiqqeError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(DvdiqqeError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let rows = combos.len();
     let cols = close.len();
     if cols == 0 {
@@ -1639,6 +1973,13 @@ fn dvdiqqe_batch_inner_flat(
 
     // Allocate one slab: 4 × rows × cols
     let series = 4usize;
+    // checked arithmetic guards
+    let rows_cols = rows
+        .checked_mul(cols)
+        .ok_or_else(|| DvdiqqeError::InvalidInput("rows*cols overflow".into()))?;
+    let _ = series
+        .checked_mul(rows_cols)
+        .ok_or_else(|| DvdiqqeError::InvalidInput("series*rows*cols overflow".into()))?;
     let mut buf_mu = make_uninit_matrix(series * rows, cols);
 
     // Warm prefixes per row for all series using period
@@ -1876,7 +2217,7 @@ fn dvdiqqe_batch_inner_into(
     slow_out: &mut [f64],
     center_out: &mut [f64],
 ) -> Result<Vec<DvdiqqeParams>, DvdiqqeError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let cols = close.len();
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2594,10 +2935,10 @@ pub fn dvdiqqe_cuda_batch_dev_py(
     tick_size: f32,
     device_id: usize,
 ) -> PyResult<(
-    DeviceArrayF32Py,
-    DeviceArrayF32Py,
-    DeviceArrayF32Py,
-    DeviceArrayF32Py,
+    DeviceDvdiqqePlanePy,
+    DeviceDvdiqqePlanePy,
+    DeviceDvdiqqePlanePy,
+    DeviceDvdiqqePlanePy,
 )> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
@@ -2628,14 +2969,16 @@ pub fn dvdiqqe_cuda_batch_dev_py(
 
     let (dvdi, fast, slow, center) = py.allow_threads(|| {
         let cuda = CudaDvdiqqe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
         let quad = cuda
             .dvdiqqe_batch_dev(o, c, v_opt, &sweep, volume_type, center_type, tick_size)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((
-            DeviceArrayF32Py { inner: quad.dvdi },
-            DeviceArrayF32Py { inner: quad.fast },
-            DeviceArrayF32Py { inner: quad.slow },
-            DeviceArrayF32Py { inner: quad.center },
+            DeviceDvdiqqePlanePy { inner: quad.dvdi, _ctx: ctx.clone(), device_id: dev },
+            DeviceDvdiqqePlanePy { inner: quad.fast, _ctx: ctx.clone(), device_id: dev },
+            DeviceDvdiqqePlanePy { inner: quad.slow, _ctx: ctx.clone(), device_id: dev },
+            DeviceDvdiqqePlanePy { inner: quad.center, _ctx: ctx, device_id: dev },
         ))
     })?;
 
@@ -2661,10 +3004,10 @@ pub fn dvdiqqe_cuda_many_series_one_param_dev_py(
     tick_size: f32,
     device_id: usize,
 ) -> PyResult<(
-    DeviceArrayF32Py,
-    DeviceArrayF32Py,
-    DeviceArrayF32Py,
-    DeviceArrayF32Py,
+    DeviceDvdiqqePlanePy,
+    DeviceDvdiqqePlanePy,
+    DeviceDvdiqqePlanePy,
+    DeviceDvdiqqePlanePy,
 )> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
@@ -2691,6 +3034,8 @@ pub fn dvdiqqe_cuda_many_series_one_param_dev_py(
 
     let (dvdi, fast, slow, center) = py.allow_threads(|| {
         let cuda = CudaDvdiqqe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
         let quad = cuda
             .dvdiqqe_many_series_one_param_time_major_dev(
                 o_tm,
@@ -2708,10 +3053,10 @@ pub fn dvdiqqe_cuda_many_series_one_param_dev_py(
             )
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((
-            DeviceArrayF32Py { inner: quad.dvdi },
-            DeviceArrayF32Py { inner: quad.fast },
-            DeviceArrayF32Py { inner: quad.slow },
-            DeviceArrayF32Py { inner: quad.center },
+            DeviceDvdiqqePlanePy { inner: quad.dvdi, _ctx: ctx.clone(), device_id: dev },
+            DeviceDvdiqqePlanePy { inner: quad.fast, _ctx: ctx.clone(), device_id: dev },
+            DeviceDvdiqqePlanePy { inner: quad.slow, _ctx: ctx.clone(), device_id: dev },
+            DeviceDvdiqqePlanePy { inner: quad.center, _ctx: ctx, device_id: dev },
         ))
     })?;
 

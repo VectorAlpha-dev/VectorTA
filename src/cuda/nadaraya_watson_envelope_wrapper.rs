@@ -12,30 +12,34 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::nadaraya_watson_envelope::{NweBatchRange, NweParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
-use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaNweError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaNweError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaNweError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaNweError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaNweError {}
 
 pub struct DeviceNwePair {
     pub upper: DeviceArrayF32,
@@ -56,15 +60,15 @@ impl DeviceNwePair {
 pub struct CudaNwe {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: std::sync::Arc<Context>,
+    device_id: u32,
 }
 
 impl CudaNwe {
     pub fn new(device_id: usize) -> Result<Self, CudaNweError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = std::sync::Arc::new(Context::new(device)?);
         let ptx = include_str!(concat!(
             env!("OUT_DIR"),
             "/nadaraya_watson_envelope_kernel.ptx"
@@ -87,14 +91,13 @@ impl CudaNwe {
             )
         })
         .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
         })
     }
 
@@ -106,44 +109,137 @@ impl CudaNwe {
         }
     }
 
-    fn expand_grid(r: &NweBatchRange) -> Vec<NweParams> {
-        let mut bw = Vec::new();
-        let mut m = Vec::new();
-        let mut lb = Vec::new();
-        // bandwidth
-        if (r.bandwidth.2.abs() < 1e-12) || (r.bandwidth.0 == r.bandwidth.1) {
-            bw.push(r.bandwidth.0);
-        } else {
-            let mut v = r.bandwidth.0;
-            while v <= r.bandwidth.1 + 1e-12 {
-                bw.push(v);
-                v += r.bandwidth.2.max(1e-12);
-            }
-            while v <= r.bandwidth.1 + 1e-12 {
-                bw.push(v);
-                v += r.bandwidth.2.max(1e-12);
-            }
+    #[inline]
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaNweError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaNweError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
-        // multiplier
-        if (r.multiplier.2.abs() < 1e-12) || (r.multiplier.0 == r.multiplier.1) {
-            m.push(r.multiplier.0);
-        } else {
-            let mut v = r.multiplier.0;
-            while v <= r.multiplier.1 + 1e-12 {
-                m.push(v);
-                v += r.multiplier.2.max(1e-12);
+        Ok(())
+    }
+
+    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
+
+    fn expand_grid(r: &NweBatchRange) -> Result<Vec<NweParams>, CudaNweError> {
+        fn axis_usize(
+            (start, end, step): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaNweError> {
+            if step == 0 || start == end {
+                return Ok(vec![start]);
             }
-            while v <= r.multiplier.1 + 1e-12 {
-                m.push(v);
-                v += r.multiplier.2.max(1e-12);
+            if start < end {
+                return Ok((start..=end).step_by(step.max(1)).collect());
             }
+            let mut v = Vec::new();
+            let mut x = start as isize;
+            let end_i = end as isize;
+            let st = (step as isize).max(1);
+            while x >= end_i {
+                v.push(x as usize);
+                x -= st;
+            }
+            if v.is_empty() {
+                return Err(CudaNweError::InvalidInput(format!(
+                    "Invalid range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            Ok(v)
         }
-        // lookback
-        let step_lb = r.lookback.2.max(1);
-        for v in (r.lookback.0..=r.lookback.1).step_by(step_lb) {
-            lb.push(v);
+        fn axis_f64(
+            (start, end, step): (f64, f64, f64),
+        ) -> Result<Vec<f64>, CudaNweError> {
+            if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+                return Ok(vec![start]);
+            }
+            let st = step.abs();
+            if start < end {
+                let mut v = Vec::new();
+                let mut x = start;
+                while x <= end + 1e-12 {
+                    v.push(x);
+                    x += st;
+                }
+                if v.is_empty() {
+                    return Err(CudaNweError::InvalidInput(format!(
+                        "Invalid range: start={}, end={}, step={}",
+                        start, end, step
+                    )));
+                }
+                return Ok(v);
+            }
+            let mut v = Vec::new();
+            let mut x = start;
+            while x + 1e-12 >= end {
+                v.push(x);
+                x -= st;
+            }
+            if v.is_empty() {
+                return Err(CudaNweError::InvalidInput(format!(
+                    "Invalid range: start={}, end={}, step={}",
+                    start, end, step
+                )));
+            }
+            Ok(v)
         }
-        let mut out = Vec::with_capacity(bw.len() * m.len() * lb.len());
+
+        let bw = axis_f64(r.bandwidth)?;
+        let m = axis_f64(r.multiplier)?;
+        let lb = axis_usize(r.lookback)?;
+
+        let cap = bw
+            .len()
+            .checked_mul(m.len())
+            .and_then(|x| x.checked_mul(lb.len()))
+            .ok_or_else(|| CudaNweError::InvalidInput("range size overflow".into()))?;
+
+        let mut out = Vec::with_capacity(cap);
         for &b in &bw {
             for &mm in &m {
                 for &l in &lb {
@@ -155,7 +251,7 @@ impl CudaNwe {
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     fn compute_weights_row(bandwidth: f64, lookback: usize) -> (Vec<f32>, usize) {
@@ -203,12 +299,7 @@ impl CudaNwe {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaNweError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = Self::expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaNweError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = Self::expand_grid(sweep)?;
 
         let mut lookbacks = Vec::with_capacity(combos.len());
         let mut multipliers = Vec::with_capacity(combos.len());
@@ -230,7 +321,11 @@ impl CudaNwe {
             max_lb = max_lb.max(lb);
         }
 
-        let mut weights_flat = vec![0f32; combos.len() * max_lb];
+        let cap = combos
+            .len()
+            .checked_mul(max_lb)
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+        let mut weights_flat = vec![0f32; cap];
         for (row, prm) in combos.iter().enumerate() {
             let lb = prm.lookback.unwrap_or(500);
             let (row_w, _l) = Self::compute_weights_row(prm.bandwidth.unwrap_or(8.0), lb);
@@ -258,55 +353,97 @@ impl CudaNwe {
             Self::prepare_batch_inputs(prices, sweep)?;
         let n = combos.len();
 
-        // VRAM estimate (2 outputs)
-        let required = len * std::mem::size_of::<f32>()
-            + n * max_lb * std::mem::size_of::<f32>()
-            + n * std::mem::size_of::<i32>()
-            + n * std::mem::size_of::<f32>()
-            + 2 * n * len * std::mem::size_of::<f32>();
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaNweError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
-            return Err(CudaNweError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
+        // VRAM estimate (2 outputs) with checked arithmetic
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let mut required = 0usize;
+        required = required
+            .checked_add(
+                len.checked_mul(sz_f32)
+                    .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?,
+            )
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+        required = required
+            .checked_add(
+                n.checked_mul(max_lb)
+                    .and_then(|x| x.checked_mul(sz_f32))
+                    .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?,
+            )
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+        required = required
+            .checked_add(
+                n.checked_mul(sz_i32)
+                    .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?,
+            )
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+        required = required
+            .checked_add(
+                n.checked_mul(sz_f32)
+                    .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?,
+            )
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+        required = required
+            .checked_add(
+                n.checked_mul(len)
+                    .and_then(|x| x.checked_mul(2))
+                    .and_then(|x| x.checked_mul(sz_f32))
+                    .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?,
+            )
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Ok((free, _)) = mem_get_info() {
+                return Err(CudaNweError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaNweError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
         // Pinned host buffers for larger one-time copies; enable fully async DMA
-        let h_prices =
-            LockedBuffer::from_slice(prices).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let h_weights = LockedBuffer::from_slice(&weights_flat)
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        let h_prices = LockedBuffer::from_slice(prices).map_err(CudaNweError::from)?;
+        let h_weights = LockedBuffer::from_slice(&weights_flat).map_err(CudaNweError::from)?;
 
         // Device allocations
-        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let mut d_weights: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n * max_lb) }
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let d_looks =
-            DeviceBuffer::from_slice(&lookbacks).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let d_mults = DeviceBuffer::from_slice(&multipliers)
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n * len) }
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n * len) }
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        let mut d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaNweError::from)?;
+        let weights_len = n
+            .checked_mul(max_lb)
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+        let mut d_weights: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(weights_len) }.map_err(CudaNweError::from)?;
+        let d_looks = DeviceBuffer::from_slice(&lookbacks).map_err(CudaNweError::from)?;
+        let d_mults = DeviceBuffer::from_slice(&multipliers).map_err(CudaNweError::from)?;
+        let out_len = n
+            .checked_mul(len)
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+        let mut d_upper: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_len) }.map_err(CudaNweError::from)?;
+        let mut d_lower: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_len) }.map_err(CudaNweError::from)?;
 
         // Async H2D copies on non-blocking stream
         unsafe {
             d_prices
                 .async_copy_from(&h_prices, &self.stream)
-                .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+                .map_err(CudaNweError::from)?;
             d_weights
                 .async_copy_from(&h_weights, &self.stream)
-                .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+                .map_err(CudaNweError::from)?;
         }
 
         let func = self
             .module
             .get_function("nadaraya_watson_envelope_batch_f32")
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaNweError::MissingKernelSymbol {
+                name: "nadaraya_watson_envelope_batch_f32",
+            })?;
 
         // Optimized kernel: one block per combo; parallel dot products within block.
         // Use 128 threads per block by default and dynamic shared memory for weights + time tile.
@@ -314,6 +451,7 @@ impl CudaNwe {
         const NWE_TILE_T: usize = 64; // must match CUDA kernel constant
         let grid = GridSize::xy(1, n as u32);
         let block = BlockSize::xyz(NWE_THREADS, 1, 1);
+        self.validate_launch(grid.x, grid.y, grid.z, block.x, block.y, block.z)?;
         // s_w[L] + s_x[L+T-1] + s_mask[L+T-1]
         let smem_elems = max_lb + 2 * (max_lb + NWE_TILE_T - 1);
         let smem_bytes = (smem_elems * std::mem::size_of::<f32>()) as u32;
@@ -343,12 +481,12 @@ impl CudaNwe {
             ];
             self.stream
                 .launch(&func, grid, block, smem_bytes, args)
-                .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+                .map_err(CudaNweError::from)?;
         }
 
         self.stream
             .synchronize()
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+            .map_err(CudaNweError::from)?;
 
         let pair = DeviceNwePair {
             upper: DeviceArrayF32 { buf: d_upper, rows: n, cols: len },
@@ -411,44 +549,86 @@ impl CudaNwe {
         // weights pre-scaled
         let (w_row, _l) = Self::compute_weights_row(bandwidth, lookback);
 
-        let required = data_tm.len() * std::mem::size_of::<f32>()
-            + w_row.len() * std::mem::size_of::<f32>()
-            + first_valids.len() * std::mem::size_of::<i32>()
-            + 2 * data_tm.len() * std::mem::size_of::<f32>();
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaNweError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
-            return Err(CudaNweError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let mut required = 0usize;
+        required = required
+            .checked_add(
+                data_tm
+                    .len()
+                    .checked_mul(sz_f32)
+                    .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?,
+            )
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+        required = required
+            .checked_add(
+                w_row
+                    .len()
+                    .checked_mul(sz_f32)
+                    .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?,
+            )
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+        required = required
+            .checked_add(
+                first_valids
+                    .len()
+                    .checked_mul(sz_i32)
+                    .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?,
+            )
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+        required = required
+            .checked_add(
+                data_tm
+                    .len()
+                    .checked_mul(2)
+                    .and_then(|x| x.checked_mul(sz_f32))
+                    .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?,
+            )
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Ok((free, _)) = mem_get_info() {
+                return Err(CudaNweError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaNweError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
         // Optional but beneficial: pinned host for the large matrix + async copy
-        let h_tm =
-            LockedBuffer::from_slice(data_tm).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        let h_tm = LockedBuffer::from_slice(data_tm).map_err(CudaNweError::from)?;
+        let len_tm = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaNweError::InvalidInput("size overflow".into()))?;
+        let mut d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len_tm) }.map_err(CudaNweError::from)?;
         unsafe {
             d_prices
                 .async_copy_from(&h_tm, &self.stream)
-                .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+                .map_err(CudaNweError::from)?;
         }
-        let d_weights =
-            DeviceBuffer::from_slice(&w_row).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        let d_weights = DeviceBuffer::from_slice(&w_row).map_err(CudaNweError::from)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(CudaNweError::from)?;
+        let mut d_upper: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len_tm) }.map_err(CudaNweError::from)?;
+        let mut d_lower: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len_tm) }.map_err(CudaNweError::from)?;
 
         let func = self
             .module
             .get_function("nadaraya_watson_envelope_many_series_one_param_f32")
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaNweError::MissingKernelSymbol {
+                name: "nadaraya_watson_envelope_many_series_one_param_f32",
+            })?;
         let grid = GridSize::xy(1, cols as u32);
         let block = BlockSize::xyz(128, 1, 1);
+        self.validate_launch(grid.x, grid.y, grid.z, block.x, block.y, block.z)?;
 
         unsafe {
             let mut prices_p = d_prices.as_device_ptr().as_raw();
@@ -473,12 +653,12 @@ impl CudaNwe {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+                .map_err(CudaNweError::from)?;
         }
 
         self.stream
             .synchronize()
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+            .map_err(CudaNweError::from)?;
 
         Ok(DeviceNwePair {
             upper: DeviceArrayF32 {

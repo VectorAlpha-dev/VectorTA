@@ -56,13 +56,9 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaReflex;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context;
+use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::ffi::c_void;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc;
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -1042,9 +1038,13 @@ pub fn reflex_batch_py<'py>(
         .map_err(|e| PyValueError::new_err(format!("reflex batch error: {}", e)))?;
     let rows = combos.len();
     let cols = data_slice.len();
+    // checked arithmetic for total elements
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
     // Allocate output array directly in numpy
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Release GIL during computation
@@ -1106,19 +1106,16 @@ pub fn reflex_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let (ctx, inner) = py
+    let inner = py
         .allow_threads(|| {
             let cuda = CudaReflex::new(device_id)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let ctx = cuda.context_arc();
             let arr = cuda
                 .reflex_batch_dev(slice_in, &sweep)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok::<_, PyErr>((ctx, arr))
+            Ok::<_, PyErr>(arr)
         })?;
-
-    let DeviceArrayF32 { buf, rows, cols } = inner;
-    Ok(DeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: device_id as u32 })
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1144,19 +1141,16 @@ pub fn reflex_cuda_many_series_one_param_dev_py(
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
 
-    let (ctx, inner) = py
+    let inner = py
         .allow_threads(|| {
             let cuda = CudaReflex::new(device_id)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let ctx = cuda.context_arc();
             let arr = cuda
                 .reflex_many_series_one_param_time_major_dev(flat, cols, rows, period)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok::<_, PyErr>((ctx, arr))
+            Ok::<_, PyErr>(arr)
         })?;
-
-    let DeviceArrayF32 { buf, rows, cols } = inner;
-    Ok(DeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: device_id as u32 })
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]
@@ -1238,140 +1232,7 @@ pub fn reflex_batch_metadata_js(
     }
 }
 
-// --- Reflex-specific VRAM-backed Python handle with CAI v3 + DLPack ---
-
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::DeviceArrayF32;
-
-#[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
-pub struct DeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
-    pub(crate) rows: usize,
-    pub(crate) cols: usize,
-    pub(crate) _ctx: Arc<Context>,
-    pub(crate) device_id: u32,
-}
-
-#[cfg(all(feature = "python", feature = "cuda"))]
-#[pymethods]
-impl DeviceArrayF32Py {
-    #[getter]
-    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let d = PyDict::new(py);
-        d.set_item("shape", (self.rows, self.cols))?;
-        d.set_item("typestr", "<f4")?;
-        d.set_item(
-            "strides",
-            (
-                self.cols * std::mem::size_of::<f32>(),
-                std::mem::size_of::<f32>(),
-            ),
-        )?;
-        let ptr = self
-            .buf
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
-            .as_device_ptr()
-            .as_raw() as usize;
-        d.set_item("data", (ptr, false))?;
-        d.set_item("version", 3)?; // producer stream synchronized before return
-        Ok(d)
-    }
-
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
-
-    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
-        // Move ownership of the device buffer into the DLManagedTensor
-        let buf = self
-            .buf
-            .take()
-            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
-
-        // DLPack FFI structs (minimal subset)
-        #[repr(C)]
-        struct DLDevice { device_type: i32, device_id: i32 }
-        #[repr(C)]
-        struct DLDataType { code: u8, bits: u8, lanes: u16 }
-        #[repr(C)]
-        struct DLTensor {
-            data: *mut c_void,
-            device: DLDevice,
-            ndim: i32,
-            dtype: DLDataType,
-            shape: *mut i64,
-            strides: *mut i64,
-            byte_offset: u64,
-        }
-        #[repr(C)]
-        struct DLManagedTensor {
-            dl_tensor: DLTensor,
-            manager_ctx: *mut c_void,
-            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
-        }
-
-        // Keep buffer/context and shape/strides alive until consumer calls deleter.
-        struct Manager {
-            _ctx: Arc<Context>,
-            _buf: DeviceBuffer<f32>,
-            _shape: Box<[i64; 2]>,
-            _strides: Box<[i64; 2]>,
-        }
-
-        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
-            if p.is_null() { return; }
-            let mt = Box::from_raw(p);
-            let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
-            drop(mt);
-        }
-
-        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
-            if !ptr.is_null() {
-                let mt = ptr as *mut DLManagedTensor;
-                if let Some(del) = unsafe { (*mt).deleter } { unsafe { del(mt) } }
-            }
-        }
-
-        let rows = self.rows as i64;
-        let cols = self.cols as i64;
-        let shape = Box::new([rows, cols]);
-        let strides = Box::new([cols, 1]); // element strides (row-major)
-
-        let data_ptr = buf.as_device_ptr().as_raw() as *mut c_void;
-        let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
-
-        // Pointers that live until deleter runs
-        let mgr_ptr = Box::into_raw(mgr);
-        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
-        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
-
-        let mt = Box::new(DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
-                ndim: 2,
-                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                shape: shape_ptr,
-                strides: strides_ptr,
-                byte_offset: 0,
-            },
-            manager_ctx: mgr_ptr as *mut c_void,
-            deleter: Some(dlpack_deleter),
-        });
-
-        // Wrap in a PyCapsule named "dltensor"
-        let raw_capsule = unsafe {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
-        };
-        if raw_capsule.is_null() {
-            return Err(PyValueError::new_err("failed to create DLPack capsule"));
-        }
-        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
-    }
-}
+// Reuse ALMA's VRAM handle type (DeviceArrayF32Py) for CUDA interop.
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]

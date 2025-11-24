@@ -20,24 +20,30 @@ use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
-use std::error::Error;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaEfiError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaEfiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaEfiError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaEfiError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl Error for CudaEfiError {}
 
 // -------- Policies (knobs kept simple; IIR scan is sequential) --------
 
@@ -76,7 +82,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaEfi {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaEfiPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -86,38 +93,41 @@ pub struct CudaEfi {
 
 impl CudaEfi {
     pub fn new(device_id: usize) -> Result<Self, CudaEfiError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/efi_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                Ok(m) => m,
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaEfiError::Cuda(e.to_string()))?
-                }
-            },
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaEfiPolicy::default(),
             last_batch: None,
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
         })
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     pub fn new_with_policy(device_id: usize, policy: CudaEfiPolicy) -> Result<Self, CudaEfiError> {
@@ -127,10 +137,17 @@ impl CudaEfi {
     }
 
     #[inline]
-    pub fn synchronize(&self) -> Result<(), CudaEfiError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))
+    pub fn synchronize(&self) -> Result<(), CudaEfiError> { self.stream.synchronize().map_err(Into::into) }
+
+    #[inline]
+    fn validate_launch(grid: GridSize, block: BlockSize) -> Result<(), CudaEfiError> {
+        let (gx, gy, gz) = (grid.x, grid.y, grid.z);
+        let (bx, by, bz) = (block.x, block.y, block.z);
+        let threads = (bx as u64) * (by as u64) * (bz as u64);
+        if threads > 1024 { // conservative default limit
+            return Err(CudaEfiError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
     }
 
     // ---------- Public device entry points ----------
@@ -145,7 +162,7 @@ impl CudaEfi {
 
         // Build diffs directly into pinned host memory (faster HtoD)
         let mut h_diffs = unsafe { LockedBuffer::<f32>::uninitialized(prepared.series_len) }
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+            .map_err(CudaEfiError::Cuda)?;
         {
             let diffs = unsafe { h_diffs.as_mut_slice() };
             diffs.fill(f32::NAN);
@@ -159,42 +176,56 @@ impl CudaEfi {
             }
         }
 
-        // VRAM estimate + async copies
-        let prices_bytes = prepared.series_len * std::mem::size_of::<f32>(); // diffs only
-        let params_bytes = (prepared.periods_i32.len() * std::mem::size_of::<i32>())
-            + (prepared.alphas_f32.len() * std::mem::size_of::<f32>());
-        let out_bytes = prepared.series_len * prepared.combos.len() * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaEfiError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        // VRAM estimate + async copies (checked to avoid overflow)
+        let prices_bytes = prepared
+            .series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaEfiError::InvalidInput("prices_bytes overflow".into()))?;
+        let params_bytes_periods = prepared
+            .periods_i32
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaEfiError::InvalidInput("periods_bytes overflow".into()))?;
+        let params_bytes_alphas = prepared
+            .alphas_f32
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaEfiError::InvalidInput("alphas_bytes overflow".into()))?;
+        let params_bytes = params_bytes_periods
+            .checked_add(params_bytes_alphas)
+            .ok_or_else(|| CudaEfiError::InvalidInput("params_bytes overflow".into()))?;
+        let out_elems = prepared
+            .series_len
+            .checked_mul(prepared.combos.len())
+            .ok_or_else(|| CudaEfiError::InvalidInput("output elements overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaEfiError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaEfiError::InvalidInput("total VRAM size overflow".into()))?;
+        Self::ensure_fit(required, 64 * 1024 * 1024)?;
 
         let mut d_diffs: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(prepared.series_len, &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+                .map_err(CudaEfiError::Cuda)?
         };
         unsafe {
             d_diffs
                 .async_copy_from(h_diffs.as_slice(), &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+                .map_err(CudaEfiError::Cuda)?;
         }
-        let d_periods = unsafe {
-            DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
-        };
-        let d_alphas = unsafe {
-            DeviceBuffer::from_slice_async(&prepared.alphas_f32, &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
-        };
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream).map_err(CudaEfiError::Cuda)? };
+        let d_alphas = unsafe { DeviceBuffer::from_slice_async(&prepared.alphas_f32, &self.stream).map_err(CudaEfiError::Cuda)? };
+        let out_len = prepared
+            .combos
+            .len()
+            .checked_mul(prepared.series_len)
+            .ok_or_else(|| CudaEfiError::InvalidInput("output elements overflow".into()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(
-                prepared.combos.len() * prepared.series_len,
-                &self.stream,
-            )
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(out_len, &self.stream)
+                .map_err(CudaEfiError::Cuda)?
         };
 
         self.launch_batch_kernel_with_diffs(
@@ -207,15 +238,9 @@ impl CudaEfi {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: prepared.combos.len(),
-            cols: prepared.series_len,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows: prepared.combos.len(), cols: prepared.series_len })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -240,9 +265,9 @@ impl CudaEfi {
                 "period/alpha buffers must match n_combos".into(),
             ));
         }
-        if d_out.len() != n_combos * series_len {
-            return Err(CudaEfiError::InvalidInput("output length mismatch".into()));
-        }
+        if let Some(exp) = n_combos.checked_mul(series_len) { if d_out.len() != exp { return Err(CudaEfiError::InvalidInput("output length mismatch".into())); } } else { return Err(CudaEfiError::InvalidInput("rows*cols overflow".into())); }
+        // Ensure current device matches wrapper device
+        unsafe { let mut cur: i32 = 0; let _ = cust::sys::cuCtxGetDevice(&mut cur); if cur as u32 != self.device_id { return Err(CudaEfiError::DeviceMismatch { buf: self.device_id, current: cur as u32 }); } }
         self.launch_batch_kernel(
             d_prices, d_volumes, d_periods, d_alphas, series_len, warm, n_combos, d_out,
         )
@@ -264,32 +289,41 @@ impl CudaEfi {
             params,
         )?;
 
-        let prices_bytes = num_series * series_len * std::mem::size_of::<f32>() * 2;
-        let params_bytes = prepared.first_valids_diff.len() * std::mem::size_of::<i32>();
-        let out_bytes = num_series * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaEfiError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        let elems_series = num_series
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaEfiError::InvalidInput("series elements overflow".into()))?;
+        let prices_bytes = elems_series
+            .checked_mul(std::mem::size_of::<f32>() * 2)
+            .ok_or_else(|| CudaEfiError::InvalidInput("prices_bytes overflow".into()))?;
+        let params_bytes = prepared
+            .first_valids_diff
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaEfiError::InvalidInput("params_bytes overflow".into()))?;
+        let out_bytes = elems_series
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaEfiError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaEfiError::InvalidInput("total VRAM size overflow".into()))?;
+        Self::ensure_fit(required, 64 * 1024 * 1024)?;
 
         let d_prices = unsafe {
             DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+                .map_err(CudaEfiError::Cuda)?
         };
         let d_volumes = unsafe {
             DeviceBuffer::from_slice_async(volumes_tm_f32, &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+                .map_err(CudaEfiError::Cuda)?
         };
         let d_first = unsafe {
             DeviceBuffer::from_slice_async(&prepared.first_valids_diff, &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+                .map_err(CudaEfiError::Cuda)?
         };
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(elems_series, &self.stream)
+                .map_err(CudaEfiError::Cuda)?
         };
 
         self.launch_many_series_kernel(
@@ -303,15 +337,9 @@ impl CudaEfi {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: series_len,
-            cols: num_series,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows: series_len, cols: num_series })
     }
 
     // ---------- Kernel launches ----------
@@ -331,7 +359,7 @@ impl CudaEfi {
         let func = self
             .module
             .get_function("efi_batch_f32")
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaEfiError::MissingKernelSymbol { name: "efi_batch_f32" })?;
 
         // Policy: 1 block per combo; thread 0 does the scan
         let block_x = match self.policy.batch {
@@ -340,6 +368,7 @@ impl CudaEfi {
         };
         let grid = GridSize::x(n_combos as u32);
         let block = BlockSize::x(block_x);
+        Self::validate_launch(grid, block)?;
 
         let stream = &self.stream;
         unsafe {
@@ -355,7 +384,7 @@ impl CudaEfi {
                     d_out.as_device_ptr()
                 )
             )
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+            .map_err(CudaEfiError::Cuda)?;
         }
 
         unsafe {
@@ -378,8 +407,7 @@ impl CudaEfi {
         let n = prepared.series_len;
 
         // Build diffs into pinned host buffer
-        let mut h_diffs = unsafe { LockedBuffer::<f32>::uninitialized(n) }
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+        let mut h_diffs = unsafe { LockedBuffer::<f32>::uninitialized(n) }.map_err(CudaEfiError::Cuda)?;
         {
             let diffs = unsafe { h_diffs.as_mut_slice() };
             diffs.fill(f32::NAN);
@@ -393,38 +421,50 @@ impl CudaEfi {
             }
         }
 
-        // VRAM estimate
-        let params_bytes = (prepared.periods_i32.len() * std::mem::size_of::<i32>())
-            + (prepared.alphas_f32.len() * std::mem::size_of::<f32>());
-        let required = n * std::mem::size_of::<f32>() + params_bytes + n * prepared.combos.len() * std::mem::size_of::<f32>();
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaEfiError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        // VRAM estimate (checked)
+        let params_bytes_periods = prepared
+            .periods_i32
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaEfiError::InvalidInput("periods_bytes overflow".into()))?;
+        let params_bytes_alphas = prepared
+            .alphas_f32
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaEfiError::InvalidInput("alphas_bytes overflow".into()))?;
+        let params_bytes = params_bytes_periods
+            .checked_add(params_bytes_alphas)
+            .ok_or_else(|| CudaEfiError::InvalidInput("params_bytes overflow".into()))?;
+        let series_bytes = n
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaEfiError::InvalidInput("series bytes overflow".into()))?;
+        let out_elems = n
+            .checked_mul(prepared.combos.len())
+            .ok_or_else(|| CudaEfiError::InvalidInput("output elements overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaEfiError::InvalidInput("output bytes overflow".into()))?;
+        let required = series_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaEfiError::InvalidInput("total VRAM size overflow".into()))?;
+        Self::ensure_fit(required, 64 * 1024 * 1024)?;
 
         // Upload
         let mut d_diffs: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(n, &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(n, &self.stream).map_err(CudaEfiError::Cuda)?
         };
         unsafe {
-            d_diffs
-                .async_copy_from(h_diffs.as_slice(), &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+            d_diffs.async_copy_from(h_diffs.as_slice(), &self.stream).map_err(CudaEfiError::Cuda)?;
         }
-        let d_periods = unsafe {
-            DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
-        };
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream).map_err(CudaEfiError::Cuda)? };
         let d_alphas = unsafe {
             DeviceBuffer::from_slice_async(&prepared.alphas_f32, &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+                .map_err(CudaEfiError::Cuda)?
         };
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(n * prepared.combos.len(), &self.stream)
-                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(out_elems, &self.stream)
+                .map_err(CudaEfiError::Cuda)?
         };
 
         self.launch_batch_kernel_time_major_from_diffs(
@@ -437,7 +477,7 @@ impl CudaEfi {
             &mut d_out,
         )?;
 
-        self.stream.synchronize().map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaEfiError::Cuda)?;
 
         Ok(DeviceArrayF32 { buf: d_out, rows: n, cols: prepared.combos.len() })
     }
@@ -458,7 +498,7 @@ impl CudaEfi {
             .get_function("efi_one_series_many_params_from_diff_tm_f32")
             .or_else(|_| self.module.get_function("efi_one_series_many_params_from_diff_rm_f32"))
             .or_else(|_| self.module.get_function("efi_batch_from_diff_f32"))
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaEfiError::MissingKernelSymbol { name: "efi_batch_from_diff_f32" })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
@@ -481,7 +521,7 @@ impl CudaEfi {
                     d_out_tm.as_device_ptr()
                 )
             )
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+            .map_err(CudaEfiError::Cuda)?;
         }
         unsafe { (*(self as *const _ as *mut CudaEfi)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
         self.maybe_log_batch_debug();
@@ -503,7 +543,7 @@ impl CudaEfi {
             .module
             .get_function("efi_one_series_many_params_from_diff_rm_f32")
             .or_else(|_| self.module.get_function("efi_batch_from_diff_f32"))
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaEfiError::MissingKernelSymbol { name: "efi_batch_from_diff_f32" })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
@@ -526,7 +566,7 @@ impl CudaEfi {
                     d_out.as_device_ptr()
                 )
             )
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+            .map_err(CudaEfiError::Cuda)?;
         }
 
         unsafe {
@@ -552,7 +592,7 @@ impl CudaEfi {
         let func = self
             .module
             .get_function("efi_many_series_one_param_f32")
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaEfiError::MissingKernelSymbol { name: "efi_many_series_one_param_f32" })?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
@@ -577,7 +617,7 @@ impl CudaEfi {
                     d_out_tm.as_device_ptr()
                 )
             )
-            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+            .map_err(CudaEfiError::Cuda)?;
         }
 
         unsafe {
@@ -650,8 +690,11 @@ impl CudaEfi {
                 "num_series and series_len must be positive".into(),
             ));
         }
+        let expected = num_series
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaEfiError::InvalidInput("num_series*series_len overflow".into()))?;
         if prices_tm_f32.len() != volumes_tm_f32.len()
-            || prices_tm_f32.len() != num_series * series_len
+            || prices_tm_f32.len() != expected
         {
             return Err(CudaEfiError::InvalidInput(
                 "time-major price/volume length mismatch".into(),
@@ -700,19 +743,17 @@ impl CudaEfi {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
+    fn ensure_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaEfiError> {
+        if !Self::mem_check_enabled() { return Ok(()); }
         if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
-        }
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaEfiError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+            }
+        } else { Ok(()) }
     }
 
     #[inline]
@@ -769,10 +810,14 @@ struct PreparedEfiManySeries {
 
 fn expand_grid(r: &EfiBatchRange) -> Vec<EfiParams> {
     fn axis_u((s, e, st): (usize, usize, usize)) -> Vec<usize> {
-        if st == 0 || s == e {
-            return vec![s];
+        if st == 0 || s == e { return vec![s]; }
+        let mut v = Vec::new();
+        if s < e {
+            let mut x = s; while x <= e { v.push(x); match x.checked_add(st) { Some(n) => { if n == x { break; } x = n; }, None => break } }
+        } else {
+            let mut x = s; loop { v.push(x); if x <= e { break; } let n = x.saturating_sub(st); if n == x { break; } x = n; }
         }
-        (s..=e).step_by(st).collect()
+        v
     }
     axis_u(r.period)
         .into_iter()

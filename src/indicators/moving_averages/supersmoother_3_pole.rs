@@ -183,14 +183,12 @@ pub enum SuperSmoother3PoleError {
     EmptyInputData,
     #[error("supersmoother_3_pole: All values are NaN.")]
     AllValuesNaN,
-    #[error("supersmoother_3_pole: Invalid period: period = {period}")]
-    InvalidPeriod { period: usize },
+    #[error("supersmoother_3_pole: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
     #[error("supersmoother_3_pole: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error(
-        "supersmoother_3_pole: Output length mismatch: expected = {expected}, actual = {actual}"
-    )]
-    OutputLengthMismatch { expected: usize, actual: usize },
+    #[error("supersmoother_3_pole: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
     #[error("supersmoother_3_pole: Invalid kernel for batch operation: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("supersmoother_3_pole: Invalid range: start={start}, end={end}, step={step}")]
@@ -225,7 +223,7 @@ pub fn supersmoother_3_pole_with_kernel(
     let period = input.get_period();
 
     if period == 0 || period > len {
-        return Err(SuperSmoother3PoleError::InvalidPeriod { period });
+        return Err(SuperSmoother3PoleError::InvalidPeriod { period, data_len: len });
     }
     if (len - first) < period {
         return Err(SuperSmoother3PoleError::NotEnoughValidData {
@@ -280,10 +278,7 @@ pub fn supersmoother_3_pole_into(
     }
 
     if out.len() != len {
-        return Err(SuperSmoother3PoleError::OutputLengthMismatch {
-            expected: len,
-            actual: out.len(),
-        });
+        return Err(SuperSmoother3PoleError::OutputLengthMismatch { expected: len, got: out.len() });
     }
 
     let first = data
@@ -293,7 +288,7 @@ pub fn supersmoother_3_pole_into(
     let period = input.get_period();
 
     if period == 0 || period > len {
-        return Err(SuperSmoother3PoleError::InvalidPeriod { period });
+        return Err(SuperSmoother3PoleError::InvalidPeriod { period, data_len: len });
     }
     if (len - first) < period {
         return Err(SuperSmoother3PoleError::NotEnoughValidData {
@@ -524,7 +519,7 @@ impl SuperSmoother3PoleStream {
     pub fn try_new(params: SuperSmoother3PoleParams) -> Result<Self, SuperSmoother3PoleError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(SuperSmoother3PoleError::InvalidPeriod { period });
+            return Err(SuperSmoother3PoleError::InvalidPeriod { period, data_len: 0 });
         }
 
         // Same coefficient math as batch kernel for strict consistency.
@@ -592,7 +587,7 @@ impl SuperSmoother3PoleStream {
     #[inline]
     pub fn reconfigure(&mut self, period: usize) -> Result<(), SuperSmoother3PoleError> {
         if period == 0 {
-            return Err(SuperSmoother3PoleError::InvalidPeriod { period });
+            return Err(SuperSmoother3PoleError::InvalidPeriod { period, data_len: 0 });
         }
         self.period = period;
 
@@ -1794,13 +1789,16 @@ pub fn supersmoother_3_pole_batch_py<'py>(
 
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
     // Pre-allocate output array (OK for batch operations)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Compute without GIL - no validation needed
@@ -1923,7 +1921,7 @@ pub fn supersmoother_3_pole_into_slice(
     let period = input.get_period();
 
     if period == 0 || period > len {
-        return Err(SuperSmoother3PoleError::InvalidPeriod { period });
+        return Err(SuperSmoother3PoleError::InvalidPeriod { period, data_len: len });
     }
     if (len - first) < period {
         return Err(SuperSmoother3PoleError::NotEnoughValidData {
@@ -1934,10 +1932,7 @@ pub fn supersmoother_3_pole_into_slice(
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(SuperSmoother3PoleError::OutputLengthMismatch {
-            expected: data.len(),
-            actual: dst.len(),
-        });
+        return Err(SuperSmoother3PoleError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
 
     let chosen = match kern {

@@ -1867,7 +1867,19 @@ impl DeviceArrayF32CwmaPy {
         (2, self.guard.device_id() as i32)
     }
 
-    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+    // DLPack v1.x with legacy fallback and Array API parameter set.
+    // Stream semantics: producer stream is already synchronized by the CUDA wrapper
+    // before this object is constructed, so we ignore the consumer-provided stream
+    // and return a ready-to-consume capsule.
+    #[allow(clippy::too_many_arguments)]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<(i64, i64)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
         use std::ffi::c_void;
 
         #[repr(C)]
@@ -1907,22 +1919,47 @@ impl DeviceArrayF32CwmaPy {
             }
         }
 
+        // Capsule destructor that respects the reuse rule for both legacy and versioned names.
         extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
             unsafe {
-                let name = b"dltensor\0";
-                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                // Try versioned first
+                let vname = b"dltensor_versioned\0";
+                let mut ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, vname.as_ptr() as *const _)
+                    as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter { del(ptr); }
+                    let used = b"used_dltensor_versioned\0";
+                    let _ = pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                    return;
+                }
+
+                // Fallback: legacy name
+                let lname = b"dltensor\0";
+                ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, lname.as_ptr() as *const _)
                     as *mut DLManagedTensor;
                 if !ptr.is_null() {
                     if let Some(del) = (*ptr).deleter { del(ptr); }
                     let used = b"used_dltensor\0";
-                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                    let _ = pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
                 }
             }
         }
 
-        let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
-        let strides = Box::new([self.inner.cols as i64, 1i64]);
-        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+        // Accept Array API stream semantics but do nothing since producer is synced.
+        // - If provided, `stream` may be an int: 1 (legacy default), 2 (per-thread default),
+        //   or a non-zero pointer value. We ignore all since work is complete.
+        let _ = stream;
+
+        let rows = self.inner.rows as i64;
+        let cols = self.inner.cols as i64;
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1i64]); // in elements, not bytes
+        // data must be NULL for size-zero tensors per DLPack
+        let data_ptr: *mut c_void = if rows == 0 || cols == 0 {
+            std::ptr::null_mut()
+        } else {
+            self.inner.device_ptr() as usize as *mut c_void
+        };
 
         let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _cuda: self.guard.clone() });
         let guard_ptr = Box::into_raw(guard);
@@ -1942,9 +1979,14 @@ impl DeviceArrayF32CwmaPy {
             deleter: Some(managed_deleter),
         });
         let mt_raw = Box::into_raw(mt);
-        let name = b"dltensor\0";
+        let wants_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        let cap_name = if wants_versioned { b"dltensor_versioned\0" } else { b"dltensor\0" };
         let capsule = unsafe {
-            pyo3::ffi::PyCapsule_New(mt_raw as *mut c_void, name.as_ptr() as *const _, Some(capsule_destructor))
+            pyo3::ffi::PyCapsule_New(
+                mt_raw as *mut c_void,
+                cap_name.as_ptr() as *const _,
+                Some(capsule_destructor),
+            )
         };
         if capsule.is_null() {
             unsafe { managed_deleter(mt_raw); }

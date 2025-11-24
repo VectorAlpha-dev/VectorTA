@@ -305,7 +305,9 @@ impl CudaAvsl {
         let mut d_fast = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }?;
         let mut d_slow = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }?;
         let mut d_mult = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows, &self.stream) }?;
-        let elems = rows * len;
+        let elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaAvslError::InvalidInput("rows*cols overflow".into()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
 
         unsafe {

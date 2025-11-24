@@ -16,6 +16,8 @@
 //! - Scalar: Optimized O(1) rolling updates for both WMAs and trigger; warmup preserved.
 //! - Batch: Single-row “unified” compute writes directly into caller buffers; no
 //!   row-specific SIMD due to lack of cross-row reuse.
+//! - CUDA: FP32 kernels via `CudaPma` wrapper validated against scalar within tolerance;
+//!   VRAM handles reuse shared ALMA CAI v3 + DLPack v1.x helpers for interop.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -143,12 +145,22 @@ impl PmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum PmaError {
-    #[error("pma: Empty data provided.")]
-    EmptyData,
-    #[error("pma: Not enough valid data: needed = 7, valid = {valid}")]
-    NotEnoughValidData { valid: usize },
+    #[error("pma: Input data slice is empty.")]
+    EmptyInputData,
     #[error("pma: All values are NaN.")]
     AllValuesNaN,
+    #[error("pma: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("pma: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("pma: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("pma: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("pma: invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("pma: size overflow computing rows*cols: rows = {rows}, cols = {cols}")]
+    SizeOverflow { rows: usize, cols: usize },
 }
 
 #[inline]
@@ -163,7 +175,7 @@ pub fn pma_with_kernel(input: &PmaInput, kernel: Kernel) -> Result<PmaOutput, Pm
     };
 
     if data.is_empty() {
-        return Err(PmaError::EmptyData);
+        return Err(PmaError::EmptyInputData);
     }
 
     let first = data
@@ -171,10 +183,9 @@ pub fn pma_with_kernel(input: &PmaInput, kernel: Kernel) -> Result<PmaOutput, Pm
         .position(|x| !x.is_nan())
         .ok_or(PmaError::AllValuesNaN)?;
 
-    if (data.len() - first) < 7 {
-        return Err(PmaError::NotEnoughValidData {
-            valid: data.len() - first,
-        });
+    let valid = data.len() - first;
+    if valid < 7 {
+        return Err(PmaError::NotEnoughValidData { needed: 7, valid });
     }
 
     let chosen = match kernel {
@@ -513,7 +524,7 @@ pub fn pma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(PmaError::EmptyData),
+        other => return Err(PmaError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -540,20 +551,22 @@ pub fn pma_batch_unified_with_kernel(
 #[inline]
 fn pma_batch_unified_inner(data: &[f64], kern: Kernel) -> Result<PmaBatchOutputUnified, PmaError> {
     if data.is_empty() {
-        return Err(PmaError::EmptyData);
+        return Err(PmaError::EmptyInputData);
     }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(PmaError::AllValuesNaN)?;
-    if (data.len() - first) < 7 {
-        return Err(PmaError::NotEnoughValidData {
-            valid: data.len() - first,
-        });
+    let valid = data.len() - first;
+    if valid < 7 {
+        return Err(PmaError::NotEnoughValidData { needed: 7, valid });
     }
 
     let rows = 2usize;
     let cols = data.len();
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(PmaError::SizeOverflow { rows, cols })?;
 
     // Allocate rows×cols uninitialized and write NaN prefixes exactly
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -854,11 +867,14 @@ pub fn pma_into_slice(
     let data = input.as_ref();
 
     if predict_dst.len() != data.len() || trigger_dst.len() != data.len() {
-        return Err(PmaError::EmptyData);
+        return Err(PmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: predict_dst.len().min(trigger_dst.len()),
+        });
     }
 
     if data.is_empty() {
-        return Err(PmaError::EmptyData);
+        return Err(PmaError::EmptyInputData);
     }
 
     let first = data
@@ -866,10 +882,9 @@ pub fn pma_into_slice(
         .position(|x| !x.is_nan())
         .ok_or(PmaError::AllValuesNaN)?;
 
-    if (data.len() - first) < 7 {
-        return Err(PmaError::NotEnoughValidData {
-            valid: data.len() - first,
-        });
+    let valid = data.len() - first;
+    if valid < 7 {
+        return Err(PmaError::NotEnoughValidData { needed: 7, valid });
     }
 
     let chosen = match kern {

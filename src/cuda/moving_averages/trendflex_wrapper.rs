@@ -9,7 +9,7 @@
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::trendflex::{
-    expand_grid_trendflex, TrendFlexBatchRange, TrendFlexParams,
+    expand_grid_trendflex_checked, TrendFlexBatchRange, TrendFlexParams,
 };
 use cust::context::CacheConfig;
 use cust::context::Context;
@@ -248,12 +248,8 @@ impl CudaTrendflex {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaTrendflexError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = expand_grid_trendflex(sweep);
-        if combos.is_empty() {
-            return Err(CudaTrendflexError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = expand_grid_trendflex_checked(sweep)
+            .map_err(|e| CudaTrendflexError::InvalidInput(e.to_string()))?;
 
         let len = data_f32.len();
         let tail_len = len - first_valid;

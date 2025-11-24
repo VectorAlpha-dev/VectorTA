@@ -17,14 +17,15 @@ use crate::indicators::linearreg_intercept::{
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{AsyncCopyDestination, CopyDestination, DeviceBuffer};
+use cust::memory::{CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
 // ---------------- Kernel policy & selection ----------------
 
@@ -65,26 +66,31 @@ pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaLinregInterceptError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaLinregInterceptError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaLinregInterceptError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaLinregInterceptError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-impl std::error::Error for CudaLinregInterceptError {}
 
 pub struct CudaLinregIntercept {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaLinregInterceptPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -95,38 +101,26 @@ pub struct CudaLinregIntercept {
 
 impl CudaLinregIntercept {
     pub fn new(device_id: usize) -> Result<Self, CudaLinregInterceptError> {
-        cust::init(CudaFlags::empty())
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
-        let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
-        let context =
-            Context::new(device).map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/linearreg_intercept_kernel.ptx"));
-        let module = match Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        ) {
-            Ok(m) => m,
-            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?,
-            },
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaLinregInterceptPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -149,9 +143,18 @@ impl CudaLinregIntercept {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaLinregInterceptError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     #[inline]
@@ -213,15 +216,20 @@ impl CudaLinregIntercept {
         cust::memory::mem_get_info().ok()
     }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaLinregInterceptError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaLinregInterceptError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
         }
+        Ok(())
     }
 
     // ---------------- Batch: prepare inputs ----------------
@@ -250,7 +258,7 @@ impl CudaLinregIntercept {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaLinregInterceptError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = expand_grid_params(sweep);
+        let combos = expand_grid_params(sweep)?;
         if combos.is_empty() {
             return Err(CudaLinregInterceptError::InvalidInput(
                 "no parameter combinations".into(),
@@ -319,7 +327,9 @@ impl CudaLinregIntercept {
         let func = self
             .module
             .get_function("linearreg_intercept_batch_f32")
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaLinregInterceptError::MissingKernelSymbol {
+                name: "linearreg_intercept_batch_f32",
+            })?;
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
@@ -353,9 +363,7 @@ impl CudaLinregIntercept {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -371,33 +379,35 @@ impl CudaLinregIntercept {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaLinregInterceptError> {
-        // VRAM estimate
-        let prices_bytes = len * std::mem::size_of::<f32>();
-        let params_bytes =
-            combos_len * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>() * 3);
-        let out_bytes = combos_len * len * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
+        // VRAM estimate with checked arithmetic
+        let f32_size = std::mem::size_of::<f32>();
+        let prices_bytes = len
+            .checked_mul(f32_size)
+            .ok_or_else(|| CudaLinregInterceptError::InvalidInput("series length overflow".into()))?;
+        let per_combo_bytes = std::mem::size_of::<i32>()
+            .saturating_add(f32_size.saturating_mul(3));
+        let params_bytes = combos_len
+            .checked_mul(per_combo_bytes)
+            .ok_or_else(|| CudaLinregInterceptError::InvalidInput("parameter bytes overflow".into()))?;
+        let out_elems = combos_len
+            .checked_mul(len)
+            .ok_or_else(|| CudaLinregInterceptError::InvalidInput("output elements overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(f32_size)
+            .ok_or_else(|| CudaLinregInterceptError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaLinregInterceptError::InvalidInput("total VRAM bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaLinregInterceptError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(required, headroom)?;
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(periods_i32)
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
-        let d_x_sums = DeviceBuffer::from_slice(x_sums)
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
-        let d_denom_invs = DeviceBuffer::from_slice(denom_invs)
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
-        let d_inv_periods = DeviceBuffer::from_slice(inv_periods)
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
-        let elems = combos_len * len;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let d_periods = DeviceBuffer::from_slice(periods_i32)?;
+        let d_x_sums = DeviceBuffer::from_slice(x_sums)?;
+        let d_denom_invs = DeviceBuffer::from_slice(denom_invs)?;
+        let d_inv_periods = DeviceBuffer::from_slice(inv_periods)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
         self.launch_batch_kernel(
             &d_prices,
             &d_periods,
@@ -433,9 +443,7 @@ impl CudaLinregIntercept {
             first_valid,
             len,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok((dev, combos))
     }
 
@@ -447,7 +455,10 @@ impl CudaLinregIntercept {
     ) -> Result<(usize, usize, Vec<LinearRegInterceptParams>), CudaLinregInterceptError> {
         let (combos, first_valid, len, periods_i32, x_sums, denom_invs, inv_periods) =
             Self::prepare_batch_inputs(data_f32, sweep)?;
-        let expected = combos.len() * len;
+        let expected = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaLinregInterceptError::InvalidInput("output elements overflow".into()))?;
         if out.len() != expected {
             return Err(CudaLinregInterceptError::InvalidInput(format!(
                 "output length mismatch: expected {}, got {}",
@@ -465,12 +476,8 @@ impl CudaLinregIntercept {
             first_valid,
             len,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
-        dev.buf
-            .copy_to(out)
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
+        dev.buf.copy_to(out)?;
         Ok((combos.len(), len, combos))
     }
 
@@ -486,10 +493,13 @@ impl CudaLinregIntercept {
                 "series dimensions must be positive".into(),
             ));
         }
-        if data_tm_f32.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaLinregInterceptError::InvalidInput("rows*cols overflow".into()))?;
+        if data_tm_f32.len() != expected {
             return Err(CudaLinregInterceptError::InvalidInput(format!(
                 "data length mismatch: expected {}, got {}",
-                cols * rows,
+                expected,
                 data_tm_f32.len()
             )));
         }
@@ -559,7 +569,9 @@ impl CudaLinregIntercept {
         let func = self
             .module
             .get_function("linearreg_intercept_many_series_one_param_f32")
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaLinregInterceptError::MissingKernelSymbol {
+                name: "linearreg_intercept_many_series_one_param_f32",
+            })?;
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
@@ -593,9 +605,7 @@ impl CudaLinregIntercept {
                 &mut inv_period_f as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -611,24 +621,30 @@ impl CudaLinregIntercept {
         denom_inv: f32,
         inv_period: f32,
     ) -> Result<DeviceArrayF32, CudaLinregInterceptError> {
-        let prices_bytes = cols * rows * std::mem::size_of::<f32>();
-        let params_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = cols * rows * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
+        let f32_size = std::mem::size_of::<f32>();
+        let prices_elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaLinregInterceptError::InvalidInput("prices elements overflow".into()))?;
+        let prices_bytes = prices_elems
+            .checked_mul(f32_size)
+            .ok_or_else(|| CudaLinregInterceptError::InvalidInput("prices bytes overflow".into()))?;
+        let params_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaLinregInterceptError::InvalidInput("params bytes overflow".into()))?;
+        let out_elems = prices_elems;
+        let out_bytes = out_elems
+            .checked_mul(f32_size)
+            .ok_or_else(|| CudaLinregInterceptError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaLinregInterceptError::InvalidInput("total VRAM bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaLinregInterceptError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(required, headroom)?;
 
-        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(first_valids)
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
+        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first_valids = DeviceBuffer::from_slice(first_valids)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
         self.launch_many_series_kernel(
             &d_prices_tm,
             &d_first_valids,
@@ -666,9 +682,7 @@ impl CudaLinregIntercept {
             denom_inv,
             inv_period,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaLinregInterceptError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(dev)
     }
 
@@ -683,18 +697,61 @@ impl CudaLinregIntercept {
 }
 
 #[inline]
-fn expand_grid_params(r: &LinearRegInterceptBatchRange) -> Vec<LinearRegInterceptParams> {
-    let (start, end, step) = r.period;
-    let periods: Vec<usize> = if step == 0 || start == end {
-        vec![start]
-    } else {
-        (start..=end).step_by(step).collect()
-    };
+fn expand_grid_params(
+    r: &LinearRegInterceptBatchRange,
+) -> Result<Vec<LinearRegInterceptParams>, CudaLinregInterceptError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, CudaLinregInterceptError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+
+        let mut values = Vec::new();
+        let step_u = step;
+
+        if start <= end {
+            let mut v = start;
+            loop {
+                if v > end {
+                    break;
+                }
+                values.push(v);
+                match v.checked_add(step_u) {
+                    Some(next) => v = next,
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            loop {
+                if v < end {
+                    break;
+                }
+                values.push(v);
+                match v.checked_sub(step_u) {
+                    Some(next) => v = next,
+                    None => break,
+                }
+            }
+        }
+
+        if values.is_empty() {
+            return Err(CudaLinregInterceptError::InvalidInput(format!(
+                "invalid period range: start={}, end={}, step={}",
+                start, end, step
+            )));
+        }
+
+        Ok(values)
+    }
+
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for p in periods {
         out.push(LinearRegInterceptParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 // ---------- Benches ----------

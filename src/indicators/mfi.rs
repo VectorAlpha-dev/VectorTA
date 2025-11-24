@@ -10,16 +10,10 @@
 //! ## Returns
 //! - `Vec<f64>` - MFI values (0-100 scale) matching input length
 //!
-//! ## Developer Status
-//! **SIMD**: Present but disabled by design for single-series; stubs dispatch to scalar due to loop-carried deps.
-//! **AVX2**: Stub (calls scalar)
-//! **AVX512**: Has short/long variants but both stubs
-//! **Streaming**: O(1) - Uses ring buffers for running sums
-//! **Batch**: Row-specific scalar path uses prefix sums of pos/neg flows; accuracy matches scalar. Faster for larger sweeps; for few rows, scalar repeats can be competitive.
-//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
-//!
-//! Decision: Streaming kernel uses branchless classification, avoids modulo in ring advance,
-//! and leverages `mul_add` and reciprocal multiply. Bit-for-bit with baseline thresholds.
+//! ## Developer Status / Decision Log
+//! **SIMD**: Present but intentionally disabled for single-series; AVX2/AVX512 stubs delegate to the scalar path due to loop-carried dependencies and no measured speedup.
+//! **CUDA**: Enabled via `CudaMfi` (one-series × many-params and many-series × one-param) with VRAM-backed outputs, typed errors, and Python CAI v3 + DLPack v1.x interop.
+//! **Batch/Streaming**: Batch uses shared pos/neg-flow prefixes when beneficial; streaming uses branchless classification and a ring buffer. Scalar remains the reference path; numerical outputs match historical tests exactly.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -57,9 +51,13 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::mfi_wrapper::CudaMfi;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum MfiData<'a> {
@@ -129,14 +127,20 @@ impl<'a> MfiInput<'a> {
 
 #[derive(Debug, Error)]
 pub enum MfiError {
-    #[error("mfi: Empty data provided.")]
-    EmptyData,
+    #[error("mfi: Input data slice is empty.")]
+    EmptyInputData,
     #[error("mfi: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("mfi: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("mfi: All values are NaN.")]
     AllValuesNaN,
+    #[error("mfi: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("mfi: Invalid range: start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("mfi: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -161,7 +165,7 @@ fn mfi_prepare<'a>(
 
     let length = typical_price.len();
     if length == 0 || volume.len() != length {
-        return Err(MfiError::EmptyData);
+        return Err(MfiError::EmptyInputData);
     }
 
     let period = input.get_period();
@@ -654,13 +658,30 @@ impl MfiBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &MfiBatchRange) -> Vec<MfiParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, MfiError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
+        }
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(MfiError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
+    let periods = match axis_usize(r.period) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(MfiParams { period: Some(p) });
@@ -677,12 +698,7 @@ pub fn mfi_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(MfiError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(MfiError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -727,9 +743,10 @@ fn mfi_batch_inner(
 ) -> Result<MfiBatchOutput, MfiError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(MfiError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(MfiError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
     let length = typical_price.len();
@@ -753,7 +770,7 @@ fn mfi_batch_inner(
     let cols = length;
 
     if volume.len() != cols {
-        return Err(MfiError::EmptyData);
+        return Err(MfiError::EmptyInputData);
     }
 
     // Use uninitialized memory with NaN prefixes
@@ -847,9 +864,10 @@ fn mfi_batch_inner_into(
 ) -> Result<Vec<MfiParams>, MfiError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(MfiError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(MfiError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -873,7 +891,7 @@ fn mfi_batch_inner_into(
     let cols = length;
 
     if volume.len() != cols {
-        return Err(MfiError::EmptyData);
+        return Err(MfiError::EmptyInputData);
     }
 
     // Heuristic: only precompute prefixes if many rows; always fill warmup per row in into-slice variant
@@ -1229,6 +1247,250 @@ pub struct MfiStreamPy {
     inner: MfiStream,
 }
 
+// ================= CUDA Python VRAM handle (CAI v3 + DLPack v1.x) =================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct MfiDeviceArrayF32Py {
+    pub(crate) inner: Option<DeviceArrayF32>,
+    pub(crate) ctx: Arc<Context>,
+    pub(crate) device_id: i32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl MfiDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _self_ref: PyObject,
+            _ctx: Arc<Context>,
+            _arr: DeviceArrayF32,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ = Box::from_raw(ctx_ptr);
+            }
+        }
+
+        let _ = stream;
+        let _ = dl_device;
+        let _ = copy;
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let total = (rows as i128) * (cols as i128);
+
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let self_ref = unsafe {
+            PyObject::from_borrowed_ptr(py, self as *mut _ as *mut pyo3::ffi::PyObject)
+        };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _self_ref: self_ref,
+            _ctx: self.ctx.clone(),
+            _arr: inner,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr = if total == 0 {
+            std::ptr::null_mut()
+        } else {
+            unsafe {
+                (*(mgr_ptr as *mut ManagerCtx))
+                    ._arr
+                    .buf
+                    .as_device_ptr()
+                    .as_raw() as *mut c_void
+            }
+        };
+
+        let dl = DLTensor {
+            data: data_ptr,
+            device: DLDevice {
+                device_type: 2,
+                device_id: self.device_id,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: dl,
+            manager_ctx: mgr_ptr,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+
+        unsafe {
+            if want_versioned {
+                extern "C" fn cap_destructor(capsule: *mut pyffi::PyObject) {
+                    unsafe {
+                        let name = CString::new("dltensor_versioned").unwrap();
+                        let ptr =
+                            pyffi::PyCapsule_GetPointer(capsule, name.as_ptr()) as *mut c_void;
+                        if !ptr.is_null() {
+                            let wrap = ptr as *mut DLManagedTensorVersioned;
+                            if !wrap.is_null() {
+                                let inner = (*wrap).manager;
+                                if !inner.is_null() {
+                                    if let Some(del) = (*inner).deleter {
+                                        del(inner);
+                                    }
+                                }
+                                let _ = Box::from_raw(wrap);
+                            }
+                            let used = CString::new("used_dltensor_versioned").unwrap();
+                            let _ = pyffi::PyCapsule_SetName(capsule, used.as_ptr());
+                        }
+                    }
+                }
+
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(cap_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                extern "C" fn cap_destructor(capsule: *mut pyffi::PyObject) {
+                    unsafe {
+                        let name = CString::new("dltensor").unwrap();
+                        let ptr =
+                            pyffi::PyCapsule_GetPointer(capsule, name.as_ptr()) as *mut c_void;
+                        if !ptr.is_null() {
+                            let mt = ptr as *mut DLManagedTensor;
+                            if let Some(del) = (*mt).deleter {
+                                del(mt);
+                            }
+                            let used = CString::new("used_dltensor").unwrap();
+                            let _ = pyffi::PyCapsule_SetName(capsule, used.as_ptr());
+                        }
+                    }
+                }
+
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(cap_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
 #[cfg(feature = "python")]
 #[pymethods]
 impl MfiStreamPy {
@@ -1323,7 +1585,7 @@ pub fn mfi_cuda_batch_dev_py(
     volume: PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<MfiDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1335,12 +1597,21 @@ pub fn mfi_cuda_batch_dev_py(
     let sweep = MfiBatchRange {
         period: period_range,
     };
-    let (inner, _combos) = py.allow_threads(|| {
-        let cuda = CudaMfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.mfi_batch_dev(tp, vol, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaMfi::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id() as i32;
+        let (arr, _combos) = cuda
+            .mfi_batch_dev(tp, vol, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(MfiDeviceArrayF32Py {
+        inner: Some(inner),
+        ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1354,7 +1625,7 @@ pub fn mfi_cuda_many_series_one_param_dev_py(
     rows: usize,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<MfiDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1366,12 +1637,21 @@ pub fn mfi_cuda_many_series_one_param_dev_py(
     if tp.len() != cols * rows {
         return Err(PyValueError::new_err("unexpected matrix size"));
     }
-    let inner = py.allow_threads(|| {
-        let cuda = CudaMfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.mfi_many_series_one_param_time_major_dev(tp, vol, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaMfi::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id() as i32;
+        let arr = cuda
+            .mfi_many_series_one_param_time_major_dev(tp, vol, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(MfiDeviceArrayF32Py {
+        inner: Some(inner),
+        ctx,
+        device_id: dev_id,
+    })
 }
 
 #[inline]
@@ -1379,9 +1659,9 @@ pub fn mfi_into_slice(dst: &mut [f64], input: &MfiInput, kern: Kernel) -> Result
     let (typical_price, volume, period, first_valid_idx, chosen) = mfi_prepare(input, kern)?;
 
     if dst.len() != typical_price.len() {
-        return Err(MfiError::InvalidPeriod {
-            period: dst.len(),
-            data_len: typical_price.len(),
+        return Err(MfiError::OutputLengthMismatch {
+            expected: typical_price.len(),
+            got: dst.len(),
         });
     }
 
@@ -1546,9 +1826,12 @@ pub fn mfi_batch_into(
         let combos = expand_grid(&sweep);
         let rows = combos.len();
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("mfi_batch_into: rows*cols overflow"))?;
 
         // Destination must be rows * cols
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         mfi_batch_inner_into(tp, vol, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

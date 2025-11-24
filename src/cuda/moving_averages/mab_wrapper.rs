@@ -22,25 +22,27 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaMabError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
-    Unsupported(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaMabError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaMabError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaMabError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-            CudaMabError::Unsupported(s) => write!(f, "Unsupported: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaMabError {}
 
 pub struct DeviceArrayF32Triplet {
     pub upper: DeviceArrayF32,
@@ -62,15 +64,15 @@ impl DeviceArrayF32Triplet {
 pub struct CudaMab {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: std::sync::Arc<Context>,
+    device_id: u32,
 }
 
 impl CudaMab {
     pub fn new(device_id: usize) -> Result<Self, CudaMabError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMabError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaMabError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = std::sync::Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mab_kernel.ptx"));
         let jit_opts = &[
@@ -80,20 +82,21 @@ impl CudaMab {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) =
+                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaMabError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
         })
     }
 
@@ -144,12 +147,15 @@ impl CudaMab {
     ) -> Result<Vec<f32>, CudaMabError> {
         use crate::indicators::moving_averages::ema::{ema, EmaInput, EmaParams};
         use crate::indicators::moving_averages::sma::{sma, SmaInput, SmaParams};
-        if data_tm_f32.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMabError::InvalidInput("time-major dims overflow".into()))?;
+        if data_tm_f32.len() != expected {
             return Err(CudaMabError::InvalidInput(
                 "time-major dims mismatch".into(),
             ));
         }
-        let mut out_tm = vec![f32::NAN; cols * rows];
+        let mut out_tm = vec![f32::NAN; expected];
         for s in 0..cols {
             // extract column
             let mut col = vec![f64::NAN; rows];
@@ -220,69 +226,9 @@ impl CudaMab {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaMabError::InvalidInput("all values are NaN".into()))?;
 
-        // Expand parameter grid
-        let combos = {
-            use crate::indicators::mab::MabParams as P;
-            let mut v = Vec::new();
-            // reuse CPU expand_grid logic via a tiny mirror
-            let mut fasts = Vec::new();
-            if sweep.fast_period.2 == 0 {
-                fasts.push(sweep.fast_period.0);
-            } else {
-                let mut p = sweep.fast_period.0;
-                while p <= sweep.fast_period.1 {
-                    fasts.push(p);
-                    p += sweep.fast_period.2;
-                }
-            }
-            let mut slows = Vec::new();
-            if sweep.slow_period.2 == 0 {
-                slows.push(sweep.slow_period.0);
-            } else {
-                let mut p = sweep.slow_period.0;
-                while p <= sweep.slow_period.1 {
-                    slows.push(p);
-                    p += sweep.slow_period.2;
-                }
-            }
-            let mut ups = Vec::new();
-            if sweep.devup.2 == 0.0 {
-                ups.push(sweep.devup.0);
-            } else {
-                let mut d = sweep.devup.0;
-                while d <= sweep.devup.1 {
-                    ups.push(d);
-                    d += sweep.devup.2;
-                }
-            }
-            let mut dns = Vec::new();
-            if sweep.devdn.2 == 0.0 {
-                dns.push(sweep.devdn.0);
-            } else {
-                let mut d = sweep.devdn.0;
-                while d <= sweep.devdn.1 {
-                    dns.push(d);
-                    d += sweep.devdn.2;
-                }
-            }
-            for &f in &fasts {
-                for &s in &slows {
-                    for &u in &ups {
-                        for &d in &dns {
-                            v.push(P {
-                                fast_period: Some(f),
-                                slow_period: Some(s),
-                                devup: Some(u),
-                                devdn: Some(d),
-                                fast_ma_type: Some(sweep.fast_ma_type.0.clone()),
-                                slow_ma_type: Some(sweep.slow_ma_type.0.clone()),
-                            });
-                        }
-                    }
-                }
-            }
-            v
-        };
+        // Expand parameter grid using the CPU batch rules (axis_usize/axis_f64, reversed ranges, etc.)
+        let combos =
+            crate::indicators::mab::expand_grid(sweep).map_err(|e| CudaMabError::InvalidInput(e.to_string()))?;
         if combos.is_empty() {
             return Err(CudaMabError::InvalidInput(
                 "no parameter combinations".into(),
@@ -291,15 +237,32 @@ impl CudaMab {
 
         // VRAM check for outputs
         let rows = combos.len();
-        let out_bytes = 3usize * rows * len * std::mem::size_of::<f32>();
-        let in_bytes = len * std::mem::size_of::<f32>();
-        let required = out_bytes + in_bytes;
+        let elem_count = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaMabError::InvalidInput("rows*len overflow".into()))?;
+        let out_bytes = elem_count
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaMabError::InvalidInput("output byte size overflow".into()))?;
+        let in_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMabError::InvalidInput("input byte size overflow".into()))?;
+        let required = out_bytes
+            .checked_add(in_bytes)
+            .ok_or_else(|| CudaMabError::InvalidInput("total byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaMabError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                required as f64 / (1024.0 * 1024.0)
-            )));
+            if let Ok((free, _total)) = mem_get_info() {
+                return Err(CudaMabError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaMabError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
         // Build per-row arrays for devup/devdn
@@ -316,12 +279,10 @@ impl CudaMab {
         });
 
         // Allocate outputs
-        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
-            .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
-        let mut d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
-            .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
-        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
-            .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+        let elems = elem_count;
+        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         if all_same_ma {
             // Single fast/slow MA built on host for this context, then dev once, then apply per-row multipliers.
@@ -335,20 +296,17 @@ impl CudaMab {
                 prices_f32,
                 p0.slow_period.unwrap(),
             )?;
-            let d_fast = DeviceBuffer::from_slice(&fast_ma_host)
-                .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
-            let d_slow = DeviceBuffer::from_slice(&slow_ma_host)
-                .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+            let d_fast = DeviceBuffer::from_slice(&fast_ma_host)?;
+            let d_slow = DeviceBuffer::from_slice(&slow_ma_host)?;
 
             // dev buffer
-            let mut d_dev: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-                .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+            let mut d_dev: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
             // Launch mab_dev_from_ma_f32
             let mut f_dev: Function = self
                 .module
                 .get_function("mab_dev_from_ma_f32")
-                .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+                .map_err(|_e| CudaMabError::MissingKernelSymbol { name: "mab_dev_from_ma_f32" })?;
 
             unsafe {
                 let mut fast_ptr = d_fast.as_device_ptr().as_raw();
@@ -372,33 +330,28 @@ impl CudaMab {
                         BlockSize::xyz(1, 1, 1),
                         0,
                         args,
-                    )
-                    .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+                    )?;
             }
 
             // Upload per-row multipliers
-            let h_ups =
-                LockedBuffer::from_slice(&devups).map_err(|e| CudaMabError::Cuda(e.to_string()))?;
-            let h_dns =
-                LockedBuffer::from_slice(&devdns).map_err(|e| CudaMabError::Cuda(e.to_string()))?;
-            let mut d_ups = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows, &self.stream) }
-                .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
-            let mut d_dns = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows, &self.stream) }
-                .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+            let h_ups = LockedBuffer::from_slice(&devups)?;
+            let h_dns = LockedBuffer::from_slice(&devdns)?;
+            let mut d_ups =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(rows, &self.stream) }?;
+            let mut d_dns =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(rows, &self.stream) }?;
             unsafe {
-                d_ups
-                    .async_copy_from(&h_ups, &self.stream)
-                    .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
-                d_dns
-                    .async_copy_from(&h_dns, &self.stream)
-                    .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+                d_ups.async_copy_from(&h_ups, &self.stream)?;
+                d_dns.async_copy_from(&h_dns, &self.stream)?;
             }
 
             // Apply shared dev to outputs for all rows
             let mut f_apply: Function = self
                 .module
                 .get_function("mab_apply_dev_shared_ma_batch_f32")
-                .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+                .map_err(|_e| CudaMabError::MissingKernelSymbol {
+                    name: "mab_apply_dev_shared_ma_batch_f32",
+                })?;
 
             // Choose a reasonable 1D x grid for time; y=rows
             let block_x: u32 = 256;
@@ -435,16 +388,16 @@ impl CudaMab {
                     &mut mid_ptr as *mut _ as *mut c_void,
                     &mut lo_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&mut f_apply, grid, block, 0, args)
-                    .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+                self.stream.launch(&mut f_apply, grid, block, 0, args)?;
             }
         } else {
             // Generic path: build per-row fast/slow on host for this context and compute row independently
             let mut f_row: Function = self
                 .module
                 .get_function("mab_single_row_from_ma_f32")
-                .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+                .map_err(|_e| CudaMabError::MissingKernelSymbol {
+                    name: "mab_single_row_from_ma_f32",
+                })?;
             for (row, p) in combos.iter().enumerate() {
                 let fast_ma_host = Self::compute_ma_host(
                     p.fast_ma_type.as_deref().unwrap_or("sma"),
@@ -456,10 +409,8 @@ impl CudaMab {
                     prices_f32,
                     p.slow_period.unwrap(),
                 )?;
-                let d_fast = DeviceBuffer::from_slice(&fast_ma_host)
-                    .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
-                let d_slow = DeviceBuffer::from_slice(&slow_ma_host)
-                    .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+                let d_fast = DeviceBuffer::from_slice(&fast_ma_host)?;
+                let d_slow = DeviceBuffer::from_slice(&slow_ma_host)?;
 
                 // target row window
                 let row_off = row * len;
@@ -492,22 +443,18 @@ impl CudaMab {
                         &mut mid_row as *mut _ as *mut c_void,
                         &mut lo_row as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(
-                            &mut f_row,
-                            GridSize::xyz(1, 1, 1),
-                            BlockSize::xyz(1, 1, 1),
-                            0,
-                            args,
-                        )
-                        .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+                    self.stream.launch(
+                        &mut f_row,
+                        GridSize::xyz(1, 1, 1),
+                        BlockSize::xyz(1, 1, 1),
+                        0,
+                        args,
+                    )?;
                 }
             }
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         let trip = DeviceArrayF32Triplet {
             upper: DeviceArrayF32 {
@@ -540,7 +487,10 @@ impl CudaMab {
         if cols == 0 || rows == 0 {
             return Err(CudaMabError::InvalidInput("invalid series dims".into()));
         }
-        if data_tm_f32.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMabError::InvalidInput("cols*rows overflow".into()))?;
+        if data_tm_f32.len() != expected {
             return Err(CudaMabError::InvalidInput(
                 "time-major length mismatch".into(),
             ));
@@ -583,31 +533,30 @@ impl CudaMab {
         let slow_tm_host =
             Self::compute_ma_host_time_major(slow_type, data_tm_f32, cols, rows, slow)?;
         let fast_dev = DeviceArrayF32 {
-            buf: DeviceBuffer::from_slice(&fast_tm_host)
-                .map_err(|e| CudaMabError::Cuda(e.to_string()))?,
+            buf: DeviceBuffer::from_slice(&fast_tm_host)?,
             rows,
             cols,
         };
         let slow_dev = DeviceArrayF32 {
-            buf: DeviceBuffer::from_slice(&slow_tm_host)
-                .map_err(|e| CudaMabError::Cuda(e.to_string()))?,
+            buf: DeviceBuffer::from_slice(&slow_tm_host)?,
             rows,
             cols,
         };
 
         // Outputs
-        let elems = cols * rows;
-        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
-        let mut d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
-        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMabError::InvalidInput("cols*rows overflow".into()))?;
+        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         let mut func: Function = self
             .module
             .get_function("mab_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+            .map_err(|_e| CudaMabError::MissingKernelSymbol {
+                name: "mab_many_series_one_param_time_major_f32",
+            })?;
 
         // We run 1 thread per series (sequential time), grid.y=cols
         let grid = GridSize::xyz(1, cols as u32, 1);
@@ -615,10 +564,8 @@ impl CudaMab {
         unsafe {
             let mut f_ptr = fast_dev.buf.as_device_ptr().as_raw();
             let mut s_ptr = slow_dev.buf.as_device_ptr().as_raw();
-            let mut first_ptr = DeviceBuffer::from_slice(&first_valids)
-                .map_err(|e| CudaMabError::Cuda(e.to_string()))?
-                .as_device_ptr()
-                .as_raw();
+            let mut first_ptr =
+                DeviceBuffer::from_slice(&first_valids)?.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut rows_i = rows as i32;
             let mut fp_i = fast as i32;
@@ -642,14 +589,10 @@ impl CudaMab {
                 &mut mid_ptr as *mut _ as *mut c_void,
                 &mut lo_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&mut func, grid, block, 0, args)
-                .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+            self.stream.launch(&mut func, grid, block, 0, args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMabError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32Triplet {
             upper: DeviceArrayF32 {
                 buf: d_upper,

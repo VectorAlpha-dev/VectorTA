@@ -16,32 +16,37 @@ use cust::context::Context;
 use cust::context::{CacheConfig, CurrentContext};
 use cust::device::Device;
 use cust::function::{BlockSize, FunctionAttribute, GridSize};
-use cust::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use std::sync::Arc;
+use thiserror::Error;
 use std::ffi::c_void;
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Prefer pinned transfers for moderately large buffers to enable true async H2D/D2H.
 const H2D_PIN_THRESHOLD_BYTES: usize = 256 * 1024; // ~256 KiB
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaCgError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaCgError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaCgError::Cuda(e) => write!(f, "CUDA error: {e}"),
-            CudaCgError::InvalidInput(e) => write!(f, "Invalid input: {e}"),
-        }
-    }
-}
-impl std::error::Error for CudaCgError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -83,7 +88,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaCg {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaCgPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -94,12 +99,9 @@ pub struct CudaCg {
 
 impl CudaCg {
     pub fn new(device_id: usize) -> Result<Self, CudaCgError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         // Hint: prefer L1 for read-mostly kernels like CG.
         let _ = CurrentContext::set_cache_config(CacheConfig::PreferL1);
@@ -112,15 +114,13 @@ impl CudaCg {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaCgPolicy::default(),
             last_batch: None,
@@ -136,11 +136,16 @@ impl CudaCg {
         Ok(s)
     }
 
+    #[inline]
     pub fn synchronize(&self) -> Result<(), CudaCgError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCgError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
+
+    #[inline]
+    pub fn context_arc_clone(&self) -> Arc<Context> { self.context.clone() }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
@@ -176,6 +181,74 @@ impl CudaCg {
         }
     }
 
+    // ---------- Utilities ----------
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else { true }
+    }
+
+    #[inline]
+    fn assert_current_device(&self) -> Result<(), CudaCgError> {
+        unsafe {
+            let mut dev: i32 = -1;
+            let _ = cust::sys::cuCtxGetDevice(&mut dev);
+            if dev < 0 {
+                return Ok(());
+            }
+            let cur = dev as u32;
+            if cur != self.device_id {
+                return Err(CudaCgError::DeviceMismatch { buf: self.device_id, current: cur });
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn validate_launch(&self, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32) -> Result<(), CudaCgError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads || bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
+            return Err(CudaCgError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
+    }
+
     // -------- Batch (one series × many params) --------
     pub fn cg_batch_dev(
         &self,
@@ -186,8 +259,9 @@ impl CudaCg {
         if len == 0 {
             return Err(CudaCgError::InvalidInput("empty input".into()));
         }
+        let _ = self.assert_current_device();
 
-        let combos = expand_grid_cg(sweep);
+        let combos = expand_grid_cg(sweep)?;
         if combos.is_empty() {
             return Err(CudaCgError::InvalidInput("no parameter combos".into()));
         }
@@ -212,34 +286,47 @@ impl CudaCg {
             )));
         }
 
+        // Pre-flight VRAM fit check (prices + output; allow headroom)
+        let prices_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaCgError::InvalidInput("byte size overflow".into()))?;
+        let elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaCgError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaCgError::InvalidInput("byte size overflow".into()))?;
+        let required = prices_bytes.saturating_add(out_bytes);
+        let headroom = 64 * 1024 * 1024; // 64MB
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaCgError::OutOfMemory { required, free, headroom });
+            } else {
+                return Err(CudaCgError::InvalidInput("insufficient device memory".into()));
+            }
+        }
+
         // Upload inputs
         // ---------- Upload inputs (with pinned H2D for large buffers) ----------
         let d_prices: DeviceBuffer<f32> = if prices_f32.len() * std::mem::size_of::<f32>()
             >= H2D_PIN_THRESHOLD_BYTES
         {
-            let h_locked = LockedBuffer::from_slice(prices_f32)
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+            let h_locked = LockedBuffer::from_slice(prices_f32)?;
             unsafe {
-                let mut buf = DeviceBuffer::<f32>::uninitialized_async(len, &self.stream)
-                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
-                buf.async_copy_from(&h_locked, &self.stream)
-                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                let mut buf = DeviceBuffer::<f32>::uninitialized_async(len, &self.stream)?;
+                buf.async_copy_from(&h_locked, &self.stream)?;
                 buf
             }
         } else {
-            DeviceBuffer::from_slice(prices_f32)
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice(prices_f32)?
         };
         let periods: Vec<i32> = combos
             .iter()
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
-        let d_periods =
-            DeviceBuffer::from_slice(&periods).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len * combos.len())
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?
-        };
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
         // ---------- Kernel selection heuristic (rolling vs prefix) ----------
         let avg_period: f64 = periods.iter().map(|&p| p as f64).sum::<f64>() / (periods.len() as f64);
@@ -248,21 +335,15 @@ impl CudaCg {
 
         if use_prefix {
             // Prepare prefix arrays
-            let mut d_P: DeviceBuffer<f32> = unsafe {
-                DeviceBuffer::uninitialized(len).map_err(|e| CudaCgError::Cuda(e.to_string()))?
-            };
-            let mut d_Q: DeviceBuffer<f32> = unsafe {
-                DeviceBuffer::uninitialized(len).map_err(|e| CudaCgError::Cuda(e.to_string()))?
-            };
-            let mut d_C: DeviceBuffer<i32> = unsafe {
-                DeviceBuffer::uninitialized(len).map_err(|e| CudaCgError::Cuda(e.to_string()))?
-            };
+            let mut d_P: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len)? };
+            let mut d_Q: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len)? };
+            let mut d_C: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len)? };
 
             // cg_prefix_prepare_f32<<<1,1>>>(prices, len, P, Q, C)
             let mut prep = self
                 .module
                 .get_function("cg_prefix_prepare_f32")
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaCgError::MissingKernelSymbol { name: "cg_prefix_prepare_f32" })?;
             // Function-level L1 preference
             let _ = prep.set_cache_config(CacheConfig::PreferL1);
             unsafe {
@@ -278,16 +359,15 @@ impl CudaCg {
                     &mut q_ptr as *mut _ as *mut c_void,
                     &mut c_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&prep, (1, 1, 1), (1, 1, 1), 0, args)
-                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                self.validate_launch(1, 1, 1, 1, 1, 1)?;
+                self.stream.launch(&prep, (1, 1, 1), (1, 1, 1), 0, args)?;
             }
 
             // Launch from-prefix kernel with occupancy-guided block size
             let mut func = self
                 .module
                 .get_function("cg_batch_f32_from_prefix")
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaCgError::MissingKernelSymbol { name: "cg_batch_f32_from_prefix" })?;
             let _ = func.set_cache_config(CacheConfig::PreferL1);
             let (suggested_block_x, _min_grid) = func
                 .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
@@ -322,9 +402,8 @@ impl CudaCg {
                     &mut c_ptr as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)
-                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
+                self.stream.launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
             }
             self.maybe_log_batch_debug();
         } else {
@@ -332,7 +411,7 @@ impl CudaCg {
             let mut func = self
                 .module
                 .get_function("cg_batch_f32")
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaCgError::MissingKernelSymbol { name: "cg_batch_f32" })?;
             let _ = func.set_cache_config(CacheConfig::PreferL1);
             let (suggested_block_x, _min_grid) = func
                 .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
@@ -361,9 +440,8 @@ impl CudaCg {
                     &mut first_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)
-                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
+                self.stream.launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
             }
             self.maybe_log_batch_debug();
         }
@@ -391,6 +469,11 @@ impl CudaCg {
         if period == 0 || period > rows {
             return Err(CudaCgError::InvalidInput("invalid period".into()));
         }
+        let _ = self.assert_current_device();
+
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaCgError::InvalidInput("rows*cols overflow".into()))?;
 
         // Compute per-series first_valids over time-major input
         let first_valids = compute_first_valids_time_major(prices_tm_f32, cols, rows);
@@ -399,30 +482,22 @@ impl CudaCg {
         let d_prices: DeviceBuffer<f32> = if prices_tm_f32.len() * std::mem::size_of::<f32>()
             >= H2D_PIN_THRESHOLD_BYTES
         {
-            let h_locked = LockedBuffer::from_slice(prices_tm_f32)
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+            let h_locked = LockedBuffer::from_slice(prices_tm_f32)?;
             unsafe {
-                let mut buf = DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream)
-                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
-                buf.async_copy_from(&h_locked, &self.stream)
-                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                let mut buf = DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream)?;
+                buf.async_copy_from(&h_locked, &self.stream)?;
                 buf
             }
         } else {
-            DeviceBuffer::from_slice(prices_tm_f32)
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice(prices_tm_f32)?
         };
-        let d_first =
-            DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(cols * rows)
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?
-        };
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
         let mut func = self
             .module
             .get_function("cg_many_series_one_param_f32")
-            .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCgError::MissingKernelSymbol { name: "cg_many_series_one_param_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let (suggested_block_x, _min_grid) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
@@ -451,9 +526,8 @@ impl CudaCg {
                 &mut period_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+            self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
+            self.stream.launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
         }
         self.maybe_log_many_debug();
 
@@ -477,24 +551,24 @@ impl CudaCg {
         if len == 0 || periods.is_empty() {
             return Err(CudaCgError::InvalidInput("empty input".into()));
         }
+        let _ = self.assert_current_device();
         let n_combos = periods.len();
+        let elems = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaCgError::InvalidInput("rows*cols overflow".into()))?;
 
-        let d_periods = DeviceBuffer::from_slice(periods)
-            .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len * n_combos)
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?
-        };
+        let d_periods = DeviceBuffer::from_slice(periods)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
         let use_prefix = (n_combos >= 2048) && (len >= 16_384);
 
         if use_prefix {
-            let mut d_P: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len).map_err(|e| CudaCgError::Cuda(e.to_string()))? };
-            let mut d_Q: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len).map_err(|e| CudaCgError::Cuda(e.to_string()))? };
-            let mut d_B: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len).map_err(|e| CudaCgError::Cuda(e.to_string()))? };
+            let mut d_P: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len)? };
+            let mut d_Q: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len)? };
+            let mut d_B: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len)? };
 
             let mut prep = self.module.get_function("cg_build_prefix_f32")
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaCgError::MissingKernelSymbol { name: "cg_build_prefix_f32" })?;
             let _ = prep.set_cache_config(CacheConfig::PreferL1);
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -509,12 +583,12 @@ impl CudaCg {
                     &mut q_ptr as *mut _ as *mut c_void,
                     &mut b_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&prep, (1,1,1), (1,1,1), 0, args)
-                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                self.validate_launch(1, 1, 1, 1, 1, 1)?;
+                self.stream.launch(&prep, (1,1,1), (1,1,1), 0, args)?;
             }
 
             let mut func = self.module.get_function("cg_batch_from_prefix_f32")
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaCgError::MissingKernelSymbol { name: "cg_batch_from_prefix_f32" })?;
             let _ = func.set_cache_config(CacheConfig::PreferL1);
             let (suggested_block_x, _) = func
                 .suggested_launch_configuration(0, BlockSize::xyz(0,0,0))
@@ -543,12 +617,12 @@ impl CudaCg {
                     &mut first_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func, (grid_x,1,1), (block_x,1,1), 0, args)
-                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                self.validate_launch(grid_x,1,1,block_x,1,1)?;
+                self.stream.launch(&func, (grid_x,1,1), (block_x,1,1), 0, args)?;
             }
         } else {
             let mut func = self.module.get_function("cg_batch_f32")
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaCgError::MissingKernelSymbol { name: "cg_batch_f32" })?;
             let _ = func.set_cache_config(CacheConfig::PreferL1);
             let (suggested_block_x, _) = func
                 .suggested_launch_configuration(0, BlockSize::xyz(0,0,0))
@@ -573,8 +647,8 @@ impl CudaCg {
                     &mut first_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func, (grid_x,1,1), (block_x,1,1), 0, args)
-                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                self.validate_launch(grid_x,1,1,block_x,1,1)?;
+                self.stream.launch(&func, (grid_x,1,1), (block_x,1,1), 0, args)?;
             }
         }
 
@@ -596,16 +670,18 @@ impl CudaCg {
         if period <= 0 || (period as usize) > rows {
             return Err(CudaCgError::InvalidInput("invalid period".into()));
         }
+        let _ = self.assert_current_device();
 
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(cols * rows)
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?
-        };
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaCgError::InvalidInput("rows*cols overflow".into()))?;
+
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
         let mut func = self
             .module
             .get_function("cg_many_series_one_param_f32")
-            .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaCgError::MissingKernelSymbol { name: "cg_many_series_one_param_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let (suggested_block_x, _min_grid) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
@@ -635,25 +711,39 @@ impl CudaCg {
                 &mut period_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)
-                .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+            self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
+            self.stream.launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
         }
 
         Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 }
 
-fn expand_grid_cg(r: &CgBatchRange) -> Vec<CgParams> {
+fn expand_grid_cg(r: &CgBatchRange) -> Result<Vec<CgParams>, CudaCgError> {
     let (start, end, step) = r.period;
-    let vals: Vec<usize> = if step == 0 || start == end {
-        vec![start]
+    if step == 0 || start == end {
+        return Ok(vec![CgParams { period: Some(start) }]);
+    }
+    if step == 0 { return Ok(vec![CgParams { period: Some(start) }]); }
+    let mut vals = Vec::new();
+    if start < end {
+        let mut v = start;
+        while v <= end {
+            vals.push(v);
+            if let Some(next) = v.checked_add(step) { if next > v { v = next; } else { break; } } else { break; }
+        }
     } else {
-        (start..=end).step_by(step).collect()
-    };
-    vals.into_iter()
-        .map(|p| CgParams { period: Some(p) })
-        .collect()
+        let mut v = start;
+        while v >= end {
+            vals.push(v);
+            if let Some(next) = v.checked_sub(step) { if next < v { v = next; } else { break; } } else { break; }
+            if v == 0 { break; }
+        }
+    }
+    if vals.is_empty() {
+        return Err(CudaCgError::InvalidInput("empty parameter expansion".into()));
+    }
+    Ok(vals.into_iter().map(|p| CgParams { period: Some(p) }).collect())
 }
 
 fn compute_first_valids_time_major(data_tm: &[f32], cols: usize, rows: usize) -> Vec<i32> {

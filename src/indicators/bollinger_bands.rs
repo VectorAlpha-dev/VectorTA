@@ -1,5 +1,7 @@
 //! # Bollinger Bands Indicator
 //!
+//! Decision log: SIMD enabled (row AVX2/AVX512 blend) with scalar fallbacks; CUDA path provided for SMA+stddev via prefix-sum kernels. Python interop uses CAI v3 and DLPack; numerical outputs unchanged.
+//!
 //! Volatility bands using a moving average and deviation (stddev or alternatives).
 //!
 //! ## Parameters
@@ -235,8 +237,8 @@ impl BollingerBandsBuilder {
 
 #[derive(Debug, Error)]
 pub enum BollingerBandsError {
-    #[error("bollinger_bands: Empty data provided.")]
-    EmptyData,
+    #[error("bollinger_bands: Empty input data.")]
+    EmptyInputData,
     #[error("bollinger_bands: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("bollinger_bands: All values are NaN.")]
@@ -245,10 +247,21 @@ pub enum BollingerBandsError {
     UnderlyingFunctionFailed(String),
     #[error("bollinger_bands: Not enough valid data for period: needed={needed}, valid={valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("bollinger_bands: output length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("bollinger_bands: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("bollinger_bands: invalid range expansion (start={start}, end={end}, step={step})")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("bollinger_bands: invalid range (f64): start={start}, end={end}, step={step}")]
+    InvalidRangeF64 { start: f64, end: f64, step: f64 },
+    // Legacy variant retained for compatibility; not used going forward.
     #[error(
         "bollinger_bands: Kernel must be a batch variant for batch operations. Got: {kernel:?}"
     )]
     KernelNotBatch { kernel: Kernel },
+    #[error("bollinger_bands: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -277,7 +290,7 @@ fn bb_prepare<'a>(
 > {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
-        return Err(BollingerBandsError::EmptyData);
+        return Err(BollingerBandsError::EmptyInputData);
     }
 
     let period = input.get_period();
@@ -458,9 +471,9 @@ pub fn bollinger_bands_into(
         || out_middle.len() != data.len()
         || out_lower.len() != data.len()
     {
-        return Err(BollingerBandsError::InvalidPeriod {
-            period,
-            data_len: data.len(),
+        return Err(BollingerBandsError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out_upper.len().min(out_middle.len()).min(out_lower.len()),
         });
     }
 
@@ -505,9 +518,9 @@ pub fn bollinger_bands_into_slices(
     let (data, period, devup, devdn, matype, devtype, first, chosen) = bb_prepare(input, kern)?;
 
     if out_u.len() != data.len() || out_m.len() != data.len() || out_l.len() != data.len() {
-        return Err(BollingerBandsError::InvalidPeriod {
-            period: out_m.len(),
-            data_len: data.len(),
+        return Err(BollingerBandsError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out_u.len().min(out_m.len()).min(out_l.len()),
         });
     }
 
@@ -1333,60 +1346,106 @@ impl BollingerBandsBatchOutput {
     }
 }
 
-fn expand_grid(r: &BollingerBandsBatchRange) -> Vec<BollingerBandsParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &BollingerBandsBatchRange) -> Result<Vec<BollingerBandsParams>, BollingerBandsError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, BollingerBandsError> {
         if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
-    }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                cur = cur.saturating_add(step);
+                if cur == *v.last().unwrap() {
+                    break;
+                }
+            }
+        } else {
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                let next = cur.saturating_sub(step);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+                if cur == 0 && end > 0 {
+                    break;
+                }
+            }
         }
-        v
+        if v.is_empty() {
+            return Err(BollingerBandsError::InvalidRange { start, end, step });
+        }
+        Ok(v)
+    }
+    fn axis_f64(
+        (start, end, step): (f64, f64, f64),
+    ) -> Result<Vec<f64>, BollingerBandsError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        let mut out = Vec::new();
+        if start < end {
+            let st = if step > 0.0 { step } else { -step };
+            let mut x = start;
+            while x <= end + 1e-12 {
+                out.push(x);
+                x += st;
+            }
+        } else {
+            let st = if step > 0.0 { -step } else { step };
+            if st.abs() < 1e-12 {
+                return Ok(vec![start]);
+            }
+            let mut x = start;
+            while x >= end - 1e-12 {
+                out.push(x);
+                x += st;
+            }
+        }
+        if out.is_empty() {
+            return Err(BollingerBandsError::InvalidRangeF64 {
+                start,
+                end,
+                step,
+            });
+        }
+        Ok(out)
     }
     fn axis_str((start, end, _step): (String, String, usize)) -> Vec<String> {
-        if start == end {
-            vec![start.clone()]
-        } else {
-            vec![start, end]
-        }
+        if start == end { vec![start.clone()] } else { vec![start, end] }
     }
 
-    let periods = axis_usize(r.period);
-    let devups = axis_f64(r.devup);
-    let devdns = axis_f64(r.devdn);
+    let periods = axis_usize(r.period)?;
+    let devups = axis_f64(r.devup)?;
+    let devdns = axis_f64(r.devdn)?;
     let matypes = axis_str(r.matype.clone());
-    let devtypes = axis_usize(r.devtype);
+    let devtypes = axis_usize(r.devtype)?;
 
     let mut out = Vec::with_capacity(
-        periods.len() * devups.len() * devdns.len() * matypes.len() * devtypes.len(),
+        periods
+            .len()
+            .saturating_mul(devups.len())
+            .saturating_mul(devdns.len())
+            .saturating_mul(matypes.len())
+            .saturating_mul(devtypes.len()),
     );
     for &p in &periods {
         for &u in &devups {
             for &d in &devdns {
                 for m in &matypes {
                     for &t in &devtypes {
-                        out.push(BollingerBandsParams {
-                            period: Some(p),
-                            devup: Some(u),
-                            devdn: Some(d),
-                            matype: Some(m.clone()),
-                            devtype: Some(t),
-                        });
+                        out.push(BollingerBandsParams { period: Some(p), devup: Some(u), devdn: Some(d), matype: Some(m.clone()), devtype: Some(t) });
                     }
                 }
             }
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn bollinger_bands_batch_with_kernel(
@@ -1398,7 +1457,7 @@ pub fn bollinger_bands_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(BollingerBandsError::KernelNotBatch { kernel: k });
+            return Err(BollingerBandsError::InvalidKernelForBatch(k));
         }
     };
     let simd = match kernel {
@@ -1432,13 +1491,7 @@ fn bollinger_bands_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<BollingerBandsBatchOutput, BollingerBandsError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(BollingerBandsError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1454,6 +1507,10 @@ fn bollinger_bands_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
+    // Checked arithmetic for rows * cols; then allocate uninitialized matrices
+    let _ = rows.checked_mul(cols).ok_or_else(|| {
+        BollingerBandsError::InvalidInput("rows*cols overflow".into())
+    })?;
     // Allocate uninitialized matrices
     let mut upper_mu = make_uninit_matrix(rows, cols);
     let mut middle_mu = make_uninit_matrix(rows, cols);
@@ -1603,13 +1660,7 @@ pub fn bollinger_bands_batch_inner_into(
     out_middle: &mut [f64],
     out_lower: &mut [f64],
 ) -> Result<Vec<BollingerBandsParams>, BollingerBandsError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(BollingerBandsError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -1624,6 +1675,13 @@ pub fn bollinger_bands_batch_inner_into(
     }
 
     let cols = data.len();
+    let total = combos
+        .len()
+        .checked_mul(cols)
+        .ok_or_else(|| BollingerBandsError::InvalidInput("rows*cols overflow".into()))?;
+    if out_upper.len() != total || out_middle.len() != total || out_lower.len() != total {
+        return Err(BollingerBandsError::OutputLengthMismatch { expected: total, got: out_upper.len().min(out_middle.len()).min(out_lower.len()) });
+    }
 
     let do_row = |row: usize, out_u: &mut [f64], out_m: &mut [f64], out_l: &mut [f64]| unsafe {
         let p = combos[row].period.unwrap();
@@ -2489,9 +2547,7 @@ mod tests {
         let result = bollinger_bands_batch_with_kernel(&data, &sweep, Kernel::Scalar);
         assert!(matches!(
             result,
-            Err(BollingerBandsError::KernelNotBatch {
-                kernel: Kernel::Scalar
-            })
+            Err(BollingerBandsError::InvalidKernelForBatch(Kernel::Scalar))
         ));
 
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -2499,9 +2555,7 @@ mod tests {
             let result = bollinger_bands_batch_with_kernel(&data, &sweep, Kernel::Avx2);
             assert!(matches!(
                 result,
-                Err(BollingerBandsError::KernelNotBatch {
-                    kernel: Kernel::Avx2
-                })
+                Err(BollingerBandsError::InvalidKernelForBatch(Kernel::Avx2))
             ));
         }
     }
@@ -2790,7 +2844,8 @@ pub fn bollinger_bands_batch_py<'py>(
     };
 
     // 1. Expand grid once to know rows*cols
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2947,7 +3002,8 @@ pub fn bollinger_bands_batch_js(
     };
 
     // Expand grid and allocate output vectors
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = data.len();
 
@@ -3076,7 +3132,8 @@ pub fn bollinger_bands_batch_metadata_js(
         devtype: (devtype, devtype, 0),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let mut metadata = Vec::with_capacity(combos.len() * 4);
 
     for combo in combos {
@@ -3252,7 +3309,8 @@ pub fn bollinger_bands_batch_into(
             devtype: (devtype, devtype, 0),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
@@ -3315,13 +3373,288 @@ pub fn bb_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsV
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaBollingerBands};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::bollinger_bands_wrapper::DeviceArrayF32Bb;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyReadonlyArray1;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::{pyfunction, PyResult, Python};
 #[cfg(all(feature = "python", feature = "cuda"))]
 // PyValueError already imported above under `#[cfg(feature = "python")]`.
+
+// Bollinger-specific CUDA device array wrapper with CAI v3 + DLPack v1.x
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct BollingerDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32Bb,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl BollingerDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producing kernels synchronize before returning.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.inner.device_id as i32)
+    }
+
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<&pyo3::types::PyAny>,
+        dl_device: Option<&pyo3::types::PyAny>,
+        copy: Option<&pyo3::types::PyAny>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLVersion {
+            major: i32,
+            minor: i32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            dl_managed_tensor: DLManagedTensor,
+            version: DLVersion,
+        }
+
+        struct HolderLegacy {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32Bb,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32Bb,
+        }
+
+        unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).manager_ctx as *mut HolderLegacy;
+            if !holder.is_null() {
+                drop(Box::from_raw(holder));
+            }
+            drop(Box::from_raw(p));
+        }
+
+        unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).dl_managed_tensor.manager_ctx as *mut HolderV1;
+            if !holder.is_null() {
+                drop(Box::from_raw(holder));
+            }
+            drop(Box::from_raw(p));
+        }
+
+        unsafe extern "C" fn cap_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+        unsafe extern "C" fn cap_destructor_v1(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                let mt = &mut (*ptr).dl_managed_tensor;
+                if let Some(del) = mt.deleter {
+                    del(mt);
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        let _ = (stream, dl_device, copy);
+        let alloc_dev = self.inner.device_id as i32;
+
+        // Move VRAM handle into holder; leave a dummy in self.
+        let dummy = cust::memory::DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx_clone = self.inner.ctx.clone();
+        let dev_id = self.inner.device_id;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32Bb {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+                ctx: ctx_clone,
+                device_id: dev_id,
+            },
+        );
+
+        let want_v1 = if let Some(t) = max_version {
+            t.getattr("__iter")
+                .ok()
+                .and_then(|_| t.extract::<(i32, i32)>().ok())
+                .map(|(maj, _)| maj >= 1)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let data_ptr = if inner.rows == 0 || inner.cols == 0 {
+            null_mut()
+        } else {
+            inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+        };
+
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    dl_managed_tensor: DLManagedTensor {
+                        dl_tensor: DLTensor {
+                            data: data_ptr,
+                            device: DLDevice { device_type: 2, device_id: alloc_dev },
+                            ndim: 2,
+                            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                            shape: null_mut(),
+                            strides: null_mut(),
+                            byte_offset: 0,
+                        },
+                        manager_ctx: null_mut(),
+                        deleter: Some(|mt| {
+                            if !mt.is_null() {
+                                let outer = (mt as *mut u8)
+                                    .offset(-(std::mem::size_of::<DLVersion>() as isize))
+                                    as *mut DLManagedTensorVersioned;
+                                deleter_v1(outer);
+                            }
+                        }),
+                    },
+                    version: DLVersion { major: 1, minor: 0 },
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                arr: inner,
+            });
+            holder.managed.dl_managed_tensor.dl_tensor.shape =
+                holder.shape.as_mut_ptr();
+            holder.managed.dl_managed_tensor.dl_tensor.strides =
+                holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            holder.managed.dl_managed_tensor.manager_ctx =
+                &mut *holder as *mut HolderV1 as *mut std::ffi::c_void;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_v1),
+                )
+            };
+            if capsule.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mut holder = Box::new(HolderLegacy {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice { device_type: 2, device_id: alloc_dev },
+                        ndim: 2,
+                        dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                        shape: null_mut(),
+                        strides: null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: null_mut(),
+                    deleter: Some(deleter_legacy),
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                arr: inner,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            holder.managed.manager_ctx =
+                &mut *holder as *mut HolderLegacy as *mut std::ffi::c_void;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_legacy),
+                )
+            };
+            if capsule.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        }
+    }
+}
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "bollinger_bands_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, devup_range, devdn_range, device_id=0))]
@@ -3332,7 +3665,7 @@ pub fn bollinger_bands_cuda_batch_dev_py(
     devup_range: (f64, f64, f64),
     devdn_range: (f64, f64, f64),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(BollingerDeviceArrayF32Py, BollingerDeviceArrayF32Py, BollingerDeviceArrayF32Py)> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -3351,9 +3684,9 @@ pub fn bollinger_bands_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: up },
-        DeviceArrayF32Py { inner: mid },
-        DeviceArrayF32Py { inner: lo },
+        BollingerDeviceArrayF32Py { inner: up },
+        BollingerDeviceArrayF32Py { inner: mid },
+        BollingerDeviceArrayF32Py { inner: lo },
     ))
 }
 
@@ -3369,7 +3702,7 @@ pub fn bollinger_bands_cuda_many_series_one_param_dev_py(
     devup: f32,
     devdn: f32,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(BollingerDeviceArrayF32Py, BollingerDeviceArrayF32Py, BollingerDeviceArrayF32Py)> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -3383,8 +3716,8 @@ pub fn bollinger_bands_cuda_many_series_one_param_dev_py(
         .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: up },
-        DeviceArrayF32Py { inner: mid },
-        DeviceArrayF32Py { inner: lo },
+        BollingerDeviceArrayF32Py { inner: up },
+        BollingerDeviceArrayF32Py { inner: mid },
+        BollingerDeviceArrayF32Py { inner: lo },
     ))
 }

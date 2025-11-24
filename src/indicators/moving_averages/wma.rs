@@ -204,8 +204,8 @@ pub enum WmaError {
     #[error("wma: Invalid range expansion: start = {start}, end = {end}, step = {step}")]
     InvalidRange { start: usize, end: usize, step: usize },
 
-    #[error("wma: size overflow computing rows*cols")]
-    SizeOverflow,
+    #[error("wma: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -324,8 +324,8 @@ fn wma_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, o
 #[inline]
 pub fn wma_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
     let lookback = period - 1;
-    let sum_of_weights = (period * (period + 1)) >> 1;
-    let divider = sum_of_weights as f64;
+    // Avoid potential usize overflow in period * (period + 1) by computing in f64.
+    let divider = (period as f64) * ((period + 1) as f64) * 0.5;
 
     let mut weighted_sum = 0.0;
     let mut plain_sum = 0.0;
@@ -596,27 +596,29 @@ impl WmaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &WmaBatchRange) -> Vec<WmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        // Robust expansion rules:
-        // - step == 0: static (single value)
-        // - start == end: single value
-        // - start < end and step > 0: increasing inclusive range
-        // - start > end and step > 0: decreasing inclusive range
+        // Hardened semantics:
+        // - step == 0 OR start == end => static (single value)
+        // - start < end => increasing inclusive with step>0
+        // - start > end => decreasing inclusive with step>0
         if step == 0 || start == end {
             return vec![start];
         }
         if start < end {
-            return (start..=end).step_by(step).collect();
+            return (start..=end).step_by(step.max(1)).collect();
         }
-        // start > end: build a decreasing sequence without underflow
-        let mut v = start;
+        // Decreasing sequence using isize to avoid underflow/overflow on end+step
         let mut out = Vec::new();
-        loop {
-            out.push(v);
-            if v <= end + step { break; }
-            v -= step;
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            out.push(x as usize);
+            x -= st;
+        }
+        if out.is_empty() {
+            return out;
         }
         if *out.last().unwrap() != end {
-            // ensure inclusive end if not hit exactly by stepping
             out.push(end);
         }
         out
@@ -661,6 +663,11 @@ fn wma_batch_inner(
     if cols == 0 {
         return Err(WmaError::EmptyInputData);
     }
+
+    // Guard rows*cols before allocating backing storage
+    rows
+        .checked_mul(cols)
+        .ok_or_else(|| WmaError::InvalidInput("rows*cols overflow".into()))?;
 
     // Allocate uninitialized rows×cols
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -711,10 +718,8 @@ fn wma_batch_inner_into(
 ) -> Result<Vec<WmaParams>, WmaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(WmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (start, end, step) = sweep.period;
+        return Err(WmaError::InvalidRange { start, end, step });
     }
 
     let first = data
@@ -735,7 +740,7 @@ fn wma_batch_inner_into(
     // Guard output slice length and multiplication overflow
     let needed = rows
         .checked_mul(cols)
-        .ok_or(WmaError::SizeOverflow)?;
+        .ok_or_else(|| WmaError::InvalidInput("rows*cols overflow".into()))?;
     if out.len() != needed {
         return Err(WmaError::OutputLengthMismatch {
             expected: needed,
@@ -1757,7 +1762,10 @@ pub fn wma_batch_py<'py>(
     let cols = slice_in.len();
 
     // 2. Pre-allocate NumPy array (1-D, will reshape later)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let needed = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [needed], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // 3. Heavy work without the GIL

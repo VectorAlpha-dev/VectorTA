@@ -3,6 +3,7 @@
 //! Qstick measures the average difference between the Close and Open over a specified period.
 //! A positive Qstick indicates that, on average, the market closes above its open, while a
 //! negative Qstick indicates the opposite.
+//! Decision log: SIMD enabled (AVX2/AVX512) for initial sums; CUDA batch/many-series wrappers present with VRAM handles and Python CAI v3 + DLPack v1.x; scalar path remains the reference and numerical outputs stay unchanged.
 //!
 //! ## Parameters
 //! - **period**: The window size (number of data points). Defaults to 5.
@@ -174,12 +175,22 @@ impl QstickBuilder {
 
 #[derive(Debug, Error)]
 pub enum QstickError {
+    #[error("qstick: Input data slice is empty.")]
+    EmptyInputData,
     #[error("qstick: All values are NaN.")]
     AllValuesNaN,
     #[error("qstick: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("qstick: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("qstick: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("qstick: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("qstick: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("qstick: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -207,6 +218,9 @@ pub fn qstick_with_kernel(
     let len = open.len().min(close.len());
     let period = input.get_period();
 
+    if len == 0 {
+        return Err(QstickError::EmptyInputData);
+    }
     if period == 0 || period > len {
         return Err(QstickError::InvalidPeriod {
             period,
@@ -233,7 +247,12 @@ pub fn qstick_with_kernel(
         });
     }
 
-    let mut out = alloc_with_nan_prefix(len, first + period - 1);
+    let warmup_end = first
+        .checked_add(period)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| QstickError::InvalidInput("warmup index overflow".into()))?;
+
+    let mut out = alloc_with_nan_prefix(len, warmup_end);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -284,16 +303,19 @@ pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickErr
     let period = input.get_period();
 
     // Length/period validation mirrors the Vec API and `qstick_into_slice` behavior
-    if len == 0 || period == 0 || period > len {
+    if len == 0 {
+        return Err(QstickError::EmptyInputData);
+    }
+    if period == 0 || period > len {
         return Err(QstickError::InvalidPeriod {
             period,
             data_len: len,
         });
     }
     if out.len() != len {
-        return Err(QstickError::InvalidPeriod {
-            period,
-            data_len: len,
+        return Err(QstickError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
         });
     }
 
@@ -317,8 +339,11 @@ pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickErr
     }
 
     // Warmup prefix: identical to alloc_with_nan_prefix (quiet NaN payload)
-    let warm = first + period - 1;
-    let warm = warm.min(len);
+    let warm = first
+        .checked_add(period)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| QstickError::InvalidInput("warmup index overflow".into()))?
+        .min(len);
     for v in &mut out[..warm] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
@@ -682,10 +707,7 @@ pub fn qstick_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(QstickError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(QstickError::InvalidKernelForBatch(kernel))
         }
     };
     let simd = match kern {
@@ -779,24 +801,51 @@ impl QstickBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &QstickBatchRange) -> Vec<QstickParams> {
+fn expand_grid(r: &QstickBatchRange) -> Result<Vec<QstickParams>, QstickError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, QstickError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        let mut v = Vec::new();
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                let next = cur.saturating_add(step);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+            }
+        } else {
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                let next = cur.saturating_sub(step);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+                if cur == 0 && end > 0 {
+                    break;
+                }
+            }
+        }
+        if v.is_empty() {
+            return Err(QstickError::InvalidRange { start, end, step });
+        }
+        Ok(v)
+    }
+
     let (start, end, step) = r.period;
-    if step == 0 || start == end {
-        return vec![QstickParams {
-            period: Some(start),
-        }];
-    }
-
-    // Pre-calculate capacity to avoid reallocations
-    let count = ((end - start) / step) + 1;
-    let mut out = Vec::with_capacity(count);
-
-    let mut p = start;
-    while p <= end {
+    let periods = axis_usize((start, end, step))?;
+    let mut out = Vec::with_capacity(periods.len());
+    for p in periods {
         out.push(QstickParams { period: Some(p) });
-        p += step;
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -827,14 +876,11 @@ fn qstick_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<QstickBatchOutput, QstickError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(QstickError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let len = open.len().min(close.len());
+    if len == 0 {
+        return Err(QstickError::EmptyInputData);
+    }
 
     // Find first valid index
     let mut first = 0;
@@ -858,13 +904,22 @@ fn qstick_batch_inner(
     let rows = combos.len();
     let cols = len;
 
+    let total_elems = rows
+        .checked_mul(cols)
+        .ok_or_else(|| QstickError::InvalidInput("rows*cols overflow".into()))?;
+
     // Use proper uninitialized memory allocation like ALMA
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     // Calculate warmup periods for each parameter combination
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.period.unwrap() - 1)
+        .map(|c| {
+            first
+                .checked_add(c.period.unwrap_or(0))
+                .and_then(|v| v.checked_sub(1))
+                .unwrap_or(first)
+        })
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
@@ -880,7 +935,7 @@ fn qstick_batch_inner(
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
-            buf_guard.len(),
+            total_elems,
             buf_guard.capacity(),
         )
     };
@@ -902,15 +957,12 @@ fn qstick_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<QstickParams>, QstickError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(QstickError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let len = open.len().min(close.len());
+    if len == 0 {
+        return Err(QstickError::EmptyInputData);
+    }
     let cols = len;
 
     // first valid across both inputs
@@ -928,8 +980,13 @@ fn qstick_batch_inner_into(
 
     // Initialize NaN prefixes for each row based on warmup period
     for (row, combo) in combos.iter().enumerate() {
-        let warmup = first + combo.period.unwrap() - 1;
-        let row_start = row * cols;
+        let warmup = first
+            .checked_add(combo.period.unwrap_or(0))
+            .and_then(|v| v.checked_sub(1))
+            .ok_or_else(|| QstickError::InvalidInput("warmup index overflow".into()))?;
+        let row_start = row
+            .checked_mul(cols)
+            .ok_or_else(|| QstickError::InvalidInput("row*cols overflow".into()))?;
         for i in 0..warmup.min(cols) {
             out[row_start + i] = f64::NAN;
         }
@@ -1007,7 +1064,10 @@ fn qstick_batch_shared_prefix_into(
         return;
     }
     // Build diff d[i] = close[i] - open[i] and prefix P where P[0]=0, P[i+1]=P[i]+d[i]
-    let mut prefix = Vec::with_capacity(len + 1);
+    let cap = len
+        .checked_add(1)
+        .unwrap_or(len);
+    let mut prefix = Vec::with_capacity(cap);
     prefix.push(0.0);
     let mut acc = 0.0f64;
     // Before `first`, diffs are treated as zero; start accumulation at `first`
@@ -1040,11 +1100,16 @@ fn qstick_batch_shared_prefix_into(
     // For each row, fill from warmup onward using prefix sums
     for (row, combo) in combos.iter().enumerate() {
         let p = combo.period.unwrap_or(5);
-        let warm = first + p - 1;
+        let warm = first
+            .checked_add(p)
+            .and_then(|v| v.checked_sub(1))
+            .unwrap_or(first);
         if warm >= len {
             continue;
         }
-        let row_start = row * cols;
+        let row_start = row
+            .checked_mul(cols)
+            .unwrap_or(0);
         let inv_p = 1.0 / (p as f64);
         let mut j = warm;
         while j + 3 < len {
@@ -1819,7 +1884,321 @@ mod tests {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(name = "QstickDeviceArrayF32Py")]
+pub struct QstickDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl QstickDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Producing stream is synchronized before return; omit the 'stream' key
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<&pyo3::types::PyAny>,
+        _dl_device: Option<&pyo3::types::PyAny>,
+        _copy: Option<&pyo3::types::PyAny>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLVersion {
+            major: i32,
+            minor: i32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            dl_managed_tensor: DLManagedTensor,
+            version: DLVersion,
+        }
+
+        struct Manager {
+            _ctx: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+        }
+        struct HolderLegacy {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            mgr: Manager,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            mgr: Manager,
+        }
+
+        unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).manager_ctx as *mut HolderLegacy;
+            if !holder.is_null() {
+                drop(Box::from_raw(holder));
+            }
+            drop(Box::from_raw(p));
+        }
+
+        unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).dl_managed_tensor.manager_ctx as *mut HolderV1;
+            if !holder.is_null() {
+                drop(Box::from_raw(holder));
+            }
+            drop(Box::from_raw(p));
+        }
+
+        unsafe extern "C" fn cap_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyo3::ffi::PyCapsule_SetName(
+                    capsule,
+                    used.as_ptr() as *const c_char,
+                );
+            }
+        }
+
+        unsafe extern "C" fn cap_destructor_v1(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                let mt = &mut (*ptr).dl_managed_tensor;
+                if let Some(del) = mt.deleter {
+                    del(mt);
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_SetName(
+                    capsule,
+                    used.as_ptr() as *const c_char,
+                );
+            }
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let data_ptr = if self.rows == 0 || self.cols == 0 {
+            std::ptr::null_mut()
+        } else {
+            buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+        };
+
+        let want_v1 = if let Some(v) = max_version {
+            v.getattr("__iter")
+                .ok()
+                .and_then(|_| v.extract::<(i32, i32)>().ok())
+                .map(|(maj, _)| maj >= 1)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let mgr = Manager {
+            _ctx: self._ctx.clone(),
+            _buf: buf,
+        };
+
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    dl_managed_tensor: DLManagedTensor {
+                        dl_tensor: DLTensor {
+                            data: data_ptr,
+                            device: DLDevice {
+                                device_type: 2,
+                                device_id: self.device_id as i32,
+                            },
+                            ndim: 2,
+                            dtype: DLDataType {
+                                code: 2,
+                                bits: 32,
+                                lanes: 1,
+                            },
+                            shape: std::ptr::null_mut(),
+                            strides: std::ptr::null_mut(),
+                            byte_offset: 0,
+                        },
+                        manager_ctx: std::ptr::null_mut(),
+                        deleter: Some(|mt| {
+                            if !mt.is_null() {
+                                let outer = (mt as *mut u8).offset(
+                                    -(std::mem::size_of::<DLVersion>() as isize),
+                                ) as *mut DLManagedTensorVersioned;
+                                deleter_v1(outer);
+                            }
+                        }),
+                    },
+                    version: DLVersion { major: 1, minor: 0 },
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                mgr,
+            });
+            holder
+                .managed
+                .dl_managed_tensor
+                .dl_tensor
+                .shape = holder.shape.as_mut_ptr();
+            holder
+                .managed
+                .dl_managed_tensor
+                .dl_tensor
+                .strides = holder.strides.as_mut_ptr();
+            holder
+                .managed
+                .dl_managed_tensor
+                .manager_ctx = &mut *holder as *mut HolderV1 as *mut std::ffi::c_void;
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_v1),
+                )
+            };
+            if cap.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        } else {
+            let mut holder = Box::new(HolderLegacy {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: self.device_id as i32,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_legacy),
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                mgr,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder
+                .managed
+                .dl_tensor
+                .strides = holder.strides.as_mut_ptr();
+            holder
+                .managed
+                .manager_ctx = &mut *holder as *mut HolderLegacy as *mut std::ffi::c_void;
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_legacy),
+                )
+            };
+            if cap.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        }
+    }
+}
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -1899,7 +2278,8 @@ pub fn qstick_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos =
+        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = open_slice.len();
 
@@ -1943,6 +2323,10 @@ pub fn register_qstick_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<
     m.add_function(wrap_pyfunction!(qstick_py, m)?)?;
     m.add_function(wrap_pyfunction!(qstick_batch_py, m)?)?;
     m.add_class::<QstickStreamPy>()?;
+    #[cfg(all(feature = "python", feature = "cuda"))]
+    {
+        m.add_class::<QstickDeviceArrayF32Py>()?;
+    }
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(qstick_cuda_batch_dev_py, m)?)?;
@@ -1964,9 +2348,13 @@ pub fn qstick_cuda_batch_dev_py(
     close_f32: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<QstickDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaQstick;
+    use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
+    use cust::context::Context;
+    use cust::memory::DeviceBuffer;
+    use std::sync::Arc;
 
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -1976,12 +2364,21 @@ pub fn qstick_cuda_batch_dev_py(
     let sweep = QstickBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let (buf, rows, cols, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaQstick::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.qstick_batch_dev(open_slice, close_slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out: DeviceArrayF32 = cuda
+            .qstick_batch_dev(open_slice, close_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx_arc: Arc<Context> = cuda.context_arc();
+        Ok::<_, pyo3::PyErr>((out.buf, out.rows, out.cols, ctx_arc, cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(QstickDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1993,10 +2390,14 @@ pub fn qstick_cuda_many_series_one_param_dev_py(
     close_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<QstickDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaQstick;
+    use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
+    use cust::context::Context;
+    use cust::memory::DeviceBuffer;
     use numpy::PyUntypedArrayMethods;
+    use std::sync::Arc;
 
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2009,12 +2410,21 @@ pub fn qstick_cuda_many_series_one_param_dev_py(
     let rows = open_tm_f32.shape()[0];
     let cols = open_tm_f32.shape()[1];
 
-    let inner = py.allow_threads(|| {
+    let (buf, r_out, c_out, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaQstick::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.qstick_many_series_one_param_time_major_dev(flat_open, flat_close, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out: DeviceArrayF32 = cuda
+            .qstick_many_series_one_param_time_major_dev(flat_open, flat_close, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx_arc: Arc<Context> = cuda.context_arc();
+        Ok::<_, pyo3::PyErr>((out.buf, out.rows, out.cols, ctx_arc, cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(QstickDeviceArrayF32Py {
+        buf: Some(buf),
+        rows: r_out,
+        cols: c_out,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 /// Write qstick directly to output slice - no allocations
@@ -2034,9 +2444,9 @@ pub fn qstick_into_slice(
         });
     }
     if dst.len() != len {
-        return Err(QstickError::InvalidPeriod {
-            period,
-            data_len: len,
+        return Err(QstickError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
         });
     }
     if period == 0 || period > len {
@@ -2240,9 +2650,12 @@ pub fn qstick_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
-        let total_size = rows * len;
+        let total_size = rows
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("size overflow"))?;
 
         // For batch, we write directly to the output - no aliasing check needed
         // as batch output is different size than input

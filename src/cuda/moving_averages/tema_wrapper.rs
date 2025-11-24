@@ -127,6 +127,11 @@ impl fmt::Display for CudaTemaError {
 
 impl std::error::Error for CudaTemaError {}
 
+impl From<CudaError> for CudaTemaError {
+    #[inline]
+    fn from(e: CudaError) -> Self { CudaTemaError::Cuda(e) }
+}
+
 pub struct CudaTema {
     module: Module,
     stream: Stream,
@@ -423,11 +428,14 @@ impl CudaTema {
         period: usize,
         out_tm: &mut [f32],
     ) -> Result<(), CudaTemaError> {
-        if out_tm.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaTemaError::InvalidInput("cols * rows overflow".into()))?;
+        if out_tm.len() != expected {
             return Err(CudaTemaError::InvalidInput(format!(
                 "out slice wrong length: got {}, expected {}",
                 out_tm.len(),
-                cols * rows
+                expected
             )));
         }
 
@@ -450,10 +458,21 @@ impl CudaTema {
             .checked_mul(n_combos)
             .ok_or_else(|| CudaTemaError::InvalidInput("rows * cols overflow".into()))?;
 
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = total_elems * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + out_bytes;
+        let sz_f32 = core::mem::size_of::<f32>();
+        let sz_i32 = core::mem::size_of::<i32>();
+        let prices_bytes = series_len
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaTemaError::InvalidInput("byte size overflow".into()))?;
+        let periods_bytes = n_combos
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaTemaError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes = total_elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaTemaError::InvalidInput("byte size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(periods_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaTemaError::InvalidInput("byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // 64MB safety margin
 
         if !Self::will_fit(required, headroom) {
@@ -514,10 +533,25 @@ impl CudaTema {
         let num_series = cols;
         let series_len = rows;
 
-        let prices_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
-        let first_valid_bytes = prepared.first_valids.len() * std::mem::size_of::<i32>();
-        let out_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_valid_bytes + out_bytes;
+        let sz_f32 = core::mem::size_of::<f32>();
+        let sz_i32 = core::mem::size_of::<i32>();
+        let prices_bytes = prices_tm_f32
+            .len()
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaTemaError::InvalidInput("byte size overflow".into()))?;
+        let first_valid_bytes = prepared
+            .first_valids
+            .len()
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaTemaError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes = prices_tm_f32
+            .len()
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaTemaError::InvalidInput("byte size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(first_valid_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaTemaError::InvalidInput("byte size overflow".into()))?;
         let headroom = 32 * 1024 * 1024; // 32MB safety margin
 
         if !Self::will_fit(required, headroom) {
@@ -727,7 +761,10 @@ impl CudaTema {
                 "matrix dimensions must be positive".into(),
             ));
         }
-        if prices_tm_f32.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaTemaError::InvalidInput("cols * rows overflow".into()))?;
+        if prices_tm_f32.len() != expected {
             return Err(CudaTemaError::InvalidInput("matrix shape mismatch".into()));
         }
         if period == 0 {

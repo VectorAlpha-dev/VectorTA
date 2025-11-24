@@ -25,6 +25,8 @@
 //! - **Streaming update**: O(1) - maintains three EMA states with simple update calculations
 //! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
 //! - **Current status**: Scalar optimized; SIMD and batch SIMD paths delegate to scalar
+//! - **Decision note (CUDA)**: CUDA wrapper present; Python returns VRAM handles via the
+//!   shared DeviceArrayF32Py (CAI v3 byte‑strides; DLPack v1.x negotiation; legacy fallback).
 //! - **Bench (100k, native cpu)**: scalar ~218.7µs → ~215.5µs (~1.5%)
 //! - **Optimization opportunities**:
 //!   - Implement vectorized AVX2/AVX512 kernels for parallel EMA calculations
@@ -51,11 +53,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaTema;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::gaussian_wrapper::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc;
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -1876,21 +1874,17 @@ pub fn tema_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let (inner, stream_handle, ctx_guard, dev_id) = py
-        .allow_threads(|| -> Result<(_, _, Arc<Context>, u32), PyErr> {
+    let inner = py
+        .allow_threads(|| -> Result<_, PyErr> {
             let cuda = CudaTema::new(device_id)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             let inner = cuda
                 .tema_batch_dev(slice_in, &sweep)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let guard = cuda.context_guard();
-            let sh = cuda.stream_handle();
-            let did = cuda.device_id();
-            Ok((inner, sh, guard, did))
+            // CUDA stream is synchronized inside wrapper; CAI v3 can omit stream
+            Ok(inner)
         })?;
-
-    // CUDA stream was synchronized before returning device buffer; omit stream in CAI v3
-    Ok(DeviceArrayF32Py::new_from_rust(inner, 0, ctx_guard, dev_id))
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1913,21 +1907,17 @@ pub fn tema_cuda_many_series_one_param_dev_py(
 
     let prices_flat = prices_tm_f32.as_slice()?;
 
-    let (inner, stream_handle, ctx_guard, dev_id) = py
-        .allow_threads(|| -> Result<(_, _, Arc<Context>, u32), PyErr> {
+    let inner = py
+        .allow_threads(|| -> Result<_, PyErr> {
             let cuda = CudaTema::new(device_id)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             let inner = cuda
                 .tema_many_series_one_param_time_major_dev(prices_flat, cols, rows, period)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let guard = cuda.context_guard();
-            let sh = cuda.stream_handle();
-            let did = cuda.device_id();
-            Ok((inner, sh, guard, did))
+            // CUDA stream is synchronized inside wrapper; CAI v3 can omit stream
+            Ok(inner)
         })?;
-
-    // CUDA stream was synchronized before returning device buffer; omit stream in CAI v3
-    Ok(DeviceArrayF32Py::new_from_rust(inner, 0, ctx_guard, dev_id))
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // ========== WASM Bindings ==========

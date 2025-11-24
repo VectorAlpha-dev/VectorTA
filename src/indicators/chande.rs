@@ -30,6 +30,7 @@
 //! - **Memory Optimization**: Uses `alloc_with_nan_prefix`/matrix helpers; no O(N) temps per output.
 //! - **Batch**: Parallel per-row supported. Potential future optimization: precompute the TR stream
 //!   once across rows; current design favors simplicity and clarity.
+//! - **Decision log**: SIMD kept as scalar delegate; CUDA wrapper returns VRAM handles with CAI v3 + DLPack v1.x and syncs streams before hand-off; scalar/CPU outputs remain the numerical reference.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -48,17 +49,23 @@ use std::mem::ManuallyDrop;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -234,18 +241,26 @@ impl ChandeBuilder {
 
 #[derive(Debug, Error)]
 pub enum ChandeError {
-    #[error("chande: Input series are empty.")]
+    #[error("chande: input series are empty")] 
     EmptyInputData,
-    #[error("chande: All values are NaN.")]
+    #[error("chande: all values are NaN")] 
     AllValuesNaN,
-    #[error("chande: Invalid period: period = {period}, data_len = {data_len}")]
+    #[error("chande: invalid period: period={period}, data_len={data_len}")] 
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("chande: Not enough valid data: needed = {needed}, valid = {valid}")]
+    #[error("chande: not enough valid data: needed={needed}, valid={valid}")] 
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("chande: High/Low/Close length mismatch: h={h}, l={l}, c={c}")]
+    #[error("chande: input length mismatch: high={h}, low={l}, close={c}")] 
     DataLengthMismatch { h: usize, l: usize, c: usize },
-    #[error("chande: Invalid direction: {direction}")]
+    #[error("chande: invalid direction: {direction}")] 
     InvalidDirection { direction: String },
+    #[error("chande: output length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("chande: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: isize, end: isize, step: isize },
+    #[error("chande: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("chande: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -365,11 +380,7 @@ pub fn chande_compute_into(
         });
     }
     if out.len() != high.len() {
-        // Match alma.rs convention for into-slice mismatch
-        return Err(ChandeError::InvalidPeriod {
-            period: out.len(),
-            data_len: high.len(),
-        });
+        return Err(ChandeError::OutputLengthMismatch { expected: high.len(), got: out.len() });
     }
     let len = high.len();
     let first = first_valid3(high, low, close).ok_or(ChandeError::AllValuesNaN)?;
@@ -1057,11 +1068,8 @@ pub fn chande_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(ChandeError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+        other => {
+            return Err(ChandeError::InvalidKernelForBatch(other));
         }
     };
     let simd = match kernel {
@@ -1098,28 +1106,65 @@ impl ChandeBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &ChandeBatchRange, dir: &str) -> Vec<ChandeParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &ChandeBatchRange, dir: &str) -> Result<Vec<ChandeParams>, ChandeError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, ChandeError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        // support reversed bounds
+        if start < end {
+            if step == 0 { return Ok(vec![start]); }
+            Ok((start..=end).step_by(step).collect())
+        } else {
+            // reversed: start >= end
+            let step_i = step as isize;
+            if step_i == 0 { return Ok(vec![start]); }
+            let mut vals = Vec::new();
+            let mut x = start as isize;
+            let end_i = end as isize;
+            while x >= end_i {
+                vals.push(x as usize);
+                x = x.saturating_sub(step_i);
+                if step_i <= 0 { break; }
+            }
+            if vals.is_empty() {
+                return Err(ChandeError::InvalidRange { start: start as isize, end: end as isize, step: step as isize });
+            }
+            Ok(vals)
+        }
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, ChandeError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start < end {
+            let mut x = start;
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += step;
+            }
+        } else {
+            let mut x = start;
+            let st = -step.abs();
+            while x >= end - 1e-12 {
+                v.push(x);
+                x += st;
+            }
         }
-        v
+        if v.is_empty() {
+            return Err(ChandeError::InvalidRange { start: start as isize, end: end as isize, step: step as isize });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let mults = axis_f64(r.mult);
-    let mut out = Vec::with_capacity(periods.len() * mults.len());
+    let periods = axis_usize(r.period)?;
+    let mults = axis_f64(r.mult)?;
+    // checked capacity to avoid overflow
+    let cap = periods
+        .len()
+        .checked_mul(mults.len())
+        .ok_or(ChandeError::InvalidRange { start: 0, end: 0, step: 0 })?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &m in &mults {
             out.push(ChandeParams {
@@ -1129,7 +1174,7 @@ fn expand_grid(r: &ChandeBatchRange, dir: &str) -> Vec<ChandeParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1166,12 +1211,20 @@ fn chande_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<ChandeBatchOutput, ChandeError> {
-    let combos = expand_grid(sweep, dir);
-    if combos.is_empty() {
-        return Err(ChandeError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+    if high.is_empty() || low.is_empty() || close.is_empty() {
+        return Err(ChandeError::EmptyInputData);
+    }
+    if !(high.len() == low.len() && low.len() == close.len()) {
+        return Err(ChandeError::DataLengthMismatch {
+            h: high.len(),
+            l: low.len(),
+            c: close.len(),
         });
+    }
+
+    let combos = expand_grid(sweep, dir)?;
+    if combos.is_empty() {
+        return Err(ChandeError::InvalidRange { start: 0, end: 0, step: 0 });
     }
     let first = first_valid3(high, low, close).ok_or(ChandeError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
@@ -1183,6 +1236,10 @@ fn chande_batch_inner(
     }
     let rows = combos.len();
     let cols = high.len();
+    // Guard rows * cols overflow
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(ChandeError::InvalidInput("rows*cols overflow".into()))?;
 
     // Calculate warmup periods for each row
     let warmup_periods: Vec<usize> = combos
@@ -1269,12 +1326,20 @@ fn chande_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<ChandeParams>, ChandeError> {
-    let combos = expand_grid(sweep, dir);
-    if combos.is_empty() {
-        return Err(ChandeError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+    if high.is_empty() || low.is_empty() || close.is_empty() {
+        return Err(ChandeError::EmptyInputData);
+    }
+    if !(high.len() == low.len() && low.len() == close.len()) {
+        return Err(ChandeError::DataLengthMismatch {
+            h: high.len(),
+            l: low.len(),
+            c: close.len(),
         });
+    }
+
+    let combos = expand_grid(sweep, dir)?;
+    if combos.is_empty() {
+        return Err(ChandeError::InvalidRange { start: 0, end: 0, step: 0 });
     }
 
     let first = first_valid3(high, low, close).ok_or(ChandeError::AllValuesNaN)?;
@@ -1288,6 +1353,15 @@ fn chande_batch_inner_into(
     }
 
     let cols = high.len();
+
+    // Validate output slice length
+    let expected = combos
+        .len()
+        .checked_mul(cols)
+        .ok_or_else(|| ChandeError::InvalidInput("rows*cols overflow".into()))?;
+    if out.len() != expected {
+        return Err(ChandeError::OutputLengthMismatch { expected, got: out.len() });
+    }
 
     // Resolve Auto kernel to concrete kernel
     let actual_kern = match kern {
@@ -2307,11 +2381,15 @@ pub fn chande_batch_py<'py>(
         period: period_range,
         mult: mult_range,
     };
-    let combos = expand_grid(&sweep, direction);
+    let combos = expand_grid(&sweep, direction)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = h.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -2364,6 +2442,210 @@ pub fn chande_batch_py<'py>(
 // ============================
 
 #[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Chande", unsendable)]
+pub struct DeviceArrayF32ChandePy {
+    pub(crate) inner: DeviceArrayF32,
+    _ctx_guard: Arc<Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32ChandePy {
+    #[new]
+    fn py_new() -> PyResult<Self> {
+        Err(PyTypeError::new_err(
+            "DeviceArrayF32Chande cannot be created directly; use chande_cuda_* factories",
+        ))
+    }
+
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
+
+    #[pyo3(signature = (_stream=None, max_version=None, _dl_device=None, _copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32,
+            _ctx_guard: Arc<Context>,
+            _device_id: u32,
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let versioned = b"dltensor_versioned\0";
+            let legacy = b"dltensor\0";
+            let mut ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                versioned.as_ptr() as *const c_char,
+            );
+            if ptr.is_null() {
+                ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    legacy.as_ptr() as *const c_char,
+                );
+            }
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        // Move VRAM handle into Holder; keep context alive via Arc<Context>.
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
+        let ctx_clone = Arc::clone(&self._ctx_guard);
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: if rows == 0 || cols == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+                    },
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self._device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [rows, cols],
+            strides: [cols, 1],
+            arr: inner,
+            _ctx_guard: ctx_clone,
+            _device_id: self._device_id,
+        });
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
+        let _ = Box::into_raw(holder);
+
+        let wants_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        let name = if wants_versioned {
+            b"dltensor_versioned\0"
+        } else {
+            b"dltensor\0"
+        };
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut std::ffi::c_void,
+                name.as_ptr() as *const c_char,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe { dl_managed_deleter(mt_ptr) };
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl DeviceArrayF32ChandePy {
+    pub fn new(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self {
+            inner,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "chande_cuda_batch_dev")]
 #[pyo3(signature = (high, low, close, period_range, mult_range, direction, device_id=0))]
 pub fn chande_cuda_batch_dev_py(
@@ -2375,7 +2657,7 @@ pub fn chande_cuda_batch_dev_py(
     mult_range: (f64, f64, f64),
     direction: &str,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32ChandePy> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaChande;
 
@@ -2395,13 +2677,18 @@ pub fn chande_cuda_batch_dev_py(
         mult: mult_range,
     };
 
-    let inner = py.allow_threads(|| {
-        let mut cuda = CudaChande::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.chande_batch_dev(high_slice, low_slice, close_slice, &sweep, direction)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let mut cuda = CudaChande::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let dev_arr = cuda
+            .chande_batch_dev(high_slice, low_slice, close_slice, &sweep, direction)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((dev_arr, ctx, dev_id))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32ChandePy::new(inner, ctx, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2418,7 +2705,7 @@ pub fn chande_cuda_many_series_one_param_dev_py(
     mult: f32,
     direction: &str,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32ChandePy> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaChande;
 
@@ -2437,9 +2724,12 @@ pub fn chande_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaChande::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.chande_many_series_one_param_time_major_dev(
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaChande::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda.chande_many_series_one_param_time_major_dev(
             high_slice,
             low_slice,
             close_slice,
@@ -2449,10 +2739,11 @@ pub fn chande_cuda_many_series_one_param_dev_py(
             mult,
             direction,
         )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32ChandePy::new(inner, ctx, dev_id))
 }
 
 // ============================
@@ -2519,13 +2810,15 @@ pub fn chande_batch_js(
         mult: (mult_start, mult_end, mult_step),
     };
 
+    let simd = detect_best_batch_kernel().to_non_batch();
+
     let out = chande_batch_inner(
         high,
         low,
         close,
         &sweep,
         direction,
-        detect_best_kernel(),
+        simd,
         false,
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2596,13 +2889,14 @@ pub fn chande_batch_unified_js(
         period: cfg.period_range,
         mult: cfg.mult_range,
     };
+    let simd = detect_best_batch_kernel().to_non_batch();
     let out = chande_batch_inner(
         high,
         low,
         close,
         &sweep,
         &cfg.direction,
-        detect_best_kernel(),
+        simd,
         false,
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2727,10 +3021,14 @@ pub fn chande_batch_into(
             period: (p_start, p_end, p_step),
             mult: (m_start, m_end, m_step),
         };
-        let combos = expand_grid(&sweep, direction);
+        let combos = expand_grid(&sweep, direction)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         // Map Auto to concrete compute kernel
         let simd = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,

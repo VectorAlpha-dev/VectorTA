@@ -16,6 +16,7 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::var::{var_expand_grid, VarBatchRange, VarParams};
 use cust::context::Context;
 use cust::device::Device;
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, DeviceCopy, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -23,23 +24,28 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaVarError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaVarError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaVarError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaVarError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaVarError {}
 
 // ---------- Float-float host POD to mirror CUDA float2 ----------
 #[repr(C)]
@@ -141,7 +147,7 @@ impl Default for CudaVarPolicy {
 pub struct CudaVar {
     module: Module,
     stream: Stream,
-    _context: Context,
+    ctx: Arc<Context>,
     device_id: u32,
     policy: CudaVarPolicy,
     debug_logged: std::sync::atomic::AtomicBool,
@@ -149,10 +155,9 @@ pub struct CudaVar {
 
 impl CudaVar {
     pub fn new(device_id: usize) -> Result<Self, CudaVarError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/var_kernel.ptx"));
         let jit_opts = &[
@@ -163,18 +168,15 @@ impl CudaVar {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaVarError::Cuda(e.to_string()))?
-                }
+                Err(_) => Module::from_ptx(ptx, &[])?,
             },
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            ctx: context,
             device_id: device_id as u32,
             policy: CudaVarPolicy::default(),
             debug_logged: std::sync::atomic::AtomicBool::new(false),
@@ -186,6 +188,10 @@ impl CudaVar {
         s.policy = policy;
         Ok(s)
     }
+
+    pub fn context_arc(&self) -> Arc<Context> { self.ctx.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
+
 
     #[inline]
     fn headroom_bytes() -> usize {
@@ -204,14 +210,34 @@ impl CudaVar {
     }
 
     #[inline]
-    fn will_fit(bytes: usize, headroom: usize) -> bool {
+    fn checked_mul(a: usize, b: usize, what: &'static str) -> Result<usize, CudaVarError> {
+        a.checked_mul(b)
+            .ok_or_else(|| CudaVarError::InvalidInput(format!("{what} overflow")))
+    }
+
+    #[inline]
+    fn checked_add(a: usize, b: usize, what: &'static str) -> Result<usize, CudaVarError> {
+        a.checked_add(b)
+            .ok_or_else(|| CudaVarError::InvalidInput(format!("{what} overflow")))
+    }
+
+    #[inline]
+    fn will_fit(bytes: usize, headroom: usize) -> Result<(), CudaVarError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Ok((free, _)) = mem_get_info() {
-            bytes.saturating_add(headroom) <= free
+            if bytes.saturating_add(headroom) <= free {
+                Ok(())
+            } else {
+                Err(CudaVarError::OutOfMemory {
+                    required: bytes,
+                    free,
+                    headroom,
+                })
+            }
         } else {
-            true
+            Ok(())
         }
     }
 
@@ -322,24 +348,38 @@ impl CudaVar {
             })
             .collect();
         let rows = combos.len();
-        let out_elems = rows * len;
-        let out_bytes = out_elems * std::mem::size_of::<f32>();
+        let out_elems = Self::checked_mul(rows, len, "var: rows * len")?;
+        let out_bytes = Self::checked_mul(out_elems, std::mem::size_of::<f32>(), "var: out_bytes")?;
 
         // Convert f64 prefixes to float2 (double-single) to match device
         let ps_ff: Vec<Float2> = split_f64_to_float2_vec(&ps);
         let ps2_ff: Vec<Float2> = split_f64_to_float2_vec(&ps2);
 
-        let in_bytes = (ps_ff.len() + ps2_ff.len()) * std::mem::size_of::<Float2>()
-            + pn.len() * std::mem::size_of::<i32>()
-            + periods.len() * std::mem::size_of::<i32>()
-            + nb2.len() * std::mem::size_of::<f32>();
+        let sz_f2 = std::mem::size_of::<Float2>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let sz_f32 = std::mem::size_of::<f32>();
+        let prefix_pairs = Self::checked_add(ps_ff.len(), ps2_ff.len(), "var: prefix pair count")?;
+        let prefix_bytes = Self::checked_mul(prefix_pairs, sz_f2, "var: prefix bytes")?;
+        let pn_bytes = Self::checked_mul(pn.len(), sz_i32, "var: prefix_nan bytes")?;
+        let periods_bytes =
+            Self::checked_mul(periods.len(), sz_i32, "var: periods bytes")?;
+        let nb2_bytes = Self::checked_mul(nb2.len(), sz_f32, "var: nb2 bytes")?;
+        let in_bytes = Self::checked_add(
+            Self::checked_add(prefix_bytes, pn_bytes, "var: in_bytes a+b")?,
+            Self::checked_add(periods_bytes, nb2_bytes, "var: in_bytes c+d")?,
+            "var: in_bytes total",
+        )?;
+
         let headroom = Self::headroom_bytes();
-        let total_est = in_bytes + out_bytes + headroom;
+        let work_bytes = Self::checked_add(in_bytes, out_bytes, "var: work_bytes in+out")?;
+        let total_est = Self::checked_add(work_bytes, headroom, "var: total_est headroom")?;
         let mut y_chunks = 1usize;
         if let Ok((free, _)) = mem_get_info() {
             if total_est > free {
-                let bytes_per_row = len * std::mem::size_of::<f32>();
-                let max_rows = ((free.saturating_sub(in_bytes + headroom)) / bytes_per_row).max(1);
+                let bytes_per_row =
+                    Self::checked_mul(len, sz_f32, "var: bytes_per_row")?;
+                let available = free.saturating_sub(in_bytes + headroom);
+                let max_rows = (available / bytes_per_row).max(1);
                 y_chunks = (rows + max_rows - 1) / max_rows;
             }
         }
@@ -359,42 +399,41 @@ impl CudaVar {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Upload static inputs (pinned host + async copies for large arrays)
-        let mut d_ps: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized_async(ps_ff.len(), &self.stream) }
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let mut d_ps2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized_async(ps2_ff.len(), &self.stream) }
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let mut d_pn: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized_async(pn.len(), &self.stream) }
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let mut d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized_async(periods.len(), &self.stream) }
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let mut d_nb2: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(nb2.len(), &self.stream) }
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+        // Ensure estimated working set fits before allocations
+        Self::will_fit(work_bytes, headroom)?;
 
-        let h_ps  = LockedBuffer::from_slice(&ps_ff).map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let h_ps2 = LockedBuffer::from_slice(&ps2_ff).map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let h_pn  = LockedBuffer::from_slice(&pn).map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let h_periods = LockedBuffer::from_slice(&periods).map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let h_nb2 = LockedBuffer::from_slice(&nb2).map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+        // Upload static inputs (pinned host + async copies for large arrays)
+        let mut d_ps: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::uninitialized_async(ps_ff.len(), &self.stream) }?;
+        let mut d_ps2: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::uninitialized_async(ps2_ff.len(), &self.stream) }?;
+        let mut d_pn: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized_async(pn.len(), &self.stream) }?;
+        let mut d_periods: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized_async(periods.len(), &self.stream) }?;
+        let mut d_nb2: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(nb2.len(), &self.stream) }?;
+
+        let h_ps = LockedBuffer::from_slice(&ps_ff)?;
+        let h_ps2 = LockedBuffer::from_slice(&ps2_ff)?;
+        let h_pn = LockedBuffer::from_slice(&pn)?;
+        let h_periods = LockedBuffer::from_slice(&periods)?;
+        let h_nb2 = LockedBuffer::from_slice(&nb2)?;
 
         unsafe {
-            d_ps.async_copy_from(&h_ps, &self.stream)
-                .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-            d_ps2.async_copy_from(&h_ps2, &self.stream)
-                .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-            d_pn.async_copy_from(&h_pn, &self.stream)
-                .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-            d_periods.async_copy_from(&h_periods, &self.stream)
-                .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-            d_nb2.async_copy_from(&h_nb2, &self.stream)
-                .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+            d_ps.async_copy_from(&h_ps, &self.stream)?;
+            d_ps2.async_copy_from(&h_ps2, &self.stream)?;
+            d_pn.async_copy_from(&h_pn, &self.stream)?;
+            d_periods.async_copy_from(&h_periods, &self.stream)?;
+            d_nb2.async_copy_from(&h_nb2, &self.stream)?;
         }
 
         // Best-effort persisting L2 for prefix buffer
-        self.try_enable_persisting_l2(d_ps.as_device_ptr().as_raw() as u64,
-            ps_ff.len() * std::mem::size_of::<Float2>());
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+        self.try_enable_persisting_l2(
+            d_ps.as_device_ptr().as_raw() as u64,
+            ps_ff.len() * std::mem::size_of::<Float2>(),
+        );
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
         // Launch in chunks across parameter rows
         let chunk_rows = (rows + y_chunks - 1) / y_chunks;
@@ -417,10 +456,11 @@ impl CudaVar {
                     .as_device_ptr()
                     .offset((start_row as isize).try_into().unwrap())
             };
+            let row_offset = Self::checked_mul(start_row, len, "var: start_row * len")?;
             let out_ptr = unsafe {
                 d_out
                     .as_device_ptr()
-                    .offset(((start_row * len) as isize).try_into().unwrap())
+                    .offset((row_offset as isize).try_into().unwrap())
             };
             self.launch_batch_kernel_ptrs(
                 &d_ps,
@@ -435,9 +475,7 @@ impl CudaVar {
             )?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {
@@ -464,7 +502,7 @@ impl CudaVar {
         let func = self
             .module
             .get_function("var_batch_f32")
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVarError::MissingKernelSymbol { name: "var_batch_f32" })?;
 
         if len > i32::MAX as usize || n_combos > i32::MAX as usize {
             return Err(CudaVarError::InvalidInput(
@@ -504,9 +542,7 @@ impl CudaVar {
                 &mut combos_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -524,7 +560,8 @@ impl CudaVar {
                 "matrix dims must be positive".into(),
             ));
         }
-        if data_tm_f32.len() != cols * rows {
+        let elems = Self::checked_mul(cols, rows, "var: cols * rows")?;
+        if data_tm_f32.len() != elems {
             return Err(CudaVarError::InvalidInput("matrix shape mismatch".into()));
         }
         let period = params.period.unwrap_or(14);
@@ -564,35 +601,33 @@ impl CudaVar {
         let ps_tm_ff = split_f64_to_float2_vec(&ps_tm);
         let ps2_tm_ff = split_f64_to_float2_vec(&ps2_tm);
 
-        let mut d_ps_tm: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized_async(ps_tm_ff.len(), &self.stream) }
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let mut d_ps2_tm: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized_async(ps2_tm_ff.len(), &self.stream) }
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let mut d_pn_tm: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized_async(pn_tm.len(), &self.stream) }
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let mut d_first: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized_async(first_valids.len(), &self.stream) }
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+        let mut d_ps_tm: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::uninitialized_async(ps_tm_ff.len(), &self.stream) }?;
+        let mut d_ps2_tm: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::uninitialized_async(ps2_tm_ff.len(), &self.stream) }?;
+        let mut d_pn_tm: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized_async(pn_tm.len(), &self.stream) }?;
+        let mut d_first: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized_async(first_valids.len(), &self.stream) }?;
 
-        let h_ps_tm  = LockedBuffer::from_slice(&ps_tm_ff).map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let h_ps2_tm = LockedBuffer::from_slice(&ps2_tm_ff).map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let h_pn_tm  = LockedBuffer::from_slice(&pn_tm).map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-        let h_first  = LockedBuffer::from_slice(&first_valids).map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+        let h_ps_tm = LockedBuffer::from_slice(&ps_tm_ff)?;
+        let h_ps2_tm = LockedBuffer::from_slice(&ps2_tm_ff)?;
+        let h_pn_tm = LockedBuffer::from_slice(&pn_tm)?;
+        let h_first = LockedBuffer::from_slice(&first_valids)?;
 
         unsafe {
-            d_ps_tm.async_copy_from(&h_ps_tm, &self.stream)
-                .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-            d_ps2_tm.async_copy_from(&h_ps2_tm, &self.stream)
-                .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-            d_pn_tm.async_copy_from(&h_pn_tm, &self.stream)
-                .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
-            d_first.async_copy_from(&h_first, &self.stream)
-                .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+            d_ps_tm.async_copy_from(&h_ps_tm, &self.stream)?;
+            d_ps2_tm.async_copy_from(&h_ps2_tm, &self.stream)?;
+            d_pn_tm.async_copy_from(&h_pn_tm, &self.stream)?;
+            d_first.async_copy_from(&h_first, &self.stream)?;
         }
 
-        self.try_enable_persisting_l2(d_ps_tm.as_device_ptr().as_raw() as u64,
-            ps_tm_ff.len() * std::mem::size_of::<Float2>());
-        let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+        self.try_enable_persisting_l2(
+            d_ps_tm.as_device_ptr().as_raw() as u64,
+            ps_tm_ff.len() * std::mem::size_of::<Float2>(),
+        );
+        let elems_out = Self::checked_mul(cols, rows, "var: cols * rows out")?;
+        let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(elems_out) }?;
 
         self.launch_many_series_kernel(
             &d_ps_tm,
@@ -605,9 +640,7 @@ impl CudaVar {
             nb2,
             &mut d_out_tm,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
             rows,
@@ -630,7 +663,7 @@ impl CudaVar {
         let func = self
             .module
             .get_function("var_many_series_one_param_f32")
-            .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVarError::MissingKernelSymbol { name: "var_many_series_one_param_f32" })?;
         if cols > i32::MAX as usize || rows > i32::MAX as usize || period > i32::MAX as usize {
             return Err(CudaVarError::InvalidInput(
                 "inputs exceed kernel limits".into(),
@@ -665,9 +698,7 @@ impl CudaVar {
                 &mut nb2_f as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVarError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }

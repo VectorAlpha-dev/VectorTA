@@ -12,6 +12,7 @@
 //! - **`Err(TtmTrendError)`** otherwise.
 //!
 //! ## Developer Notes
+//! - Decision log: SIMD enabled for period == 1; CUDA wrapper present with VRAM-backed handles; Python interop uses CUDA Array Interface v3 and DLPack v1.x. Numerical outputs match scalar and batch reference paths.
 //! - SIMD: AVX2/AVX512 enabled for period == 1 (vectorized `close > source`). For period > 1 we short-circuit to the scalar path (rolling-sum dependency is serial).
 //! - Scalar: optimized to avoid whole-slice prefill; only warmup prefixes are written, and the initial-sum build is loop-jammed with warmup marking.
 //! - Batch: row executor now uses a single inclusive prefix sum of `source` shared across rows (per-row average via `psum[i] - psum[i - p]`), eliminating per-row running sums.
@@ -62,6 +63,9 @@ fn ttm_prepare<'a>(
 ) -> Result<(&'a [f64], &'a [f64], usize, usize, Kernel), TtmTrendError> {
     let (source, close) = input.as_slices();
     let len = source.len().min(close.len());
+    if len == 0 {
+        return Err(TtmTrendError::EmptyInputData);
+    }
     let first = source
         .iter()
         .zip(close)
@@ -99,7 +103,7 @@ fn ttm_numeric_compute_with_params(
 ) -> Result<(), TtmTrendError> {
     let len = source.len().min(close.len());
     if dst.len() != len {
-        return Err(TtmTrendError::OutputLenMismatch {
+        return Err(TtmTrendError::OutputLengthMismatch {
             expected: len,
             got: dst.len(),
         });
@@ -261,6 +265,8 @@ impl TtmTrendBuilder {
 
 #[derive(Debug, Error)]
 pub enum TtmTrendError {
+    #[error("ttm_trend: Input data slice is empty.")]
+    EmptyInputData,
     #[error("ttm_trend: All values are NaN.")]
     AllValuesNaN,
     #[error("ttm_trend: Invalid period: period = {period}, data length = {data_len}")]
@@ -268,9 +274,11 @@ pub enum TtmTrendError {
     #[error("ttm_trend: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("ttm_trend: Output length mismatch: expected = {expected}, got = {got}")]
-    OutputLenMismatch { expected: usize, got: usize },
-    #[error("ttm_trend: Invalid kernel type for batch operation")]
-    InvalidKernel,
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("ttm_trend: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("ttm_trend: Invalid kernel type for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -651,7 +659,7 @@ pub fn ttm_trend_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(TtmTrendError::InvalidKernel),
+        other => return Err(TtmTrendError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -677,27 +685,56 @@ impl TtmTrendBatchOutput {
             .position(|c| c.period.unwrap_or(5) == p.period.unwrap_or(5))
     }
     pub fn values_for(&self, p: &TtmTrendParams) -> Option<&[bool]> {
-        self.row_for_params(p).map(|row| {
-            let start = row * self.cols;
-            &self.values[start..start + self.cols]
+        self.row_for_params(p).and_then(|row| {
+            let start = row.checked_mul(self.cols)?;
+            self.values.get(start..start + self.cols)
         })
     }
 }
 
 #[inline(always)]
-fn expand_grid(r: &TtmTrendBatchRange) -> Vec<TtmTrendParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &TtmTrendBatchRange) -> Result<Vec<TtmTrendParams>, TtmTrendError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, TtmTrendError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let st = step.max(1);
+            let v: Vec<usize> = (start..=end).step_by(st).collect();
+            if v.is_empty() {
+                return Err(TtmTrendError::InvalidRange { start, end, step });
+            }
+            return Ok(v);
+        }
+        // reversed bounds
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(TtmTrendError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
+    if periods.is_empty() {
+        return Err(TtmTrendError::InvalidRange {
+            start: r.period.0,
+            end: r.period.1,
+            step: r.period.2,
+        });
+    }
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(TtmTrendParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -728,15 +765,12 @@ fn ttm_batch_inner_f64(
     kern: Kernel,
     parallel: bool,
 ) -> Result<(Vec<f64>, Vec<TtmTrendParams>, usize, usize), TtmTrendError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(TtmTrendError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let len = source.len().min(close.len());
+    if len == 0 {
+        return Err(TtmTrendError::EmptyInputData);
+    }
     let first = source
         .iter()
         .zip(close)
@@ -848,14 +882,11 @@ fn ttm_trend_batch_inner_into_f64(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<TtmTrendParams>, TtmTrendError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(TtmTrendError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let len = source.len().min(close.len());
+    if len == 0 {
+        return Err(TtmTrendError::EmptyInputData);
+    }
     let first = source
         .iter()
         .zip(close.iter())
@@ -870,9 +901,16 @@ fn ttm_trend_batch_inner_into_f64(
     }
     let rows = combos.len();
     let cols = len;
-    if out.len() != rows * cols {
-        return Err(TtmTrendError::OutputLenMismatch {
-            expected: rows * cols,
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(TtmTrendError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(TtmTrendError::OutputLengthMismatch {
+            expected,
             got: out.len(),
         });
     }
@@ -924,18 +962,25 @@ fn ttm_trend_batch_inner_into(
     out: &mut [bool],
 ) -> Result<Vec<TtmTrendParams>, TtmTrendError> {
     let len = source.len().min(close.len());
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let rows = combos.len();
     let cols = len;
-    if out.len() != rows * cols {
-        return Err(TtmTrendError::OutputLenMismatch {
-            expected: rows * cols,
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(TtmTrendError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(TtmTrendError::OutputLengthMismatch {
+            expected,
             got: out.len(),
         });
     }
 
     // Use f64 internally
-    let mut tmp = vec![f64::NAN; rows * cols];
+    let mut tmp = vec![f64::NAN; expected];
     let result = ttm_trend_batch_inner_into_f64(source, close, sweep, kern, parallel, &mut tmp)?;
 
     // Convert to bool
@@ -1028,8 +1073,9 @@ pub fn register_ttm_trend_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResu
     m.add_function(wrap_pyfunction!(ttm_trend_py, m)?)?;
     m.add_function(wrap_pyfunction!(ttm_trend_batch_py, m)?)?;
     m.add_class::<TtmTrendStreamPy>()?;
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "python", feature = "cuda"))]
     {
+        m.add_class::<TtmTrendDeviceArrayF32Py>()?;
         m.add_function(wrap_pyfunction!(ttm_trend_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(
             ttm_trend_cuda_many_series_one_param_dev_py,
@@ -1041,15 +1087,273 @@ pub fn register_ttm_trend_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResu
 
 // ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::ttm_trend_wrapper::CudaTtmTrend;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::PyReadonlyArray2;
+use pyo3::ffi as pyffi;
 #[cfg(all(feature = "python", feature = "cuda"))]
-// PyValueError imported in the general Python section below.
+use std::ffi::{c_void, CString};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::prelude::*;
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "TtmTrendDeviceArrayF32",
+    unsendable
+)]
+pub struct TtmTrendDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl TtmTrendDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producing stream synchronizes before returning the handle.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        // Array API stream semantics: producer is already synchronized, so we only validate.
+        if let Some(s) = stream {
+            if s == 0 {
+                return Err(PyValueError::new_err(
+                    "__dlpack__ stream=0 is invalid for CUDA",
+                ));
+            }
+        }
+        if let Some((dev_ty, dev_id)) = dl_device {
+            if dev_ty != 2 || dev_id != slf.device_id as i32 {
+                return Err(PyValueError::new_err(
+                    "dl_device mismatch; cross-device copy not supported for TtmTrendDeviceArrayF32",
+                ));
+            }
+        }
+        if let Some(true) = copy {
+            return Err(PyValueError::new_err(
+                "copy=True not supported for TtmTrendDeviceArrayF32",
+            ));
+        }
+
+        // DLPack v0.6 and v1.x (versioned) producer
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            py_self: *mut pyffi::PyObject,
+        }
+
+        unsafe extern "C" fn capsule_destructor(cap: *mut pyffi::PyObject) {
+            if cap.is_null() {
+                return;
+            }
+            let name_c = unsafe { pyffi::PyCapsule_GetName(cap) };
+            if name_c.is_null() {
+                return;
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr(name_c) }.to_string_lossy();
+            let valid = name == "dltensor" || name == "dltensor_versioned";
+            let ptr = unsafe { pyffi::PyCapsule_GetPointer(cap, name_c as *const _) };
+            if ptr.is_null() || !valid {
+                return;
+            }
+            unsafe {
+                if name == "dltensor_versioned" {
+                    let v = ptr as *mut DLManagedTensorVersioned;
+                    if !v.is_null() {
+                        let mt = (*v).manager;
+                        if !mt.is_null() {
+                            if let Some(del) = (*mt).deleter {
+                                del(mt);
+                            }
+                        }
+                        let _ = Box::from_raw(v);
+                    }
+                } else {
+                    let mt = ptr as *mut DLManagedTensor;
+                    if !mt.is_null() {
+                        if let Some(del) = (*mt).deleter {
+                            del(mt);
+                        }
+                    }
+                }
+            }
+        }
+
+        unsafe extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            unsafe {
+                let ctx = (*p).manager_ctx as *mut ManagerCtx;
+                if !ctx.is_null() {
+                    let pyobj = (*ctx).py_self;
+                    let _ = Box::from_raw(ctx);
+                    if !pyobj.is_null() {
+                        pyffi::Py_DECREF(pyobj);
+                    }
+                }
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+
+        // Allocate shape/strides (elements) and INCREF self so the VRAM buffer outlives the capsule
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr = shape_box.as_mut_ptr();
+        let strides_ptr = strides_box.as_mut_ptr();
+        let py_self = slf.as_ptr();
+        unsafe {
+            pyffi::Py_INCREF(py_self);
+        }
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape_box: shape_box,
+            _strides_box: strides_box,
+            py_self,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let total_elems = (rows as i128).saturating_mul(cols as i128);
+        let data_ptr = if total_elems == 0 {
+            std::ptr::null_mut()
+        } else {
+            slf.inner.device_ptr() as usize as *mut c_void
+        };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice {
+                    device_type: 2,
+                    device_id: slf.device_id as i32,
+                },
+                ndim: 2,
+                dtype: DLDataType {
+                    code: 2,
+                    bits: 32,
+                    lanes: 1,
+                },
+                shape: shape_ptr,
+                strides: strides_ptr,
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(managed_deleter),
+        });
+
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create versioned DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl TtmTrendDeviceArrayF32Py {
+    pub fn new_from_rust(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self {
+            inner,
+            _ctx: ctx_guard,
+            device_id,
+        }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "ttm_trend_cuda_batch_dev")]
@@ -1060,8 +1364,7 @@ pub fn ttm_trend_cuda_batch_dev_py(
     close_f32: PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
-    use crate::cuda::cuda_available;
+) -> PyResult<TtmTrendDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1070,13 +1373,17 @@ pub fn ttm_trend_cuda_batch_dev_py(
     let sweep = TtmTrendBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaTtmTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ttm_trend_batch_dev(src, cls, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .ttm_trend_batch_dev(src, cls, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(TtmTrendDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1090,20 +1397,23 @@ pub fn ttm_trend_cuda_many_series_one_param_dev_py(
     rows: usize,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
-    use crate::cuda::cuda_available;
+) -> PyResult<TtmTrendDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let src_tm = source_tm_f32.as_slice()?;
     let cls_tm = close_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaTtmTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ttm_trend_many_series_one_param_time_major_dev(src_tm, cls_tm, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .ttm_trend_many_series_one_param_time_major_dev(src_tm, cls_tm, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(TtmTrendDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(test)]
@@ -1953,7 +2263,7 @@ pub fn ttm_trend_into_slice(
     let (source, close, period, first, chosen) = ttm_prepare(input, kern)?;
     let len = source.len().min(close.len());
     if dst.len() != len {
-        return Err(TtmTrendError::OutputLenMismatch {
+        return Err(TtmTrendError::OutputLengthMismatch {
             expected: len,
             got: dst.len(),
         });

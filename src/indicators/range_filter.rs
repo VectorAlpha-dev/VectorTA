@@ -21,6 +21,7 @@
 //! - Decision: SIMD kept as stubs. The core loop is inherently sequential (stateful EMAs + clamp), so AVX2/AVX512 do not provide a clear win here. Runtime selection still routes through the stubs which delegate to the scalar path.
 //! - Batch: minor row-specific optimization only when multiple parameter rows are requested (precomputes abs-change once). It is gated to avoid overhead for the common single-row case used in benches/tests.
 //! - Streaming: Implemented with O(1) update performance (maintains running EMAs)
+//! - CUDA: batch and many-series wrappers share warmup/NaN semantics with the scalar path and return VRAM handles used by Python via CUDA Array Interface v3 and DLPack v1.x.
 //! - Zero-copy Memory: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -53,13 +54,15 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::DeviceArrayF32;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaRangeFilter};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 impl<'a> AsRef<[f64]> for RangeFilterInput<'a> {
     #[inline(always)]
@@ -257,6 +260,15 @@ pub enum RangeFilterError {
 
     #[error("range_filter: Invalid range_size: {range_size}")]
     InvalidRangeSize { range_size: f64 },
+
+    #[error("range_filter: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("range_filter: Invalid batch range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
+
+    #[error("range_filter: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // Batch processing structures
@@ -435,21 +447,21 @@ pub fn range_filter_into_slice(
 
     let n = data.len();
     if dst_filter.len() != n {
-        return Err(RangeFilterError::InvalidPeriod {
-            period: dst_filter.len(),
-            data_len: n,
+        return Err(RangeFilterError::OutputLengthMismatch {
+            expected: n,
+            got: dst_filter.len(),
         });
     }
     if dst_high.len() != n {
-        return Err(RangeFilterError::InvalidPeriod {
-            period: dst_high.len(),
-            data_len: n,
+        return Err(RangeFilterError::OutputLengthMismatch {
+            expected: n,
+            got: dst_high.len(),
         });
     }
     if dst_low.len() != n {
-        return Err(RangeFilterError::InvalidPeriod {
-            period: dst_low.len(),
-            data_len: n,
+        return Err(RangeFilterError::OutputLengthMismatch {
+            expected: n,
+            got: dst_low.len(),
         });
     }
 
@@ -961,31 +973,118 @@ unsafe fn range_filter_avx512(
 
 // Batch processing implementation
 #[inline(always)]
-fn expand_grid(r: &RangeFilterBatchRange) -> Vec<RangeFilterParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &RangeFilterBatchRange) -> Result<Vec<RangeFilterParams>, RangeFilterError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, RangeFilterError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
-    }
 
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
-        }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start < end {
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                match cur.checked_add(step) {
+                    Some(next) if next <= end => {
+                        cur = next;
+                    }
+                    Some(_) => break,
+                    None => {
+                        return Err(RangeFilterError::InvalidRange {
+                            start: start as f64,
+                            end: end as f64,
+                            step: step as f64,
+                        });
+                    }
+                }
+            }
+        } else {
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                match cur.checked_sub(step) {
+                    Some(next) if next >= end => {
+                        cur = next;
+                    }
+                    Some(_) => break,
+                    None => {
+                        return Err(RangeFilterError::InvalidRange {
+                            start: start as f64,
+                            end: end as f64,
+                            step: step as f64,
+                        });
+                    }
+                }
+            }
         }
-        v
+
+        if v.is_empty() {
+            return Err(RangeFilterError::InvalidRange {
+                start: start as f64,
+                end: end as f64,
+                step: step as f64,
+            });
+        }
+
+        Ok(v)
     }
 
-    let range_sizes = axis_f64(r.range_size);
-    let range_periods = axis_usize(r.range_period);
+    fn axis_f64(
+        (start, end, step): (f64, f64, f64),
+    ) -> Result<Vec<f64>, RangeFilterError> {
+        let eps = 1e-12;
+        if !start.is_finite() || !end.is_finite() || !step.is_finite() {
+            return Err(RangeFilterError::InvalidRange { start, end, step });
+        }
+        if step.abs() < eps || (start - end).abs() < eps {
+            return Ok(vec![start]);
+        }
 
-    let mut out = Vec::with_capacity(range_sizes.len() * range_periods.len());
+        let mut v = Vec::new();
+        let delta = end - start;
+        let dir = if delta >= 0.0 { 1.0 } else { -1.0 };
+        let mut step_eff = step;
+        if step_eff.signum() == 0.0 {
+            step_eff = dir * step.abs();
+        } else if step_eff.signum() != dir {
+            step_eff = dir * step.abs();
+        }
+
+        let mut x = start;
+        if dir > 0.0 {
+            while x <= end + eps {
+                v.push(x);
+                x += step_eff;
+            }
+        } else {
+            while x >= end - eps {
+                v.push(x);
+                x += step_eff;
+            }
+        }
+
+        if v.is_empty() {
+            return Err(RangeFilterError::InvalidRange { start, end, step });
+        }
+
+        Ok(v)
+    }
+
+    let range_sizes = axis_f64(r.range_size)?;
+    let range_periods = axis_usize(r.range_period)?;
+
+    let combos_len = range_sizes
+        .len()
+        .checked_mul(range_periods.len())
+        .ok_or(RangeFilterError::InvalidRange {
+            start: r.range_size.0,
+            end: r.range_size.1,
+            step: r.range_size.2,
+        })?;
+
+    let mut out = Vec::with_capacity(combos_len);
     for &rs in &range_sizes {
         for &rp in &range_periods {
             out.push(RangeFilterParams {
@@ -996,7 +1095,7 @@ fn expand_grid(r: &RangeFilterBatchRange) -> Vec<RangeFilterParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1016,12 +1115,7 @@ pub fn range_filter_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(RangeFilterError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(RangeFilterError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1048,7 +1142,7 @@ fn range_filter_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<RangeFilterBatchOutput, RangeFilterError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let cols = data.len();
     let rows = combos.len();
 
@@ -1057,6 +1151,13 @@ fn range_filter_batch_inner(
     }
 
     // 3 output matrices, uninitialized
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(RangeFilterError::InvalidRange {
+            start: sweep.range_size.0,
+            end: sweep.range_size.1,
+            step: sweep.range_size.2,
+        })?;
     let mut filter_mu = make_uninit_matrix(rows, cols);
     let mut high_mu = make_uninit_matrix(rows, cols);
     let mut low_mu = make_uninit_matrix(rows, cols);
@@ -1141,9 +1242,10 @@ fn range_filter_batch_inner_into(
     low_out: &mut [f64],
 ) -> Result<(), RangeFilterError> {
     if combos.is_empty() {
-        return Err(RangeFilterError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(RangeFilterError::InvalidRange {
+            start: 0.0,
+            end: 0.0,
+            step: 0.0,
         });
     }
 
@@ -1152,6 +1254,33 @@ fn range_filter_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(RangeFilterError::AllValuesNaN)?;
     let cols = data.len();
+
+    let expected = combos
+        .len()
+        .checked_mul(cols)
+        .ok_or(RangeFilterError::InvalidRange {
+            start: 0.0,
+            end: 0.0,
+            step: 0.0,
+        })?;
+    if filter_out.len() != expected {
+        return Err(RangeFilterError::OutputLengthMismatch {
+            expected,
+            got: filter_out.len(),
+        });
+    }
+    if high_out.len() != expected {
+        return Err(RangeFilterError::OutputLengthMismatch {
+            expected,
+            got: high_out.len(),
+        });
+    }
+    if low_out.len() != expected {
+        return Err(RangeFilterError::OutputLengthMismatch {
+            expected,
+            got: low_out.len(),
+        });
+    }
 
     // Compute the maximum warmup needed across all combos and enforce early
     // failure like alma.rs does.
@@ -1314,6 +1443,24 @@ fn range_filter_batch_inner_into(
         }
     }
 
+    // Apply NaN warmup prefixes per row to match scalar and CUDA semantics
+    for (row, p) in combos.iter().enumerate() {
+        let rp = p.range_period.unwrap_or(14);
+        let sp = if p.smooth_range.unwrap_or(true) {
+            p.smooth_period.unwrap_or(27)
+        } else {
+            0
+        };
+        let warm_end = (first + rp.max(sp)).min(cols);
+        let offset = row * cols;
+        for i in 0..warm_end {
+            let idx = offset + i;
+            filter_out[idx] = f64::NAN;
+            high_out[idx] = f64::NAN;
+            low_out[idx] = f64::NAN;
+        }
+    }
+
     Ok(())
 }
 
@@ -1385,14 +1532,17 @@ pub fn range_filter_batch_py<'py>(
     };
 
     // Expand once to size outputs and metadata
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
     // Allocate NumPy outputs first, then compute directly into them
-    let f_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let h_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let l_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("range_filter_batch_py: rows*cols overflowed"))?;
+    let f_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let h_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let l_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
 
     let kern = validate_kernel(kernel, true)?;
 
@@ -1611,6 +1761,200 @@ pub fn range_filter_batch_unified_js(data: &[f64], config: JsValue) -> Result<Js
 
 // ========================= Python CUDA Bindings =========================
 #[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct RangeFilterDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl RangeFilterDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Producing stream is synchronized before return; omit explicit stream
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (_stream=None, max_version=None, _dl_device=None, _copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<pyo3::PyObject>,
+        max_version: Option<(u8, u8)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            _ctx: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+            device_id: i32,
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() {
+                return;
+            }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let versioned = b"dltensor_versioned\0";
+            let legacy = b"dltensor\0";
+            let mut ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                versioned.as_ptr() as *const c_char,
+            );
+            if ptr.is_null() {
+                ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    legacy.as_ptr() as *const c_char,
+                );
+            }
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter {
+                    del(mt);
+                }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        // Move VRAM handle into Holder (single-use)
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: if rows == 0 || cols == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+                    },
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [rows, cols],
+            strides: [cols, 1],
+            _ctx: self._ctx.clone(),
+            _buf: buf,
+            device_id: self.device_id as i32,
+        });
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
+        let _ = Box::into_raw(holder);
+
+        let wants_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
+        let name_versioned = b"dltensor_versioned\0";
+        let name_legacy = b"dltensor\0";
+        let name_ptr = if wants_versioned {
+            name_versioned.as_ptr()
+        } else {
+            name_legacy.as_ptr()
+        };
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut std::ffi::c_void,
+                name_ptr as *const c_char,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe {
+                dl_managed_deleter(mt_ptr);
+            }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "range_filter_cuda_batch_dev")]
 #[pyo3(signature = (data_f32,
                     range_size_start=2.618, range_size_end=2.618, range_size_step=0.1,
@@ -1651,12 +1995,12 @@ pub fn range_filter_cuda_batch_dev_py<'py>(
         "filter",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: DeviceArrayF32 {
-                    buf: dev_trio.filter,
-                    rows: combos.len(),
-                    cols: slice_in.len(),
-                },
+            RangeFilterDeviceArrayF32Py {
+                buf: Some(dev_trio.filter),
+                rows: dev_trio.rows,
+                cols: dev_trio.cols,
+                _ctx: dev_trio.ctx.clone(),
+                device_id: dev_trio.device_id,
             },
         )?,
     )?;
@@ -1664,12 +2008,12 @@ pub fn range_filter_cuda_batch_dev_py<'py>(
         "high",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: DeviceArrayF32 {
-                    buf: dev_trio.high,
-                    rows: combos.len(),
-                    cols: slice_in.len(),
-                },
+            RangeFilterDeviceArrayF32Py {
+                buf: Some(dev_trio.high),
+                rows: dev_trio.rows,
+                cols: dev_trio.cols,
+                _ctx: dev_trio.ctx.clone(),
+                device_id: dev_trio.device_id,
             },
         )?,
     )?;
@@ -1677,12 +2021,12 @@ pub fn range_filter_cuda_batch_dev_py<'py>(
         "low",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: DeviceArrayF32 {
-                    buf: dev_trio.low,
-                    rows: combos.len(),
-                    cols: slice_in.len(),
-                },
+            RangeFilterDeviceArrayF32Py {
+                buf: Some(dev_trio.low),
+                rows: dev_trio.rows,
+                cols: dev_trio.cols,
+                _ctx: dev_trio.ctx.clone(),
+                device_id: dev_trio.device_id,
             },
         )?,
     )?;
@@ -1760,12 +2104,12 @@ pub fn range_filter_cuda_many_series_one_param_dev_py<'py>(
         "filter",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: DeviceArrayF32 {
-                    buf: dev_trio.filter,
-                    rows,
-                    cols,
-                },
+            RangeFilterDeviceArrayF32Py {
+                buf: Some(dev_trio.filter),
+                rows: dev_trio.rows,
+                cols: dev_trio.cols,
+                _ctx: dev_trio.ctx.clone(),
+                device_id: dev_trio.device_id,
             },
         )?,
     )?;
@@ -1773,12 +2117,12 @@ pub fn range_filter_cuda_many_series_one_param_dev_py<'py>(
         "high",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: DeviceArrayF32 {
-                    buf: dev_trio.high,
-                    rows,
-                    cols,
-                },
+            RangeFilterDeviceArrayF32Py {
+                buf: Some(dev_trio.high),
+                rows: dev_trio.rows,
+                cols: dev_trio.cols,
+                _ctx: dev_trio.ctx.clone(),
+                device_id: dev_trio.device_id,
             },
         )?,
     )?;
@@ -1786,12 +2130,12 @@ pub fn range_filter_cuda_many_series_one_param_dev_py<'py>(
         "low",
         Py::new(
             py,
-            DeviceArrayF32Py {
-                inner: DeviceArrayF32 {
-                    buf: dev_trio.low,
-                    rows,
-                    cols,
-                },
+            RangeFilterDeviceArrayF32Py {
+                buf: Some(dev_trio.low),
+                rows: dev_trio.rows,
+                cols: dev_trio.cols,
+                _ctx: dev_trio.ctx.clone(),
+                device_id: dev_trio.device_id,
             },
         )?,
     )?;
@@ -1878,12 +2222,19 @@ pub fn range_filter_batch_into(
             smooth_period: Some(smooth_period),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
         // Output is organized as [filter_values..., high_values..., low_values...]
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols * 3);
+        let total = rows
+            .checked_mul(cols)
+            .and_then(|v| v.checked_mul(3))
+            .ok_or_else(|| {
+                JsValue::from_str("range_filter_batch_into: rows*cols*3 overflowed usize")
+            })?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         let (filter_out, rest) = out.split_at_mut(rows * cols);
         let (high_out, low_out) = rest.split_at_mut(rows * cols);
 

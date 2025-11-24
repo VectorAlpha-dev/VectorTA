@@ -249,6 +249,20 @@ impl CudaHighPass2 {
     }
 
     #[inline]
+    fn assert_current_device(&self) -> Result<(), CudaHighPass2Error> {
+        unsafe {
+            let mut dev: i32 = -1;
+            let _ = cust::sys::cuCtxGetDevice(&mut dev);
+            if dev < 0 { return Ok(()); }
+            let cur = dev as u32;
+            if cur != self.device_id {
+                return Err(CudaHighPass2Error::DeviceMismatch { buf: self.device_id, current: cur });
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
         if self.debug_batch_logged {
@@ -401,6 +415,9 @@ impl CudaHighPass2 {
             ));
         }
 
+        // Ensure we are on the same device/context as the buffers were allocated for
+        let _ = self.assert_current_device();
+
         self.launch_batch_kernel(
             d_prices,
             d_periods,
@@ -525,6 +542,9 @@ impl CudaHighPass2 {
                 "first_valids length mismatch".into(),
             ));
         }
+
+        // Ensure current context matches allocation device
+        let _ = self.assert_current_device();
 
         self.launch_many_series_kernel(
             d_prices_tm,

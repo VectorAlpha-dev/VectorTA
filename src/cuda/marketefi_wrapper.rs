@@ -15,6 +15,7 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use cust::context::Context;
 use cust::device::Device;
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
@@ -22,24 +23,38 @@ use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
-use std::error::Error;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaMarketefiError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error(
+        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
+    )]
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaMarketefiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaMarketefiError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaMarketefiError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl Error for CudaMarketefiError {}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum BatchKernelPolicy {
@@ -77,7 +92,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaMarketefi {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaMarketefiPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -87,10 +103,9 @@ pub struct CudaMarketefi {
 
 impl CudaMarketefi {
     pub fn new(device_id: usize) -> Result<Self, CudaMarketefiError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/marketefi_kernel.ptx"));
         let jit_opts = &[
@@ -99,22 +114,29 @@ impl CudaMarketefi {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaMarketefiPolicy::default(),
             last_batch: None,
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
         })
+    }
+
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     pub fn set_policy(&mut self, policy: CudaMarketefiPolicy) {
@@ -147,7 +169,10 @@ impl CudaMarketefi {
             return true;
         }
         if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+            match required_bytes.checked_add(headroom_bytes) {
+                Some(needed) => needed <= free,
+                None => false,
+            }
         } else {
             true
         }
@@ -214,27 +239,31 @@ impl CudaMarketefi {
             .ok_or_else(|| CudaMarketefiError::InvalidInput("all values are NaN".into()))?;
 
         // VRAM estimate: 3 inputs + 1 output (FP32), ~64MB headroom
-        let bytes = 4 * len * std::mem::size_of::<f32>();
-        if !Self::will_fit(bytes, 64 * 1024 * 1024) {
-            return Err(CudaMarketefiError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
+        let elem_bytes = std::mem::size_of::<f32>();
+        let per_vec = len
+            .checked_mul(elem_bytes)
+            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow (len * elem_size)".into()))?;
+        let bytes = 4usize
+            .checked_mul(per_vec)
+            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow (4 * len * elem_size)".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(bytes, headroom) {
+            let free = Self::device_mem_info().map(|(free, _)| free).unwrap_or(0);
+            return Err(CudaMarketefiError::OutOfMemory {
+                required: bytes,
+                free,
+                headroom,
+            });
         }
 
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
-        let d_vol = unsafe { DeviceBuffer::from_slice_async(volume_f32, &self.stream) }
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }?;
+        let d_vol = unsafe { DeviceBuffer::from_slice_async(volume_f32, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }
-                .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
 
         self.marketefi_device(&d_high, &d_low, &d_vol, len, first, &mut d_out)?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -261,7 +290,9 @@ impl CudaMarketefi {
         let func = self
             .module
             .get_function("marketefi_kernel_f32")
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMarketefiError::MissingKernelSymbol {
+                name: "marketefi_kernel_f32",
+            })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 256u32,
@@ -285,9 +316,7 @@ impl CudaMarketefi {
                 &mut first_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaMarketefi)).last_batch =
@@ -309,7 +338,9 @@ impl CudaMarketefi {
         if cols == 0 || rows == 0 {
             return Err(CudaMarketefiError::InvalidInput("empty input".into()));
         }
-        let n = cols * rows;
+        let n = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow (cols * rows)".into()))?;
         if high_tm_f32.len() != n || low_tm_f32.len() != n || volume_tm_f32.len() != n {
             return Err(CudaMarketefiError::InvalidInput("length mismatch".into()));
         }
@@ -334,31 +365,37 @@ impl CudaMarketefi {
         }
 
         // VRAM check: 3 inputs + output (all f32) + first_valids (i32)
-        let bytes = (4 * n) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>();
-        if !Self::will_fit(bytes, 64 * 1024 * 1024) {
-            return Err(CudaMarketefiError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
+        let f_bytes = n
+            .checked_mul(std::mem::size_of::<f32>())
+            .and_then(|b| b.checked_mul(4))
+            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow for fp32 buffers".into()))?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow for first_valids".into()))?;
+        let bytes = f_bytes
+            .checked_add(first_bytes)
+            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow (total bytes)".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(bytes, headroom) {
+            let free = Self::device_mem_info().map(|(free, _)| free).unwrap_or(0);
+            return Err(CudaMarketefiError::OutOfMemory {
+                required: bytes,
+                free,
+                headroom,
+            });
         }
 
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm_f32, &self.stream) }
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
-        let d_vol = unsafe { DeviceBuffer::from_slice_async(volume_tm_f32, &self.stream) }
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
-        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm_f32, &self.stream) }?;
+        let d_vol = unsafe { DeviceBuffer::from_slice_async(volume_tm_f32, &self.stream) }?;
+        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
-                .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }?;
 
         self.marketefi_many_series_one_param_device(
             &d_high, &d_low, &d_vol, &d_first, cols, rows, &mut d_out,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -377,7 +414,9 @@ impl CudaMarketefi {
         rows: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMarketefiError> {
-        let n = cols * rows;
+        let n = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow (cols * rows)".into()))?;
         if d_high_tm.len() != n || d_low_tm.len() != n || d_vol_tm.len() != n || d_out_tm.len() != n
         {
             return Err(CudaMarketefiError::InvalidInput(
@@ -392,7 +431,9 @@ impl CudaMarketefi {
         let func = self
             .module
             .get_function("marketefi_many_series_one_param_f32")
-            .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMarketefiError::MissingKernelSymbol {
+                name: "marketefi_many_series_one_param_f32",
+            })?;
 
         // --- Launch policy (2D grid: time tiles × series tiles) ---
         // block.x spans series; grid.x tiles time; grid.y tiles series.
@@ -436,9 +477,7 @@ impl CudaMarketefi {
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut o_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
 
         // Keep the API the same; record chosen block size

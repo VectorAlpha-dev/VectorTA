@@ -562,18 +562,33 @@ impl CudaVpwma {
             .unwrap_or(1);
 
         // VRAM estimate (prices + params + weights + out) with ~64MB headroom
-        let prices_bytes = len * std::mem::size_of::<f32>();
-        let weights_bytes = n_combos * stride * std::mem::size_of::<f32>();
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let winlens_bytes = n_combos * std::mem::size_of::<i32>();
-        let invnorm_bytes = n_combos * std::mem::size_of::<f32>();
-        let out_bytes = n_combos * len * std::mem::size_of::<f32>();
+        let prices_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
+        let weights_bytes = n_combos
+            .checked_mul(stride)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
+        let periods_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
+        let winlens_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
+        let invnorm_bytes = n_combos
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
+        let out_bytes = n_combos
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
         let required = prices_bytes
-            + weights_bytes
-            + periods_bytes
-            + winlens_bytes
-            + invnorm_bytes
-            + out_bytes;
+            .checked_add(weights_bytes)
+            .and_then(|v| v.checked_add(periods_bytes))
+            .and_then(|v| v.checked_add(winlens_bytes))
+            .and_then(|v| v.checked_add(invnorm_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         Self::ensure_fit(required, headroom)?;
 
@@ -611,7 +626,9 @@ impl CudaVpwma {
         let d_weights = DeviceBuffer::from_slice(&weights_flat)?;
         let d_inv_norms = DeviceBuffer::from_slice(&inv_norms)?;
 
-        let elems = n_combos * len;
+        let elems = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("element count overflow".into()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
         self.launch_batch_kernel(
@@ -650,7 +667,9 @@ impl CudaVpwma {
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
         let d_weights = DeviceBuffer::from_slice(&weights)?;
 
-        let elems = cols * rows;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("element count overflow".into()))?;
         let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
         self.launch_many_series_kernel(

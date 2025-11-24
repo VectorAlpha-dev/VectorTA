@@ -22,6 +22,7 @@
 //! - Streaming: O(1) from first output; no warmup rescan.
 //! - Memory optimization: ✅ Uses `alloc_with_nan_prefix` (zero-copy) for warmup.
 //! - Batch operations: ✅ Implemented with parallel processing support.
+//! - Decision log: SIMD kernels exist but Auto short-circuits to scalar for throughput; CUDA wrapper is enabled with VRAM checks, and Python CUDA handles expose CAI v3 + DLPack v1.x with RAII context lifetime; numerical outputs match scalar reference paths.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -35,7 +36,7 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(feature = "python")]
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyBufferError, PyValueError};
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -185,15 +186,19 @@ impl LinearRegInterceptBuilder {
 #[derive(Debug, Error)]
 pub enum LinearRegInterceptError {
     #[error("linearreg_intercept: Input data slice is empty.")]
-    InputDataSliceEmpty,
+    EmptyInputData,
     #[error("linearreg_intercept: All values are NaN.")]
     AllValuesNaN,
     #[error("linearreg_intercept: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("linearreg_intercept: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("linearreg_intercept: Output length {dst} != input length {src}")]
-    OutputLengthMismatch { dst: usize, src: usize },
+    #[error("linearreg_intercept: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("linearreg_intercept: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+    #[error("linearreg_intercept: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // ---- Main entrypoints ----
@@ -212,7 +217,7 @@ pub fn linearreg_intercept_with_kernel(
     let data: &[f64] = input.as_ref();
 
     if data.is_empty() {
-        return Err(LinearRegInterceptError::InputDataSliceEmpty);
+        return Err(LinearRegInterceptError::EmptyInputData);
     }
 
     let first = data
@@ -278,7 +283,7 @@ pub fn linearreg_intercept_into(
     let data: &[f64] = input.as_ref();
 
     if data.is_empty() {
-        return Err(LinearRegInterceptError::InputDataSliceEmpty);
+        return Err(LinearRegInterceptError::EmptyInputData);
     }
 
     let first = data
@@ -303,8 +308,8 @@ pub fn linearreg_intercept_into(
 
     if dst.len() != data.len() {
         return Err(LinearRegInterceptError::OutputLengthMismatch {
-            dst: dst.len(),
-            src: data.len(),
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -346,7 +351,7 @@ pub fn linearreg_intercept_into_slice(
     let data: &[f64] = input.as_ref();
 
     if data.is_empty() {
-        return Err(LinearRegInterceptError::InputDataSliceEmpty);
+        return Err(LinearRegInterceptError::EmptyInputData);
     }
 
     let first = data
@@ -371,8 +376,8 @@ pub fn linearreg_intercept_into_slice(
 
     if dst.len() != data.len() {
         return Err(LinearRegInterceptError::OutputLengthMismatch {
-            dst: dst.len(),
-            src: data.len(),
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -743,12 +748,7 @@ pub fn linearreg_intercept_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(LinearRegInterceptError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(LinearRegInterceptError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -784,21 +784,63 @@ impl LinearRegInterceptBatchOutput {
 // ---- Batch helpers ----
 
 #[inline(always)]
-fn expand_grid(r: &LinearRegInterceptBatchRange) -> Vec<LinearRegInterceptParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(
+    r: &LinearRegInterceptBatchRange,
+) -> Result<Vec<LinearRegInterceptParams>, LinearRegInterceptError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, LinearRegInterceptError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+
+        let mut values = Vec::new();
+        let step_u = step;
+
+        if start <= end {
+            let mut v = start;
+            loop {
+                if v > end {
+                    break;
+                }
+                values.push(v);
+                match v.checked_add(step_u) {
+                    Some(next) => v = next,
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            loop {
+                if v < end {
+                    break;
+                }
+                values.push(v);
+                match v.checked_sub(step_u) {
+                    Some(next) => v = next,
+                    None => break,
+                }
+            }
+        }
+
+        if values.is_empty() {
+            return Err(LinearRegInterceptError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+
+        Ok(values)
     }
 
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
 
     let mut out = Vec::with_capacity(periods.len());
-    for &p in &periods {
+    for p in periods {
         out.push(LinearRegInterceptParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -828,16 +870,10 @@ fn linearreg_intercept_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<LinearRegInterceptParams>, LinearRegInterceptError> {
     if data.is_empty() {
-        return Err(LinearRegInterceptError::InputDataSliceEmpty);
+        return Err(LinearRegInterceptError::EmptyInputData);
     }
 
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(LinearRegInterceptError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -907,16 +943,10 @@ fn linearreg_intercept_batch_inner(
     parallel: bool,
 ) -> Result<LinearRegInterceptBatchOutput, LinearRegInterceptError> {
     if data.is_empty() {
-        return Err(LinearRegInterceptError::InputDataSliceEmpty);
+        return Err(LinearRegInterceptError::EmptyInputData);
     }
 
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(LinearRegInterceptError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -933,6 +963,14 @@ fn linearreg_intercept_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| LinearRegInterceptError::InvalidRange {
+            start: sweep.period.0.to_string(),
+            end: sweep.period.1.to_string(),
+            step: sweep.period.2.to_string(),
+        })?;
+
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     let warm: Vec<usize> = combos
@@ -944,7 +982,7 @@ fn linearreg_intercept_batch_inner(
     let mut values = unsafe {
         let ptr = buf_mu.as_mut_ptr() as *mut f64;
         std::mem::forget(buf_mu);
-        Vec::from_raw_parts(ptr, rows * cols, rows * cols)
+        Vec::from_raw_parts(ptr, total, total)
     };
 
     let chosen = match kern {
@@ -1050,7 +1088,7 @@ pub unsafe fn linearreg_intercept_row_avx512_long(
 
 #[inline(always)]
 fn expand_grid_reg(r: &LinearRegInterceptBatchRange) -> Vec<LinearRegInterceptParams> {
-    expand_grid(r)
+    expand_grid(r).unwrap_or_else(|_| Vec::new())
 }
 
 // ============================
@@ -1058,7 +1096,329 @@ fn expand_grid_reg(r: &LinearRegInterceptBatchRange) -> Vec<LinearRegInterceptPa
 // ============================
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct LinearRegInterceptDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl LinearRegInterceptDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Producer stream is synchronized before returning the handle; omit `stream`.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<&pyo3::types::PyAny>,
+        dl_device: Option<&pyo3::types::PyAny>,
+        copy: Option<&pyo3::types::PyAny>,
+    ) -> PyResult<PyObject> {
+        use std::ffi::{c_void, CStr};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLPackVersion {
+            major: u32,
+            minor: u32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: Arc<Context>,
+        }
+
+        extern "C" fn managed_deleter_legacy(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn managed_deleter_versioned(p: *mut DLManagedTensorVersioned) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                if capsule.is_null() {
+                    return;
+                }
+                let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule);
+                if name_ptr.is_null() {
+                    return;
+                }
+                let cname = CStr::from_ptr(name_ptr);
+                if cname.to_bytes() != b"dltensor" {
+                    return;
+                }
+                let expected = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    expected.as_ptr() as *const _,
+                ) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter {
+                        del(ptr);
+                    }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        extern "C" fn capsule_destructor_versioned(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                if capsule.is_null() {
+                    return;
+                }
+                let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule);
+                if name_ptr.is_null() {
+                    return;
+                }
+                let cname = CStr::from_ptr(name_ptr);
+                if cname.to_bytes() != b"dltensor_versioned" {
+                    return;
+                }
+                let expected = b"dltensor_versioned\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    expected.as_ptr() as *const _,
+                ) as *mut DLManagedTensorVersioned;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter {
+                        del(ptr);
+                    }
+                    let used = b"used_dltensor_versioned\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        // Array API: max_version negotiation (default to versioned when unspecified).
+        let max_ver_tuple: Option<(u32, u32)> = match max_version {
+            Some(v) => Some(v.extract()?),
+            None => None,
+        };
+        let use_versioned = match max_ver_tuple {
+            Some((maj, _)) => maj >= 1,
+            None => true,
+        };
+
+        // dl_device, if provided, must match this buffer.
+        if let Some(dev_obj) = dl_device {
+            let (dev_ty, dev_id): (i32, i32) = dev_obj.extract()?;
+            if dev_ty != 2 || dev_id != self.device_id as i32 {
+                return Err(PyBufferError::new_err(
+                    "__dlpack__: requested device does not match producer buffer",
+                ));
+            }
+        }
+
+        // copy=True is not supported (no cross-device copy path here).
+        if let Some(copy_obj) = copy {
+            let do_copy: bool = copy_obj.extract()?;
+            if do_copy {
+                return Err(PyBufferError::new_err(
+                    "__dlpack__(copy=True) not supported for linearreg_intercept CUDA buffers",
+                ));
+            }
+        }
+
+        // Stream semantics: producer work is synchronized before __dlpack__ is called, so
+        // the optional stream argument is accepted but not acted upon (no device-wide sync).
+        if let Some(_s) = stream {
+            // Intentionally ignored; see comment above.
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let nelems = (rows as usize)
+            .checked_mul(cols as usize)
+            .ok_or_else(|| PyValueError::new_err("linearreg_intercept: rows*cols overflow in __dlpack__"))?;
+
+        let data_ptr = if nelems == 0 {
+            std::ptr::null_mut()
+        } else {
+            self.buf
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?
+                .as_device_ptr()
+                .as_raw() as *mut c_void
+        };
+
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1i64]);
+        let guard = Box::new(DlpGuard {
+            _shape: shape,
+            _strides: strides,
+            _ctx: self.ctx.clone(),
+        });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        if use_versioned {
+            let mt = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 0 },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(managed_deleter_versioned),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+            });
+            let mt_raw = Box::into_raw(mt);
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_raw as *mut c_void,
+                    name.as_ptr() as *const _,
+                    Some(capsule_destructor_versioned),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { managed_deleter_versioned(mt_raw) };
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "failed to create DLPack versioned capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice {
+                        device_type: 2,
+                        device_id: self.device_id as i32,
+                    },
+                    ndim: 2,
+                    dtype: DLDataType {
+                        code: 2,
+                        bits: 32,
+                        lanes: 1,
+                    },
+                    shape: guard_ref._shape.as_ptr() as *mut i64,
+                    strides: guard_ref._strides.as_ptr() as *mut i64,
+                    byte_offset: 0,
+                },
+                manager_ctx: guard_ptr as *mut c_void,
+                deleter: Some(managed_deleter_legacy),
+            });
+            let mt_raw = Box::into_raw(mt);
+            let name = b"dltensor\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_raw as *mut c_void,
+                    name.as_ptr() as *const _,
+                    Some(capsule_destructor_legacy),
+                )
+            };
+            if capsule.is_null() {
+                unsafe { managed_deleter_legacy(mt_raw) };
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "failed to create DLPack capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "linearreg_intercept_cuda_batch_dev")]
@@ -1068,7 +1428,7 @@ pub fn linearreg_intercept_cuda_batch_dev_py(
     data: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<LinearRegInterceptDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaLinregIntercept;
     if !cuda_available() {
@@ -1078,14 +1438,23 @@ pub fn linearreg_intercept_cuda_batch_dev_py(
     let sweep = LinearRegInterceptBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let (dev, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaLinregIntercept::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.linearreg_intercept_batch_dev(slice, &sweep)
-            .map(|(dev, _)| dev)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let (dev, _combos) = cuda
+            .linearreg_intercept_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        Ok::<_, pyo3::PyErr>((dev, ctx, cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let DeviceArrayF32 { buf, rows, cols } = dev;
+    Ok(LinearRegInterceptDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1098,7 +1467,7 @@ pub fn linearreg_intercept_cuda_many_series_one_param_dev_py(
     rows: usize,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<LinearRegInterceptDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaLinregIntercept;
     if !cuda_available() {
@@ -1114,13 +1483,24 @@ pub fn linearreg_intercept_cuda_many_series_one_param_dev_py(
     let params = LinearRegInterceptParams {
         period: Some(period),
     };
-    let inner = py.allow_threads(|| {
+    let (dev, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaLinregIntercept::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.linearreg_intercept_many_series_one_param_time_major_dev(slice, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let dev = cuda
+            .linearreg_intercept_many_series_one_param_time_major_dev(
+                slice, cols, rows, &params,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        Ok::<_, pyo3::PyErr>((dev, ctx, cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(LinearRegInterceptDeviceArrayF32Py {
+        buf: Some(dev.buf),
+        rows: dev.rows,
+        cols: dev.cols,
+        ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(test)]
@@ -1916,11 +2296,16 @@ pub fn linearreg_intercept_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("linearreg_intercept_batch: rows*cols overflow"))?;
+
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Write warm NaNs per row only
@@ -2096,10 +2481,13 @@ pub fn linearreg_intercept_batch_into(
         let sweep = LinearRegInterceptBatchRange {
             period: (period_start, period_end, period_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let total = rows * cols;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("linearreg_intercept_batch_into: rows*cols overflow"))?;
 
         // Warmup NaNs per row
         let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);

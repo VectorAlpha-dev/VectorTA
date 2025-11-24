@@ -21,7 +21,8 @@
 //! - **Streaming Performance**: O(1) - uses exponential (Wilder) smoothing for efficient incremental updates
 //! - **Memory Optimization**: GOOD - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes throughout
 //! - **Decision Note**: Streaming kernel caches `1/period` and uses FMA when available; exact Wilder
-//!   smoothing preserved. Outputs match baseline within existing tolerances.
+//!   smoothing preserved. CUDA wrapper uses typed errors + `will_fit`, and Python CUDA handles expose
+//!   CAI v3 and DLPack v1.x via shared `DeviceArrayF32Py`. Numerical outputs remain unchanged.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::dm_wrapper::CudaDm;
@@ -161,14 +162,20 @@ impl DmBuilder {
 
 #[derive(Debug, Error)]
 pub enum DmError {
-    #[error("dm: Empty data provided or mismatched high/low lengths.")]
-    EmptyData,
+    #[error("dm: Input data is empty or high/low length mismatch.")]
+    EmptyInputData,
     #[error("dm: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("dm: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("dm: All values are NaN.")]
     AllValuesNaN,
+    #[error("dm: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("dm: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("dm: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -185,17 +192,17 @@ fn dm_prepare<'a>(
         DmData::Candles { candles } => {
             let h = candles
                 .select_candle_field("high")
-                .map_err(|_| DmError::EmptyData)?;
+                .map_err(|_| DmError::EmptyInputData)?;
             let l = candles
                 .select_candle_field("low")
-                .map_err(|_| DmError::EmptyData)?;
+                .map_err(|_| DmError::EmptyInputData)?;
             (h, l)
         }
         DmData::Slices { high, low } => (*high, *low),
     };
 
     if high.is_empty() || low.is_empty() || high.len() != low.len() {
-        return Err(DmError::EmptyData);
+        return Err(DmError::EmptyInputData);
     }
 
     let period = input.get_period();
@@ -677,12 +684,12 @@ pub fn dm_into(
     // Match default behavior: Auto short-circuits to Scalar for DM
     let (high, low, period, first, chosen) = dm_prepare(input, Kernel::Auto)?;
 
-    // Length validation: reuse existing InvalidPeriod shape on mismatch
-    if plus_out.len() != high.len() || minus_out.len() != high.len() {
-        return Err(DmError::InvalidPeriod {
-            period,
-            data_len: high.len(),
-        });
+    // Length validation
+    if plus_out.len() != high.len() {
+        return Err(DmError::OutputLengthMismatch { expected: high.len(), got: plus_out.len() });
+    }
+    if minus_out.len() != high.len() {
+        return Err(DmError::OutputLengthMismatch { expected: high.len(), got: minus_out.len() });
     }
 
     // Prefill NaN warmups with the same quiet-NaN bit pattern as alloc_with_nan_prefix
@@ -709,11 +716,11 @@ pub fn dm_into_slice(
     kernel: Kernel,
 ) -> Result<(), DmError> {
     let (high, low, period, first, chosen) = dm_prepare(input, kernel)?;
-    if plus_dst.len() != high.len() || minus_dst.len() != high.len() {
-        return Err(DmError::InvalidPeriod {
-            period: period,
-            data_len: high.len(),
-        });
+    if plus_dst.len() != high.len() {
+        return Err(DmError::OutputLengthMismatch { expected: high.len(), got: plus_dst.len() });
+    }
+    if minus_dst.len() != high.len() {
+        return Err(DmError::OutputLengthMismatch { expected: high.len(), got: minus_dst.len() });
     }
 
     dm_compute_into(high, low, period, first, chosen, plus_dst, minus_dst);
@@ -957,10 +964,10 @@ impl DmBatchBuilder {
     pub fn apply_candles(self, c: &Candles) -> Result<DmBatchOutput, DmError> {
         let high = c
             .select_candle_field("high")
-            .map_err(|_| DmError::EmptyData)?;
+            .map_err(|_| DmError::EmptyInputData)?;
         let low = c
             .select_candle_field("low")
-            .map_err(|_| DmError::EmptyData)?;
+            .map_err(|_| DmError::EmptyInputData)?;
         self.apply_slices(high, low)
     }
     pub fn with_default_candles(c: &Candles) -> Result<DmBatchOutput, DmError> {
@@ -994,17 +1001,48 @@ impl DmBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &DmBatchRange) -> Vec<DmParams> {
-    let (start, end, step) = r.period;
-    let periods = if step == 0 || start == end {
-        vec![start]
-    } else {
-        (start..=end).step_by(step).collect()
-    };
-    periods
-        .into_iter()
-        .map(|p| DmParams { period: Some(p) })
-        .collect()
+fn expand_grid(r: &DmBatchRange) -> Result<Vec<DmParams>, DmError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, DmError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let mut v = Vec::new();
+            let st = step.max(1);
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                match x.checked_add(st) {
+                    Some(next) => x = next,
+                    None => break,
+                }
+            }
+            if v.is_empty() {
+                return Err(DmError::InvalidRange { start, end, step });
+            }
+            return Ok(v);
+        }
+        // reversed bounds
+        let mut v = Vec::new();
+        let st = step.max(1) as isize;
+        let mut x = start as isize;
+        let end_i = end as isize;
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(DmError::InvalidRange { start, end, step });
+        }
+        Ok(v)
+    }
+
+    let periods = axis_usize(r.period)?;
+    let mut out = Vec::with_capacity(periods.len());
+    for p in periods {
+        out.push(DmParams { period: Some(p) });
+    }
+    Ok(out)
 }
 
 pub fn dm_batch_with_kernel(
@@ -1016,12 +1054,7 @@ pub fn dm_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(DmError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(DmError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1063,16 +1096,14 @@ fn dm_batch_inner_into(
     plus_out: &mut [f64],
     minus_out: &mut [f64],
 ) -> Result<Vec<DmParams>, DmError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(DmError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let rows = combos.len();
     let cols = high.len();
+    // Checked arithmetic for rows*cols
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(DmError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
     let chosen = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -1137,13 +1168,7 @@ fn dm_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<DmBatchOutput, DmError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(DmError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = high
         .iter()
@@ -1161,6 +1186,10 @@ fn dm_batch_inner(
 
     let rows = combos.len();
     let cols = high.len();
+    // Checked arithmetic for rows*cols
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(DmError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
 
     // allocate uninit matrices
     let mut plus_mu = make_uninit_matrix(rows, cols);
@@ -1327,11 +1356,6 @@ unsafe fn dm_row_avx512_long(
     minus: &mut [f64],
 ) {
     dm_row_avx512(high, low, first, period, plus, minus)
-}
-
-#[inline(always)]
-fn expand_grid_dm(_r: &DmBatchRange) -> Vec<DmParams> {
-    expand_grid(_r)
 }
 
 //------------------ TESTS ----------------------------
@@ -2220,15 +2244,18 @@ pub fn dm_cuda_batch_dev_py(
     let sweep = DmBatchRange {
         period: period_range,
     };
-    let pair = py.allow_threads(|| {
+    let (pair, ctx, dev) = py.allow_threads(|| {
         let cuda = CudaDm::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.dm_batch_dev(h, l, &sweep)
-            .map(|(pair, _)| pair)
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
+        cuda
+            .dm_batch_dev(h, l, &sweep)
+            .map(|(pair, _)| (pair, ctx, dev))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: pair.plus },
-        DeviceArrayF32Py { inner: pair.minus },
+        DeviceArrayF32Py { inner: pair.plus, _ctx: Some(ctx.clone()), device_id: Some(dev) },
+        DeviceArrayF32Py { inner: pair.minus, _ctx: Some(ctx), device_id: Some(dev) },
     ))
 }
 
@@ -2250,14 +2277,18 @@ pub fn dm_cuda_many_series_one_param_dev_py(
     }
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
-    let pair = py.allow_threads(|| {
+    let (pair, ctx, dev) = py.allow_threads(|| {
         let cuda = CudaDm::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.dm_many_series_one_param_time_major_dev(h, l, cols, rows, period)
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
+        cuda
+            .dm_many_series_one_param_time_major_dev(h, l, cols, rows, period)
+            .map(|pair| (pair, ctx, dev))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: pair.plus },
-        DeviceArrayF32Py { inner: pair.minus },
+        DeviceArrayF32Py { inner: pair.plus, _ctx: Some(ctx.clone()), device_id: Some(dev) },
+        DeviceArrayF32Py { inner: pair.minus, _ctx: Some(ctx), device_id: Some(dev) },
     ))
 }
 

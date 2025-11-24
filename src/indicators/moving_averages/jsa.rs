@@ -21,6 +21,7 @@
 //! - **Memory**: ✅ `alloc_with_nan_prefix` and init helpers ensure zero-copy/uninitialized semantics.
 //! - **Batch row SIMD**: ✅ Per-row AVX2/AVX512 variants; no shared precompute to exploit across rows.
 //! - **Rationale**: Kernel is bandwidth-bound but benefits from fewer loop branches and wider lanes.
+//! - **CUDA/Python interop**: ✅ RAII primary-context guard on device handles; CUDA Array Interface v3 with byte strides; DLPack v1.x with versioned-capsule negotiation.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -178,7 +179,7 @@ pub enum JsaError {
     NotEnoughValidData { needed: usize, valid: usize },
 
     #[error("jsa: output length mismatch: expected = {expected}, got = {got}")]
-    OutputLenMismatch { expected: usize, got: usize },
+    OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("jsa: invalid kernel for batch op: {kernel:?}")]
     InvalidKernel { kernel: Kernel },
@@ -243,7 +244,9 @@ pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, Js
         });
     }
 
-    let warm = first + period;
+    let warm = first
+        .checked_add(period)
+        .ok_or(JsaError::ArithmeticOverflow)?;
     let mut out = alloc_with_nan_prefix(len, warm);
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -259,7 +262,7 @@ pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, Js
 /// - Preserves NaN warmup prefix exactly as the Vec-returning API
 ///   (`first_valid + period` positions set to quiet-NaN).
 /// - `out.len()` must equal the input data length, otherwise returns
-///   `JsaError::OutputLenMismatch`.
+///   `JsaError::OutputLengthMismatch`.
 #[inline]
 pub fn jsa_into(input: &JsaInput, out: &mut [f64]) -> Result<(), JsaError> {
     jsa_with_kernel_into(input, Kernel::Auto, out)
@@ -289,7 +292,7 @@ pub fn jsa_with_kernel_into(
 
     // Ensure output buffer is the correct size
     if out.len() != len {
-        return Err(JsaError::OutputLenMismatch {
+        return Err(JsaError::OutputLengthMismatch {
             expected: len,
             got: out.len(),
         });
@@ -611,11 +614,11 @@ impl JsaBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &JsaBatchRange) -> Vec<JsaParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &JsaBatchRange) -> Result<Vec<JsaParams>, JsaError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, JsaError> {
         // zero step or equal bounds → static
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
         if start < end {
@@ -639,14 +642,15 @@ fn expand_grid(r: &JsaBatchRange) -> Vec<JsaParams> {
                 if cur == usize::MAX { break; }
             }
         }
-        if v.is_empty() { vec![start] } else { v }
+        if v.is_empty() {
+            return Err(JsaError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
-    for &p in &periods {
-        out.push(JsaParams { period: Some(p) });
-    }
-    out
+    for &p in &periods { out.push(JsaParams { period: Some(p) }); }
+    Ok(out)
 }
 
 #[inline(always)]
@@ -679,13 +683,7 @@ fn jsa_batch_inner(
         return Err(JsaError::EmptyInputData);
     }
 
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(JsaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -799,13 +797,7 @@ fn jsa_batch_inner_into(
         return Err(JsaError::EmptyInputData);
     }
 
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(JsaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -822,7 +814,7 @@ fn jsa_batch_inner_into(
     // Ensure output buffer is the correct size (checked mul)
     let expected = rows.checked_mul(cols).ok_or(JsaError::ArithmeticOverflow)?;
     if out.len() != expected {
-        return Err(JsaError::OutputLenMismatch {
+        return Err(JsaError::OutputLengthMismatch {
             expected,
             got: out.len(),
         });
@@ -1102,13 +1094,16 @@ pub fn jsa_batch_py<'py>(
         period: (period_start, period_end, period_step),
     };
 
-    // Calculate dimensions
-    let combos = expand_grid(&sweep);
+    // Calculate dimensions with robust range expansion
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("size overflow"))?;
 
     // Pre-allocate output array (OK for batch operations)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Compute without GIL
@@ -1433,7 +1428,8 @@ pub fn jsa_batch_into(
         };
 
         // Calculate output size
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let total_size = rows * len;
 
@@ -1489,12 +1485,16 @@ impl JsaDeviceArrayF32Py {
                 std::mem::size_of::<f32>(),
             ),
         )?;
-        let ptr = self
-            .buf
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
-            .as_device_ptr()
-            .as_raw() as usize;
+        let ptr = if self.rows == 0 || self.cols == 0 {
+            0usize
+        } else {
+            self
+                .buf
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+                .as_device_ptr()
+                .as_raw() as usize
+        };
         d.set_item("data", (ptr, false))?;
         // Producer stream is synchronized before returning the handle
         d.set_item("version", 3)?;
@@ -1505,12 +1505,23 @@ impl JsaDeviceArrayF32Py {
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
-    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<i64>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
         // Move DeviceBuffer into DLManagedTensor so consumer owns it
         let buf = self
             .buf
             .take()
             .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        // Stream semantics per Array API: 1=legacy default, 2=per-thread default, other integers are pointers.
+        if let Some(s) = stream { if s == 0 { return Err(PyValueError::new_err("stream 0 is invalid")); } }
 
         // Minimal DLPack C structs (subset)
         #[repr(C)]
@@ -1533,6 +1544,16 @@ impl JsaDeviceArrayF32Py {
             manager_ctx: *mut c_void,
             deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
         }
+        #[repr(C)]
+        struct DLPackVersion { major: u32, minor: u32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
 
         // Keep buffer/context and shape/strides alive until consumer calls deleter.
         struct Manager {
@@ -1541,21 +1562,33 @@ impl JsaDeviceArrayF32Py {
             _shape: Box<[i64; 2]>,
             _strides: Box<[i64; 2]>,
         }
-
-        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+        unsafe extern "C" fn dlpack_deleter_legacy(p: *mut DLManagedTensor) {
             if p.is_null() { return; }
-            // Reclaim allocation of the managed tensor and its manager
             let mt = Box::from_raw(p);
             let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
             drop(mt);
         }
-
-        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
-            // If a consumer didn’t take ownership, call deleter now.
+        unsafe extern "C" fn dlpack_deleter_versioned(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() { return; }
+            let mt = Box::from_raw(p);
+            let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
+            drop(mt);
+        }
+        unsafe extern "C" fn capsule_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            // If a consumer didn’t take ownership, call deleter now for legacy capsule.
             let name = std::ffi::CString::new("dltensor").unwrap();
             let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
             if !ptr.is_null() {
                 let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt) }
+            }
+        }
+        unsafe extern "C" fn capsule_destructor_versioned(capsule: *mut pyo3::ffi::PyObject) {
+            // If a consumer didn’t take ownership, call deleter now for versioned capsule.
+            let name = std::ffi::CString::new("dltensor_versioned").unwrap();
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensorVersioned;
                 if let Some(del) = (*mt).deleter { del(mt) }
             }
         }
@@ -1565,7 +1598,7 @@ impl JsaDeviceArrayF32Py {
         let shape = Box::new([rows, cols]);
         let strides = Box::new([cols, 1]); // element strides (row-major)
 
-        let data_ptr = buf.as_device_ptr().as_raw() as *mut c_void;
+        let data_ptr = if rows == 0 || cols == 0 { std::ptr::null_mut() } else { buf.as_device_ptr().as_raw() as *mut c_void };
         let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
 
         // Pointers that live until deleter runs
@@ -1573,29 +1606,51 @@ impl JsaDeviceArrayF32Py {
         let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
         let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
 
-        let mt = Box::new(DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
-                ndim: 2,
-                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                shape: shape_ptr,
-                strides: strides_ptr,
-                byte_offset: 0,
-            },
-            manager_ctx: mgr_ptr as *mut c_void,
-            deleter: Some(dlpack_deleter),
-        });
-
-        // Wrap in a PyCapsule named "dltensor"
-        let raw_capsule = unsafe {
-            let name = std::ffi::CString::new("dltensor").unwrap();
-            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
-        };
-        if raw_capsule.is_null() {
-            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        // Negotiate DLPack version and build appropriate capsule
+        let want_versioned = max_version.map(|(maj, _min)| maj >= 1).unwrap_or(false);
+        if want_versioned {
+            let mtv = Box::new(DLManagedTensorVersioned {
+                version: DLPackVersion { major: 1, minor: 0 },
+                manager_ctx: mgr_ptr as *mut c_void,
+                deleter: Some(dlpack_deleter_versioned),
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: shape_ptr,
+                    strides: strides_ptr,
+                    byte_offset: 0,
+                },
+            });
+            let raw_capsule = unsafe {
+                let name = std::ffi::CString::new("dltensor_versioned").unwrap();
+                pyo3::ffi::PyCapsule_New(Box::into_raw(mtv) as *mut c_void, name.as_ptr(), Some(capsule_destructor_versioned))
+            };
+            if raw_capsule.is_null() { return Err(PyValueError::new_err("failed to create DLPack capsule")); }
+            Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+        } else {
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: shape_ptr,
+                    strides: strides_ptr,
+                    byte_offset: 0,
+                },
+                manager_ctx: mgr_ptr as *mut c_void,
+                deleter: Some(dlpack_deleter_legacy),
+            });
+            let raw_capsule = unsafe {
+                let name = std::ffi::CString::new("dltensor").unwrap();
+                pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor_legacy))
+            };
+            if raw_capsule.is_null() { return Err(PyValueError::new_err("failed to create DLPack capsule")); }
+            Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
     }
 }
 

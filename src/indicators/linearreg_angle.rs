@@ -25,6 +25,12 @@
 use crate::cuda::{cuda_available, CudaLinearregAngle};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -33,6 +39,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::ffi as pyffi;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -183,18 +191,20 @@ impl Linearreg_angleBuilder {
 
 #[derive(Debug, Error)]
 pub enum Linearreg_angleError {
+    #[error("linearreg_angle: Empty data slice.")]
+    EmptyInputData,
     #[error("linearreg_angle: All values are NaN.")]
     AllValuesNaN,
     #[error("linearreg_angle: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("linearreg_angle: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("linearreg_angle: Empty data slice.")]
-    EmptyData,
-    #[error("linearreg_angle: Output length mismatch: expected = {expected}, actual = {actual}")]
-    OutputLengthMismatch { expected: usize, actual: usize },
-    #[error("linearreg_angle: Invalid kernel type for batch operation: {kernel:?}")]
-    InvalidKernelType { kernel: String },
+    #[error("linearreg_angle: Output length mismatch: expected = {expected}, actual = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("linearreg_angle: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("linearreg_angle: Invalid kernel type for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[cfg(feature = "wasm")]
@@ -234,7 +244,7 @@ pub fn linearreg_angle_with_kernel(
 ) -> Result<Linearreg_angleOutput, Linearreg_angleError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
-        return Err(Linearreg_angleError::EmptyData);
+        return Err(Linearreg_angleError::EmptyInputData);
     }
 
     let first = data
@@ -786,9 +796,7 @@ pub fn linearreg_angle_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(Linearreg_angleError::InvalidKernelType {
-                kernel: format!("{:?}", k),
-            })
+            return Err(Linearreg_angleError::InvalidKernelForBatch(k))
         }
     };
     let simd = match kernel {
@@ -828,7 +836,32 @@ fn expand_grid(r: &Linearreg_angleBatchRange) -> Vec<Linearreg_angleParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut vals = Vec::new();
+        if start < end {
+            let mut x = start;
+            while x <= end {
+                vals.push(x);
+                let next = x.saturating_add(step);
+                if next == x {
+                    break;
+                }
+                x = next;
+            }
+        } else {
+            let mut x = start;
+            loop {
+                vals.push(x);
+                if x <= end {
+                    break;
+                }
+                let next = x.saturating_sub(step);
+                if next >= x {
+                    break;
+                }
+                x = next;
+            }
+        }
+        vals
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -865,9 +898,10 @@ fn linearreg_angle_batch_inner(
 ) -> Result<Linearreg_angleBatchOutput, Linearreg_angleError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(Linearreg_angleError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(Linearreg_angleError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
     let first = data
@@ -875,6 +909,14 @@ fn linearreg_angle_batch_inner(
         .position(|x| !x.is_nan())
         .ok_or(Linearreg_angleError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let _ = combos
+        .len()
+        .checked_mul(max_p)
+        .ok_or(Linearreg_angleError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     if data.len() - first < max_p {
         return Err(Linearreg_angleError::NotEnoughValidData {
             needed: max_p,
@@ -883,6 +925,13 @@ fn linearreg_angle_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(Linearreg_angleError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
     // Use uninitialized memory helpers to avoid allocation
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1966,7 +2015,7 @@ pub fn linearreg_angle_into_slice(
 ) -> Result<(), Linearreg_angleError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
-        return Err(Linearreg_angleError::EmptyData);
+        return Err(Linearreg_angleError::EmptyInputData);
     }
 
     let first = data
@@ -1992,7 +2041,7 @@ pub fn linearreg_angle_into_slice(
     if dst.len() != len {
         return Err(Linearreg_angleError::OutputLengthMismatch {
             expected: len,
-            actual: dst.len(),
+            got: dst.len(),
         });
     }
 
@@ -2152,7 +2201,316 @@ pub fn linearreg_angle_batch_py<'py>(
     Ok(dict)
 }
 
-// ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
+// ---- CUDA Python bindings (device handles) ----
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct LinearregAngleDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl LinearregAngleDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Producing stream is synchronized before return; omit explicit stream key.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<&pyo3::types::PyAny>,
+        _dl_device: Option<&pyo3::types::PyAny>,
+        _copy: Option<&pyo3::types::PyAny>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+
+        // Move ownership of the device buffer into the DLManagedTensor capsule
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        // Minimal DLPack FFI structs (v1.x + legacy)
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLVersion {
+            major: i32,
+            minor: i32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            dl_managed_tensor: DLManagedTensor,
+            version: DLVersion,
+        }
+
+        // RAII manager to keep context + buffer alive
+        struct Manager {
+            _ctx: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+        }
+        struct HolderLegacy {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            mgr: Manager,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            mgr: Manager,
+        }
+
+        unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).manager_ctx as *mut HolderLegacy;
+            if !holder.is_null() {
+                drop(Box::from_raw(holder));
+            }
+            drop(Box::from_raw(p));
+        }
+
+        unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).dl_managed_tensor.manager_ctx as *mut HolderV1;
+            if !holder.is_null() {
+                drop(Box::from_raw(holder));
+            }
+            drop(Box::from_raw(p));
+        }
+
+        // Capsule destructor: call deleter only for still-active capsules and rename to used_*.
+        unsafe extern "C" fn cap_destructor_legacy(capsule: *mut pyffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const c_char);
+            }
+        }
+
+        unsafe extern "C" fn cap_destructor_v1(capsule: *mut pyffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                let mt = &mut (*ptr).dl_managed_tensor;
+                if let Some(del) = mt.deleter {
+                    del(mt);
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const c_char);
+            }
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let data_ptr = if self.rows == 0 || self.cols == 0 {
+            std::ptr::null_mut()
+        } else {
+            buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+        };
+
+        // Decide between legacy and v1.x based on max_version (None → legacy).
+        let want_v1 = if let Some(v) = max_version {
+            v.getattr("__iter")
+                .ok()
+                .and_then(|_| v.extract::<(i32, i32)>().ok())
+                .map(|(maj, _)| maj >= 1)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let mgr = Manager {
+            _ctx: self._ctx.clone(),
+            _buf: buf,
+        };
+
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    dl_managed_tensor: DLManagedTensor {
+                        dl_tensor: DLTensor {
+                            data: data_ptr,
+                            device: DLDevice {
+                                device_type: 2,
+                                device_id: self.device_id as i32,
+                            },
+                            ndim: 2,
+                            dtype: DLDataType {
+                                code: 2,
+                                bits: 32,
+                                lanes: 1,
+                            },
+                            shape: std::ptr::null_mut(),
+                            strides: std::ptr::null_mut(),
+                            byte_offset: 0,
+                        },
+                        manager_ctx: std::ptr::null_mut(),
+                        deleter: Some(|mt| {
+                            if !mt.is_null() {
+                                let outer = (mt as *mut u8).offset(
+                                    -(std::mem::size_of::<DLVersion>() as isize),
+                                ) as *mut DLManagedTensorVersioned;
+                                deleter_v1(outer);
+                            }
+                        }),
+                    },
+                    version: DLVersion { major: 1, minor: 0 },
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                mgr,
+            });
+            holder
+                .managed
+                .dl_managed_tensor
+                .dl_tensor
+                .shape = holder.shape.as_mut_ptr();
+            holder
+                .managed
+                .dl_managed_tensor
+                .dl_tensor
+                .strides = holder.strides.as_mut_ptr();
+            holder
+                .managed
+                .dl_managed_tensor
+                .manager_ctx = &mut *holder as *mut HolderV1 as *mut std::ffi::c_void;
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let cap = unsafe {
+                pyffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_v1),
+                )
+            };
+            if cap.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        } else {
+            let mut holder = Box::new(HolderLegacy {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: self.device_id as i32,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_legacy),
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                mgr,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder
+                .managed
+                .dl_tensor
+                .strides = holder.strides.as_mut_ptr();
+            holder
+                .managed
+                .manager_ctx = &mut *holder as *mut HolderLegacy as *mut std::ffi::c_void;
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let cap = unsafe {
+                pyffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_legacy),
+                )
+            };
+            if cap.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        }
+    }
+}
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "linearreg_angle_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, device_id=0))]
@@ -2161,7 +2519,7 @@ pub fn linearreg_angle_cuda_batch_dev_py<'py>(
     data_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<LinearregAngleDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2169,13 +2527,23 @@ pub fn linearreg_angle_cuda_batch_dev_py<'py>(
     let sweep = Linearreg_angleBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let (buf, rows, cols, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaLinearregAngle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.linearreg_angle_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out = cuda
+            .linearreg_angle_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let crate::cuda::moving_averages::DeviceArrayF32 { buf, rows, cols } = out;
+        let ctx = cuda.context_arc();
+        Ok::<_, pyo3::PyErr>((buf, rows, cols, ctx, cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(LinearregAngleDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2188,7 +2556,7 @@ pub fn linearreg_angle_cuda_many_series_one_param_dev_py<'py>(
     rows: usize,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<LinearregAngleDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2196,13 +2564,23 @@ pub fn linearreg_angle_cuda_many_series_one_param_dev_py<'py>(
         period: Some(period),
     };
     let slice_in = data_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (buf, r_out, c_out, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaLinearregAngle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.linearreg_angle_many_series_one_param_time_major_dev(slice_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out = cuda
+            .linearreg_angle_many_series_one_param_time_major_dev(slice_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let crate::cuda::moving_averages::DeviceArrayF32 { buf, rows, cols } = out;
+        let ctx = cuda.context_arc();
+        Ok::<_, pyo3::PyErr>((buf, rows, cols, ctx, cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(LinearregAngleDeviceArrayF32Py {
+        buf: Some(buf),
+        rows: r_out,
+        cols: c_out,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(feature = "python")]
@@ -2216,6 +2594,7 @@ pub fn register_linearreg_angle_module(m: &Bound<'_, pyo3::types::PyModule>) -> 
             linearreg_angle_cuda_many_series_one_param_dev_py,
             m
         )?)?;
+        m.add_class::<LinearregAngleDeviceArrayF32Py>()?;
         m.add_class::<crate::indicators::moving_averages::alma::DeviceArrayF32Py>()?;
     }
     Ok(())
@@ -2231,9 +2610,10 @@ fn linearreg_angle_batch_inner_into(
 ) -> Result<Vec<Linearreg_angleParams>, Linearreg_angleError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(Linearreg_angleError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(Linearreg_angleError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -2242,6 +2622,14 @@ fn linearreg_angle_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(Linearreg_angleError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let _ = combos
+        .len()
+        .checked_mul(max_p)
+        .ok_or(Linearreg_angleError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     if data.len() - first < max_p {
         return Err(Linearreg_angleError::NotEnoughValidData {
             needed: max_p,
@@ -2250,6 +2638,20 @@ fn linearreg_angle_batch_inner_into(
     }
 
     let cols = data.len();
+    let expected = combos
+        .len()
+        .checked_mul(cols)
+        .ok_or(Linearreg_angleError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(Linearreg_angleError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Treat out as uninitialized to avoid UB and copies, like alma.rs
     let out_uninit: &mut [core::mem::MaybeUninit<f64>] = unsafe {

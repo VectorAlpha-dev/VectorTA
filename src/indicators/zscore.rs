@@ -18,6 +18,7 @@
 //! - SIMD (single-series): kept as stubs delegating to scalar; rolling deps limit wins. Documented choice per guide.
 //! - Scalar fast paths: SMA path is O(1) with rolling sums; EMA path optimized to O(1) using window sums and EMA-based MSE. Hot loops use FMA (`mul_add`) and unchecked indexing to eliminate bounds checks.
 //! - Batch (row-specific): SMA+stddev path shares prefix sums and uses AVX2/AVX512 for base/scale copy; selected at runtime.
+//! - CUDA: SMA+stddev kernels wrapped with typed errors, VRAM checks, and Python handles that expose CUDA Array Interface v3 and DLPack v1.x with RAII-backed context lifetime.
 //! - Streaming: O(1) for devtype==0 with SMA/EMA/WMA using ring-buffer + rolling stats; otherwise falls back to O(n) slow path for correctness.
 
 #[cfg(feature = "cuda")]
@@ -26,7 +27,11 @@ use crate::indicators::deviation::{
     deviation, DevError, DevInput, DevParams, DeviationData, DeviationOutput,
 };
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -53,6 +58,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
@@ -244,6 +251,8 @@ pub enum ZscoreError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("zscore: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
+    #[error("zscore: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
     #[error("zscore: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("zscore: DevError {0}")]
@@ -262,6 +271,9 @@ pub fn zscore_with_kernel(
     kernel: Kernel,
 ) -> Result<ZscoreOutput, ZscoreError> {
     let data: &[f64] = input.as_ref();
+    if data.is_empty() {
+        return Err(ZscoreError::EmptyInputData);
+    }
 
     let first = data
         .iter()
@@ -970,47 +982,112 @@ impl ZscoreBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &ZscoreBatchRange) -> Vec<ZscoreParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &ZscoreBatchRange) -> Result<Vec<ZscoreParams>, ZscoreError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, ZscoreError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
-        (lo..=hi).step_by(step).collect()
-    }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
-        }
-        let mut v = Vec::new();
-        let mut x = start;
-        if step > 0.0 {
-            while x <= end + 1e-12 {
-                v.push(x);
-                x += step;
+        let mut vals = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                vals.push(v);
+                match v.checked_add(step) {
+                    Some(next) => {
+                        if next == v {
+                            break;
+                        }
+                        v = next;
+                    }
+                    None => break,
+                }
             }
         } else {
-            while x >= end - 1e-12 {
-                v.push(x);
-                x += step; // negative step
+            let mut v = start;
+            loop {
+                vals.push(v);
+                if v == end {
+                    break;
+                }
+                let next = v.saturating_sub(step);
+                if next == v {
+                    break;
+                }
+                v = next;
+                if v < end {
+                    break;
+                }
             }
         }
-        v
-    }
-    fn axis_string((start, end, step): (String, String, String)) -> Vec<String> {
-        if start == end {
-            return vec![start];
+        if vals.is_empty() {
+            return Err(ZscoreError::InvalidRange {
+                start: start as f64,
+                end: end as f64,
+                step: step as f64,
+            });
         }
-        vec![start]
+        Ok(vals)
+    }
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, ZscoreError> {
+        if !step.is_finite() {
+            return Err(ZscoreError::InvalidRange { start, end, step });
+        }
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        let mut vals = Vec::new();
+        let tol = 1e-12;
+        if start <= end {
+            let step_pos = step.abs();
+            let mut x = start;
+            while x <= end + tol {
+                vals.push(x);
+                x += step_pos;
+                if !x.is_finite() {
+                    break;
+                }
+            }
+        } else {
+            let step_neg = -step.abs();
+            let mut x = start;
+            while x >= end - tol {
+                vals.push(x);
+                x += step_neg;
+                if !x.is_finite() {
+                    break;
+                }
+            }
+        }
+        if vals.is_empty() {
+            return Err(ZscoreError::InvalidRange { start, end, step });
+        }
+        Ok(vals)
+    }
+    fn axis_string((start, end, _step): (String, String, String)) -> Vec<String> {
+        if start == end {
+            vec![start]
+        } else {
+            vec![start]
+        }
     }
 
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
     let ma_types = axis_string(r.ma_type.clone());
-    let nbdevs = axis_f64(r.nbdev);
-    let devtypes = axis_usize(r.devtype);
+    let nbdevs = axis_f64(r.nbdev)?;
+    let devtypes = axis_usize(r.devtype)?;
 
-    let mut out =
-        Vec::with_capacity(periods.len() * ma_types.len() * nbdevs.len() * devtypes.len());
+    let total = periods
+        .len()
+        .checked_mul(ma_types.len())
+        .and_then(|v| v.checked_mul(nbdevs.len()))
+        .and_then(|v| v.checked_mul(devtypes.len()))
+        .ok_or(ZscoreError::InvalidRange {
+            start: periods.len() as f64,
+            end: devtypes.len() as f64,
+            step: nbdevs.len() as f64,
+        })?;
+
+    let mut out = Vec::with_capacity(total);
     for &p in &periods {
         for mt in &ma_types {
             for &n in &nbdevs {
@@ -1025,7 +1102,7 @@ fn expand_grid(r: &ZscoreBatchRange) -> Vec<ZscoreParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1053,13 +1130,11 @@ fn zscore_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<ZscoreBatchOutput, ZscoreError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(ZscoreError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+    if data.is_empty() {
+        return Err(ZscoreError::EmptyInputData);
     }
+
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -1076,14 +1151,30 @@ fn zscore_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
+    rows.checked_mul(cols).ok_or(ZscoreError::InvalidRange {
+        start: rows as f64,
+        end: cols as f64,
+        step: 0.0,
+    })?;
+
     // Use uninitialized memory like ALMA
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each combination
+    // Calculate warmup periods for each combination using checked arithmetic
     let warmup_periods: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.period.unwrap() - 1)
-        .collect();
+        .map(|c| {
+            let p = c.period.unwrap();
+            first
+                .checked_add(p)
+                .and_then(|v| v.checked_sub(1))
+                .ok_or(ZscoreError::InvalidRange {
+                    start: first as f64,
+                    end: p as f64,
+                    step: 1.0,
+                })
+        })
+        .collect::<Result<_, _>>()?;
 
     // Initialize NaN prefixes for each row
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
@@ -1864,13 +1955,11 @@ pub fn zscore_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<ZscoreParams>, ZscoreError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(ZscoreError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+    if data.is_empty() {
+        return Err(ZscoreError::EmptyInputData);
     }
+
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
@@ -1884,12 +1973,35 @@ pub fn zscore_batch_inner_into(
         });
     }
 
+    let rows = combos.len();
     let cols = data.len();
+
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(ZscoreError::InvalidRange {
+            start: rows as f64,
+            end: cols as f64,
+            step: 0.0,
+        })?;
+    if out.len() != expected {
+        return Err(ZscoreError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Initialize NaN prefixes for each row based on warmup period
     // This is critical for external buffers from Python/WASM that contain garbage
     for (row, combo) in combos.iter().enumerate() {
-        let warmup = first + combo.period.unwrap() - 1;
+        let period = combo.period.unwrap();
+        let warmup = first
+            .checked_add(period)
+            .and_then(|v| v.checked_sub(1))
+            .ok_or(ZscoreError::InvalidRange {
+                start: first as f64,
+                end: period as f64,
+                step: 1.0,
+            })?;
         let row_start = row * cols;
         for i in 0..warmup.min(cols) {
             out[row_start + i] = f64::NAN;
@@ -2071,6 +2183,322 @@ pub fn zscore_py<'py>(
     Ok(result_vec.into_pyarray(py))
 }
 
+// -------- CUDA Python handle: CAI v3 + DLPack v1.x --------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct ZscoreDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    _ctx_guard: Arc<Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl ZscoreDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        let ptr_val = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
+        // Producing kernels synchronize before returning handles, so no stream needed.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
+
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        _stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<&pyo3::types::PyAny>,
+        dl_device: Option<&pyo3::types::PyAny>,
+        _copy: Option<&pyo3::types::PyAny>,
+    ) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLVersion {
+            major: i32,
+            minor: i32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            dl_managed_tensor: DLManagedTensor,
+            version: DLVersion,
+        }
+
+        struct HolderLegacy {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32,
+            ctx: Arc<Context>,
+            device_id: i32,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32,
+            ctx: Arc<Context>,
+            device_id: i32,
+        }
+
+        unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).manager_ctx as *mut HolderLegacy;
+            if !holder.is_null() {
+                drop(Box::from_raw(holder));
+            }
+            drop(Box::from_raw(p));
+        }
+
+        unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).dl_managed_tensor.manager_ctx as *mut HolderV1;
+            if !holder.is_null() {
+                drop(Box::from_raw(holder));
+            }
+            drop(Box::from_raw(p));
+        }
+
+        unsafe extern "C" fn cap_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        unsafe extern "C" fn cap_destructor_v1(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const c_char,
+            ) as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                let mt = &mut (*ptr).dl_managed_tensor;
+                if let Some(del) = mt.deleter {
+                    del(mt);
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        // Validate requested device when provided
+        if let Some(dev) = dl_device {
+            if let Ok((dev_ty, dev_id)) = dev.extract::<(i32, i32)>() {
+                if dev_ty != 2 || dev_id != self._device_id as i32 {
+                    return Err(PyValueError::new_err(
+                        "zscore: dl_device mismatch; cross-device copy not implemented",
+                    ));
+                }
+            }
+        }
+
+        let (_, alloc_dev) = self.__dlpack_device__();
+
+        // Decide whether the consumer supports versioned capsules
+        let want_v1 = if let Some(v) = max_version {
+            v.getattr("__iter")
+                .ok()
+                .and_then(|_| v.extract::<(i32, i32)>().ok())
+                .map(|(maj, _)| maj >= 1)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        // Move the VRAM handle into the holder; leave a dummy in self
+        let rows = self.inner.rows as i64;
+        let cols = self.inner.cols as i64;
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
+        let ctx = self._ctx_guard.clone();
+        let data_ptr = if inner.rows == 0 || inner.cols == 0 {
+            null_mut()
+        } else {
+            inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+        };
+
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    dl_managed_tensor: DLManagedTensor {
+                        dl_tensor: DLTensor {
+                            data: data_ptr,
+                            device: DLDevice {
+                                device_type: 2,
+                                device_id: alloc_dev,
+                            },
+                            ndim: 2,
+                            dtype: DLDataType {
+                                code: 2,
+                                bits: 32,
+                                lanes: 1,
+                            },
+                            shape: std::ptr::null_mut(),
+                            strides: std::ptr::null_mut(),
+                            byte_offset: 0,
+                        },
+                        manager_ctx: std::ptr::null_mut(),
+                        deleter: Some(|mt| {
+                            if !mt.is_null() {
+                                let outer = (mt as *mut u8)
+                                    .offset(-(std::mem::size_of::<DLVersion>() as isize))
+                                    as *mut DLManagedTensorVersioned;
+                                deleter_v1(outer);
+                            }
+                        }),
+                    },
+                    version: DLVersion { major: 1, minor: 0 },
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                arr: inner,
+                ctx,
+                device_id: alloc_dev,
+            });
+            holder.managed.dl_managed_tensor.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_managed_tensor.dl_tensor.strides =
+                holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            holder.managed.dl_managed_tensor.manager_ctx =
+                &mut *holder as *mut HolderV1 as *mut std::ffi::c_void;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_v1),
+                )
+            };
+            if capsule.is_null() {
+                return Err(PyValueError::new_err(
+                    "failed to create DLPack versioned capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        } else {
+            let mut holder = Box::new(HolderLegacy {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: alloc_dev,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_legacy),
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                arr: inner,
+                ctx,
+                device_id: alloc_dev,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            holder.managed.manager_ctx =
+                &mut *holder as *mut HolderLegacy as *mut std::ffi::c_void;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let capsule = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_legacy),
+                )
+            };
+            if capsule.is_null() {
+                return Err(PyValueError::new_err(
+                    "failed to create DLPack capsule",
+                ));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl ZscoreDeviceArrayF32Py {
+    pub fn new_from_rust(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self {
+            inner,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+        }
+    }
+}
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "zscore_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, nbdev_range=(1.0, 1.0, 0.0), device_id=0))]
@@ -2080,7 +2508,7 @@ pub fn zscore_cuda_batch_dev_py<'py>(
     period_range: (usize, usize, usize),
     nbdev_range: (f64, f64, f64),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+) -> PyResult<(ZscoreDeviceArrayF32Py, Bound<'py, PyDict>)> {
     use crate::cuda::cuda_available;
 
     if !cuda_available() {
@@ -2095,10 +2523,15 @@ pub fn zscore_cuda_batch_dev_py<'py>(
         devtype: (0, 0, 0),
     };
 
-    let (inner, combos) = py.allow_threads(|| {
-        let cuda = CudaZscore::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.zscore_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id, combos) = py.allow_threads(|| {
+        let cuda =
+            CudaZscore::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let (arr, combos) = cuda
+            .zscore_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id, combos))
     })?;
 
     let dict = PyDict::new(py);
@@ -2112,7 +2545,7 @@ pub fn zscore_cuda_batch_dev_py<'py>(
     dict.set_item("ma_types", ma_types)?;
     dict.set_item("devtypes", devtypes.into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((ZscoreDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id), dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2126,7 +2559,7 @@ pub fn zscore_cuda_many_series_one_param_dev_py<'py>(
     period: usize,
     nbdev: f64,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<ZscoreDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2139,13 +2572,24 @@ pub fn zscore_cuda_many_series_one_param_dev_py<'py>(
     }
 
     let slice_in = data_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
-        let cuda = CudaZscore::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.zscore_many_series_one_param_time_major_dev(slice_in, cols, rows, period, nbdev as f32)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda =
+            CudaZscore::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .zscore_many_series_one_param_time_major_dev(
+                slice_in,
+                cols,
+                rows,
+                period,
+                nbdev as f32,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(ZscoreDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(feature = "python")]
@@ -2199,11 +2643,15 @@ pub fn zscore_batch_py<'py>(
         devtype: devtype_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos =
+        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("zscore_batch: rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -2270,7 +2718,9 @@ pub fn zscore_into_slice(
     kern: Kernel,
 ) -> Result<(), ZscoreError> {
     let data: &[f64] = input.as_ref();
-
+    if data.is_empty() {
+        return Err(ZscoreError::EmptyInputData);
+    }
     if dst.len() != data.len() {
         return Err(ZscoreError::OutputLengthMismatch {
             expected: data.len(),
@@ -2704,12 +3154,15 @@ pub fn zscore_batch_into(
         devtype: (devtype_start, devtype_end, devtype_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let n_combos = combos.len();
 
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
-        let out = std::slice::from_raw_parts_mut(out_ptr, n_combos * len);
+        let total = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("zscore_batch_into: rows*cols overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         let simd = detect_best_kernel();
         zscore_batch_inner_into(data, &sweep, simd, false, out)

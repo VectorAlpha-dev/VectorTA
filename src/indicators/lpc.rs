@@ -18,6 +18,7 @@
 //! - **SIMD Kernels**: AVX2/AVX512 reuse the optimized scalar core with light prefetching. Per-series SIMD is de-emphasized due to the sequential IIR dependency.
 //! - **Streaming**: Implemented O(1) ring-buffered IFM + 1‑pole filter; Wilder‑style TR parity with batch.
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
+//! - **CUDA**: Single-precision PTX wrapper with typed errors, VRAM checks, and zero-copy Python handles (CAI v3 + DLPack v1.x) backed by a retained primary context per device.
 //! - Decision: Scalar path optimized (sin_cos, mul_add, alpha caching, unroll-by-2). Batch keeps scalar per-row; row-specific batch SIMD not attempted yet. Consider TR precompute across rows in future.
 //!
 //! Decision note: Streaming enabled with constant‑time updates (ring buffer Hilbert/IFM) and alpha caching; matches batch TR and cutoff logic while avoiding heap churn.
@@ -434,6 +435,15 @@ pub enum LpcError {
 
     #[error("lpc: Required OHLC data is missing or has mismatched lengths")]
     MissingData,
+
+    #[error("lpc: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("lpc: invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("lpc: invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // ==================== CORE COMPUTATION FUNCTIONS ====================
@@ -1759,7 +1769,8 @@ pub fn lpc_batch_py<'py>(
         cutoff_type: cutoff_type.to_string(),
         max_cycle_limit,
     };
-    let combos = expand_grid_lpc(&sweep);
+    let combos =
+        expand_grid_lpc(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len() * 3;
     let cols = s.len();
 
@@ -1836,7 +1847,7 @@ use crate::cuda::cuda_available as cuda_is_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::lpc_wrapper::CudaLpc;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::wma_wrapper::DeviceArrayF32Py;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "lpc_cuda_batch_dev")]
@@ -1874,28 +1885,30 @@ pub fn lpc_cuda_batch_dev_py<'py>(
         cutoff_type: cutoff_type.to_string(),
         max_cycle_limit,
     };
-    let (triplet, combos) = py.allow_threads(|| {
+    let (triplet, combos, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaLpc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.lpc_batch_dev(h, l, c, s, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let (triplet, combos) = cuda
+            .lpc_batch_dev(h, l, c, s, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((triplet, combos, ctx, dev_id))
     })?;
     let d = pyo3::types::PyDict::new(py);
     d.set_item(
         "filter",
-        Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?,
+        DeviceArrayF32Py::new_from_rust(triplet.wt1, ctx.clone(), dev_id),
     )?;
     d.set_item(
         "high",
-        Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?,
+        DeviceArrayF32Py::new_from_rust(triplet.wt2, ctx.clone(), dev_id),
     )?;
     d.set_item(
         "low",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: triplet.hist,
-            },
-        )?,
+        DeviceArrayF32Py::new_from_rust(triplet.hist, ctx, dev_id),
     )?;
     d.set_item(
         "fixed_periods",
@@ -1970,28 +1983,30 @@ pub fn lpc_cuda_many_series_one_param_dev_py<'py>(
         cycle_mult: Some(1.0),
         tr_mult: Some(tr_mult),
     };
-    let triplet = py.allow_threads(|| {
+    let (triplet, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaLpc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.lpc_many_series_one_param_time_major_dev(h, l, c, s, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let triplet = cuda
+            .lpc_many_series_one_param_time_major_dev(h, l, c, s, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((triplet, ctx, dev_id))
     })?;
     let d = pyo3::types::PyDict::new(py);
     d.set_item(
         "filter",
-        Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?,
+        DeviceArrayF32Py::new_from_rust(triplet.wt1, ctx.clone(), dev_id),
     )?;
     d.set_item(
         "high",
-        Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?,
+        DeviceArrayF32Py::new_from_rust(triplet.wt2, ctx.clone(), dev_id),
     )?;
     d.set_item(
         "low",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: triplet.hist,
-            },
-        )?,
+        DeviceArrayF32Py::new_from_rust(triplet.hist, ctx, dev_id),
     )?;
     d.set_item("rows", rows)?;
     d.set_item("cols", cols)?;
@@ -2294,11 +2309,37 @@ pub fn lpc_batch_into(
             cutoff_type: cutoff_type.to_string(),
             max_cycle_limit,
         };
-        let combos = expand_grid_lpc(&sweep);
-        let rows = combos.len() * 3;
+        let combos =
+            expand_grid_lpc(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let rows = combos
+            .len()
+            .checked_mul(3)
+            .ok_or_else(|| {
+                JsValue::from_str(
+                    &LpcError::InvalidRange {
+                        start: fixed_start,
+                        end: fixed_end,
+                        step: fixed_step,
+                    }
+                    .to_string(),
+                )
+            })?;
         let cols = len;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| {
+                JsValue::from_str(
+                    &LpcError::InvalidRange {
+                        start: fixed_start,
+                        end: fixed_end,
+                        step: fixed_step,
+                    }
+                    .to_string(),
+                )
+            })?;
+
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         let first = (0..len)
             .find(|&i| !s[i].is_nan() && !h[i].is_nan() && !l[i].is_nan() && !c[i].is_nan())
             .unwrap_or(0);
@@ -2338,9 +2379,9 @@ pub fn lpc_into_slices(
     let (h, l, c, s, cutoff, fp, mcl, cm, tm, first, _chosen) = lpc_prepare(input, kern)?;
     let n = s.len();
     if filter_dst.len() != n || high_band_dst.len() != n || low_band_dst.len() != n {
-        return Err(LpcError::InvalidPeriod {
-            period: filter_dst.len(),
-            data_len: n,
+        return Err(LpcError::OutputLengthMismatch {
+            expected: n,
+            got: filter_dst.len(),
         });
     }
     // Prefill warmup prefix with the crate's quiet-NaN pattern to match Vec APIs
@@ -2378,33 +2419,101 @@ pub fn lpc_into_slices(
 
 // Helper functions for batch processing
 #[inline]
-fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
-    if st == 0 || s == e {
-        return vec![s];
+fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, LpcError> {
+    if step == 0 || start == end {
+        return Ok(vec![start]);
     }
-    (s..=e).step_by(st).collect()
+    let mut vals = Vec::new();
+    if start < end {
+        let mut v = start;
+        while v <= end {
+            vals.push(v);
+            match v.checked_add(step) {
+                Some(next) => {
+                    if next == v {
+                        break;
+                    }
+                    v = next;
+                }
+                None => break,
+            }
+        }
+    } else {
+        let mut v = start;
+        while v >= end {
+            vals.push(v);
+            if v == 0 {
+                break;
+            }
+            let next = v.saturating_sub(step);
+            if next == v {
+                break;
+            }
+            v = next;
+            if v < end {
+                break;
+            }
+        }
+    }
+    if vals.is_empty() {
+        return Err(LpcError::InvalidRange {
+            start,
+            end,
+            step,
+        });
+    }
+    Ok(vals)
 }
 
 #[inline]
-fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
-    if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
-        return vec![s];
+fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, LpcError> {
+    if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+        return Ok(vec![start]);
     }
-    let mut v = Vec::new();
-    let mut x = s;
-    while x <= e + 1e-12 {
-        v.push(x);
-        x += st;
+    let mut out = Vec::new();
+    if start < end {
+        let st = if step > 0.0 { step } else { -step };
+        let mut x = start;
+        while x <= end + 1e-12 {
+            out.push(x);
+            x += st;
+        }
+    } else {
+        let st = if step > 0.0 { -step } else { step };
+        if st.abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        let mut x = start;
+        while x >= end - 1e-12 {
+            out.push(x);
+            x += st;
+        }
     }
-    v
+    if out.is_empty() {
+        return Err(LpcError::InvalidRange {
+            start: start as usize,
+            end: end as usize,
+            step: step as usize,
+        });
+    }
+    Ok(out)
 }
 
 #[inline]
-fn expand_grid_lpc(r: &LpcBatchRange) -> Vec<LpcParams> {
-    let ps = axis_usize(r.fixed_period);
-    let cms = axis_f64(r.cycle_mult);
-    let tms = axis_f64(r.tr_mult);
-    let mut out = Vec::with_capacity(ps.len() * cms.len() * tms.len());
+fn expand_grid_lpc(r: &LpcBatchRange) -> Result<Vec<LpcParams>, LpcError> {
+    let ps = axis_usize(r.fixed_period)?;
+    let cms = axis_f64(r.cycle_mult)?;
+    let tms = axis_f64(r.tr_mult)?;
+    let cap = ps
+        .len()
+        .checked_mul(cms.len())
+        .and_then(|v| v.checked_mul(tms.len()))
+        .ok_or(LpcError::InvalidRange {
+            start: r.fixed_period.0,
+            end: r.fixed_period.1,
+            step: r.fixed_period.2,
+        })?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &ps {
         for &cm in &cms {
             for &tm in &tms {
@@ -2418,7 +2527,7 @@ fn expand_grid_lpc(r: &LpcBatchRange) -> Vec<LpcParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn lpc_batch_with_kernel(
@@ -2446,16 +2555,27 @@ pub fn lpc_batch_with_kernel(
         });
     }
 
-    let combos = expand_grid_lpc(sweep);
-    if combos.is_empty() {
-        return Err(LpcError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
-
+    let combos = expand_grid_lpc(sweep)?;
     let cols = src.len();
-    let rows = combos.len() * 3;
+    let rows = combos
+        .len()
+        .checked_mul(3)
+        .ok_or(LpcError::InvalidRange {
+            start: sweep.fixed_period.0,
+            end: sweep.fixed_period.1,
+            step: sweep.fixed_period.2,
+        })?;
+    rows.checked_mul(cols).ok_or(LpcError::InvalidRange {
+        start: sweep.fixed_period.0,
+        end: sweep.fixed_period.1,
+        step: sweep.fixed_period.2,
+    })?;
+
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        other => return Err(LpcError::InvalidKernelForBatch(other)),
+    };
 
     // allocate rows×cols without initializing, then set warm prefixes
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -2467,7 +2587,7 @@ pub fn lpc_batch_with_kernel(
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
     // fill
-    lpc_batch_inner_into(high, low, close, src, sweep, k, first, out)?;
+    lpc_batch_inner_into(high, low, close, src, sweep, kernel, first, out)?;
 
     let values = unsafe {
         Vec::from_raw_parts(
@@ -2495,15 +2615,11 @@ fn lpc_batch_inner_into(
     first: usize,
     out: &mut [f64],
 ) -> Result<(), LpcError> {
-    let combos = expand_grid_lpc(sweep);
+    let _ = k;
+    let combos = expand_grid_lpc(sweep)?;
     let cols = src.len();
     // Precompute TR once across all rows to avoid redundant work
     let tr_series = calculate_true_range(high, low, close);
-
-    let kern = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
-        other => other,
-    };
 
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
@@ -2551,8 +2667,6 @@ fn lpc_batch_inner_into(
         }
     }
 
-    // silence unused variable warning for kern
-    let _ = kern;
     Ok(())
 }
 
