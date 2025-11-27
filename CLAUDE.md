@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Note: All commands in this file are for Windows environments. Use Command Prompt or PowerShell.**
 
+**Formatting Policy: Do NOT run `rustfmt` or `cargo fmt` automatically. Avoid any auto-formatting that could reorder imports or rewrite code, as it tends to cause merge conflicts. Only format if explicitly requested for a specific file.**
+
 ## Project Overview
 
 Rust-Backtester is a high-performance technical analysis library implementing 178+ indicators (targeting 300 total). The project emphasizes performance optimization with SIMD instructions, batch processing, and WebAssembly support.
@@ -229,6 +231,54 @@ Use `detect_best_kernel()` or `detect_best_batch_kernel()` helpers.
 
 **Note**: AVX2 and AVX512 kernels are only available when building with nightly Rust and the `nightly-avx` feature flag.
 
+## CUDA Development
+
+The build script compiles every `kernels/cuda/**/*.cu` to PTX and embeds it into the crate (when `--features cuda` is enabled).
+
+### Key Facts
+- PTX target: uses `-arch=compute_XX` for `-ptx`. Default is `compute_89` (RTX 4090). If unsupported by your nvcc, it auto-falls back to `compute_80`.
+- No runtime linkage to `cudart` — only PTX is generated and loaded via `cust::Module::from_ptx`.
+- Windows: easiest is the "x64 Native Tools Command Prompt for VS", but the build also attempts to auto-detect MSVC and pass `-ccbin`.
+
+### Environment Variables
+- `CUDA_ARCH`: preferred arch (examples: `89`, `8.9`, `sm_89`, `compute_89`). Defaults to `compute_89`.
+- `CUDA_ARCHS`: space/comma separated; first non-empty token is used.
+- `NVCC`: path to `nvcc` (overrides autodiscovery).
+- `NVCC_ARGS`: extra flags passed to `nvcc` (e.g., `"--keep --verbose"`).
+- `CUDA_DEBUG=1`: add `-lineinfo` to PTX for easier debugging.
+- `CUDA_FAST_MATH=0|1`: globally disable/enable fast-math (some kernels opt out by default when numerically sensitive).
+- `CUDA_FILTER`: only compile kernels whose path contains any of these substrings (comma/space separated). Example: `CUDA_FILTER=alma,ema`.
+- `CUDA_KERNEL_DIR`: override kernels root (default `kernels/cuda`).
+- `CUDA_PLACEHOLDER_ON_FAIL=1`: if `nvcc` fails for a kernel, emit a minimal placeholder PTX so the crate still builds. Only use for local iteration — wrappers using placeholders will fail at runtime.
+
+### Common Workflows
+```bash
+# Build all CUDA PTX + crate
+cargo build --features cuda
+
+# Old nvcc toolkits (<= 11.x) with modern GPUs
+CUDA_ARCH=80 cargo build --features cuda
+
+# Build a subset of kernels
+CUDA_FILTER=alma,ema cargo build --features cuda
+
+# Verbose debug PTX
+CUDA_DEBUG=1 NVCC_ARGS="--keep --verbose" cargo build --features cuda
+```
+
+### Running CUDA Tests
+```bash
+# All CUDA tests
+cargo test --features cuda -- --nocapture
+
+# Single test file
+cargo test --features cuda --test sma_cuda -- --nocapture
+
+# Single test by name
+cargo test --features cuda sma_cuda_one_series_many_params_matches_cpu -- --nocapture
+```
+Tests skip gracefully if no CUDA device is present (tests call `cuda_available()`).
+
 ## CRITICAL: Debugging and Code Modification Guidelines
 
 ### Never Use Mass Editing Scripts
@@ -389,16 +439,84 @@ pub struct IndicatorStream {
 
 #### SIMD Optimization
 
-When implementing SIMD kernels:
-- Use `detect_best_kernel()` for automatic selection
-- Implement scalar version first, then optimize
-- Use feature gates properly: `#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]`
+**Goal**: Implement AVX2/AVX512 kernels that are functionally identical to scalar and measurably faster. Success means all unit tests pass and AVX2/AVX512 benchmarks beat scalar.
+
+**Scalar-First Optimization (Required Before SIMD)**:
+- Optimize the scalar implementation first; SIMD comes only after scalar is as fast and clean as possible
+- If the scalar indicator calls helpers in hot loops, prefer loop-jamming/inlining to eliminate call overhead — except when helpers involve dynamic dispatch (e.g., "MA" selector)
+- Every scalar optimization must be validated with unit tests and benchmark runs
+- Unsafe in scalar is allowed if SIMD kernels are stubs/disabled and the change provides a clear, measured benefit
+
+**Guarding and Targets**:
+- Gate all SIMD with `#[cfg(feature = "nightly-avx")]` and `#[cfg(target_arch = "x86_64")]`
+- Keep scalar codepath as the reference implementation; SIMD must match outputs bit-for-bit or within existing tolerances
+
+**Kernel Selection**:
+- Use `detect_best_kernel()` / `detect_best_batch_kernel()` to pick AVX512 → AVX2 → SSE2 → Scalar at runtime
+- Use `skip_if_unsupported!(kernel, fn_name)` in tests/benches to conditionally skip where HW support is missing
+
+**Benchmark Registration (Required Before SIMD)**:
+- Ensure the indicator is registered in `benches/indicator_benchmark.rs` so scalar vs AVX2/AVX512 comparisons can run
+- Discover available IDs: `cargo bench --bench indicator_benchmark -- --list`
+
+**SIMD Tests (Must Pass)**:
+```bash
+# Scalar
+cargo test --lib indicators::<module>::<indicator> -- --nocapture
+
+# Nightly + SIMD
+cargo +nightly test --features nightly-avx --lib indicators::<module>::<indicator> -- --nocapture
+```
+
+**SIMD Benchmarks**:
+```bash
+# Generic form for any indicator at 100k candles
+cargo bench --features nightly-avx --bench indicator_benchmark -- <ind>/<ind>_scalar/100k
+cargo bench --features nightly-avx --bench indicator_benchmark -- <ind>/<ind>_avx2/100k
+cargo bench --features nightly-avx --bench indicator_benchmark -- <ind>/<ind>_avx512/100k
+```
+
+**Acceptance Criteria for SIMD PRs**:
+- Stable build passes (`cargo build`)
+- Nightly + `nightly-avx` tests pass for the indicator(s) touched
+- Benchmarks show >5% improvement of AVX2/AVX512 vs scalar at realistic sizes (e.g., 100k)
+
+**When SIMD Underperforms or Is Unstable**:
+- If AVX2/AVX512 is slower than scalar after repeated attempts, keep kernels as stubs delegating to scalar
+- Short-circuit runtime selection to scalar while leaving SIMD code present for future work
+- Add a brief module-level comment explaining why SIMD is disabled (e.g., memory-bound, branch-heavy, short windows)
+- Do NOT change unit test reference values — fix the implementation instead
 
 #### Performance Tips
 
 - Use `AVec<f64>` for cache-aligned SIMD operations
 - Calculate warmup period once and reuse
 - Consider batch operations for parameter sweeps
+
+#### Row-Specific Batch Kernels (SIMD)
+
+Row-specific kernels are specialized SIMD implementations for batch functions (many parameter combinations across rows) where each row corresponds to a parameter set. Only attempt when there is a clear opportunity to share precomputed data.
+
+**When to Attempt**:
+- There is shared precomputation reusable across parameter rows (e.g., Gaussian weights and normalization for ALMA)
+- Inner loops can avoid per-row recomputation of identical terms, or enable better cache locality
+- Memory access can be kept contiguous and aligned (SoA layout, transposed buffers, or tiling)
+
+**Requirements**:
+- Accuracy: outputs must match scalar/baseline (tests unchanged)
+- Performance: must be >5% faster than non row-specific batch kernel at realistic sizes
+- Feature-gating: keep under `nightly-avx`; use runtime batch-kernel selector to opt into AVX2/AVX512 only when beneficial
+
+**Implementation Guidance**:
+- Use `alma.rs` as the successful reference for structure, docs, and optimization patterns
+- Precompute once per tile or per period: weights, norms, constants, prefix sums, etc., and share across rows
+- Hoist invariants outside inner loops; prefer FMA; reduce branches
+- Keep outputs and working sets contiguous and aligned
+- Isolate intrinsics in small functions; annotate safety and alignment assumptions
+
+**AVX512 Short/Long Period Variants**:
+- Only introduce separate "short" and "long" period AVX512 kernels when there is demonstrated, clear benefit (as in ALMA)
+- AVX2 typically uses a single kernel unless profiling shows a similar split helps
 
 ### Quality Checklist
 
@@ -414,3 +532,47 @@ Before completing an indicator:
 - [ ] Follows consistent naming conventions
 
 **Note**: While implementation details may vary, maintaining consistent quality standards and optimization practices ensures the library remains performant and user-friendly.
+
+## Decision Logging
+
+Add a brief note at the top of each indicator module and/or SIMD submodule summarizing the status and rationale. Examples:
+- "SIMD enabled because …; fastest on AVX2/AVX512 by >5% at 100k."
+- "SIMD implemented but disabled by default: memory-bound/branch-heavy; slower than scalar. Revisit after layout change X."
+- "Row-specific batch kernels not attempted; no shared precompute to exploit."
+
+Keep notes concise (1–3 lines). This helps future contributors avoid churn when SIMD or row-specific kernels are not promising.
+
+## CI & PRs
+
+### CI Gate
+- `cargo build` (stable) must pass
+- Include nightly AVX tests when touching SIMD code
+- Do not rely on `CUDA_PLACEHOLDER_ON_FAIL` in CI — placeholder PTX is for local iteration only
+
+### Commit & PR Guidelines
+- Use Conventional Commits (e.g., `feat(indicators): add alma warmup`)
+- PRs should include:
+  - Description of changes
+  - Linked issues (if applicable)
+  - Affected indicators/kernels
+  - Test notes
+  - Benchmark deltas with commands and environment
+
+### Constraints
+- Do NOT change unit test reference values — fix the implementation instead
+- Keep changes minimal and focused; match surrounding style
+- Document public items with `///` (parameters and error cases in natural language)
+- Prefer `once_cell` over `lazy_static`
+- Feature-gate appropriately: `wasm`, `python`, `nightly-avx`, `cuda`
+
+## Troubleshooting
+
+### CUDA Issues
+- **`nvcc` not found**: Set `NVCC` or `CUDA_PATH`/`CUDA_HOME`, or ensure it's on PATH
+- **Arch unsupported by nvcc**: Set `CUDA_ARCH=80` or upgrade CUDA Toolkit; build.rs will also retry with `compute_80` automatically
+- **Only some kernels fail to compile**: Use `CUDA_FILTER` to iterate faster; optionally set `CUDA_PLACEHOLDER_ON_FAIL=1` locally to unblock building other tests
+- **Cross-crate PTX includes**: Remember `OUT_DIR` is per-crate; compile PTX in that crate's build.rs if needed
+
+### Windows-Specific
+- Recommended: open the "x64 Native Tools Command Prompt for VS" to ensure `cl.exe` and Windows SDK are found by `nvcc`
+- Alternative: rely on build.rs auto-detection of MSVC and automatic `-ccbin` setting. Ensure VS C++ Build Tools and SDK are installed

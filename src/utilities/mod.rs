@@ -4,3 +4,4 @@ pub mod enums;
 pub mod helpers;
 pub mod kernel_validation;
 pub mod math_functions;
+pub mod dlpack_cuda;

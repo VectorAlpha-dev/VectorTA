@@ -69,6 +69,34 @@ class TestAlmaCuda:
         # Compare entire row with modest tolerance (fp32 vs fp64)
         assert_close(gpu_first, cpu, rtol=1e-5, atol=1e-6, msg="CUDA batch vs CPU mismatch")
 
+    def test_alma_cuda_dlpack_matches_cpu(self, test_data):
+        """Ensure DLPack export for ALMA CUDA handle is correct."""
+        close = test_data['close']
+        period, offset, sigma = 9, 0.85, 6.0
+
+        # CPU baseline (fp64)
+        cpu = ti.alma(close, period, offset, sigma)
+
+        # CUDA handle
+        handle = ti.alma_cuda_batch_dev(
+            close.astype(np.float32),
+            period_range=(period, period, 0),
+            offset_range=(offset, offset, 0.0),
+            sigma_range=(sigma, sigma, 0.0),
+        )
+
+        # Consume via DLPack path explicitly
+        gpu = cp.fromDlpack(handle)
+        gpu_first = cp.asnumpy(gpu)[0]
+
+        assert_close(
+            gpu_first,
+            cpu,
+            rtol=1e-5,
+            atol=1e-6,
+            msg="ALMA DLPack export mismatch vs CPU",
+        )
+
     # multi-stream variant removed
 
     def test_alma_cuda_many_series_one_param_matches_cpu(self, test_data):
