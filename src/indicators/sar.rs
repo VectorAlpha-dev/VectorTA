@@ -28,6 +28,8 @@
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -1477,163 +1479,45 @@ impl SarDeviceArrayF32Py {
         &mut self,
         py: Python<'py>,
         stream: Option<pyo3::PyObject>,
-        max_version: Option<(u8, u8)>,
-        dl_device: Option<(i32, i32)>,
-        copy: Option<bool>,
+        max_version: Option<pyo3::PyObject>,
+        dl_device: Option<pyo3::PyObject>,
+        copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        use std::os::raw::c_char;
-        use std::ptr::null_mut;
-
-        // Validate consumer-requested device. We do not implement cross-device copies.
-        let _ = stream;
-        if let Some((dev_type, dev_id)) = dl_device {
-            if dev_type != 2 || dev_id != self.device_id as i32 {
-                if copy.unwrap_or(false) {
-                    return Err(PyValueError::new_err(
-                        "cross-device DLPack copy is not implemented for SarDeviceArrayF32Py",
-                    ));
-                } else {
-                    return Err(PyValueError::new_err(
-                        "requested dl_device does not match SAR producer device",
-                    ));
+        // Compute target device id and validate `dl_device` hint if provided.
+        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
+                if dev_ty != kdl || dev_id != alloc_dev {
+                    let wants_copy = copy
+                        .as_ref()
+                        .and_then(|c| c.extract::<bool>(py).ok())
+                        .unwrap_or(false);
+                    if wants_copy {
+                        return Err(PyValueError::new_err(
+                            "cross-device DLPack copy is not implemented for SarDeviceArrayF32Py",
+                        ));
+                    } else {
+                        return Err(PyValueError::new_err(
+                            "requested dl_device does not match SAR producer device",
+                        ));
+                    }
                 }
             }
         }
+        let _ = stream;
 
-        // Move ownership of the device buffer into the DLManagedTensor capsule.
+        // Move ownership of the device buffer into the shared DLPack capsule.
         let buf = self
             .buf
             .take()
             .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
 
-        #[repr(C)]
-        struct DLDataType {
-            code: u8,
-            bits: u8,
-            lanes: u16,
-        }
-        #[repr(C)]
-        struct DLDevice {
-            device_type: i32,
-            device_id: i32,
-        }
-        #[repr(C)]
-        struct DLTensor {
-            data: *mut std::ffi::c_void,
-            device: DLDevice,
-            ndim: i32,
-            dtype: DLDataType,
-            shape: *mut i64,
-            strides: *mut i64,
-            byte_offset: u64,
-        }
-        #[repr(C)]
-        struct DLManagedTensor {
-            dl_tensor: DLTensor,
-            manager_ctx: *mut std::ffi::c_void,
-            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
-        }
+        let rows = self.rows;
+        let cols = self.cols;
 
-        // Holder keeps buffer/context and shape/strides alive until consumer calls deleter.
-        struct Holder {
-            managed: DLManagedTensor,
-            shape: [i64; 2],
-            strides: [i64; 2],
-            buf: DeviceBuffer<f32>,
-            _ctx: Arc<Context>,
-        }
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
-        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
-            if mt.is_null() {
-                return;
-            }
-            unsafe {
-                let holder_ptr = (*mt).manager_ctx as *mut Holder;
-                if !holder_ptr.is_null() {
-                    let _holder: Box<Holder> = Box::from_raw(holder_ptr);
-                    drop(_holder);
-                }
-            }
-        }
-
-        // Capsule destructor calls the deleter only for still-named dltensor[_versioned] capsules.
-        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
-            let versioned = b"dltensor_versioned\0";
-            let legacy = b"dltensor\0";
-            let mut ptr =
-                pyo3::ffi::PyCapsule_GetPointer(capsule, versioned.as_ptr() as *const c_char);
-            if ptr.is_null() {
-                ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, legacy.as_ptr() as *const c_char);
-            }
-            if !ptr.is_null() {
-                let mt = ptr as *mut DLManagedTensor;
-                if let Some(del) = (*mt).deleter {
-                    del(mt);
-                }
-                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
-            }
-        }
-
-        let rows = self.rows as i64;
-        let cols = self.cols as i64;
-
-        let mut holder = Box::new(Holder {
-            managed: DLManagedTensor {
-                dl_tensor: DLTensor {
-                    data: if self.rows == 0 || self.cols == 0 {
-                        std::ptr::null_mut()
-                    } else {
-                        buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
-                    },
-                    device: DLDevice {
-                        device_type: 2,
-                        device_id: self.device_id as i32,
-                    },
-                    ndim: 2,
-                    dtype: DLDataType {
-                        code: 2,
-                        bits: 32,
-                        lanes: 1,
-                    },
-                    shape: std::ptr::null_mut(),
-                    strides: std::ptr::null_mut(),
-                    byte_offset: 0,
-                },
-                manager_ctx: std::ptr::null_mut(),
-                deleter: Some(dl_managed_deleter),
-            },
-            shape: [rows, cols],
-            strides: [cols, 1],
-            buf,
-            _ctx: self._ctx.clone(),
-        });
-        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
-        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
-
-        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
-        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
-        let _ = Box::into_raw(holder);
-
-        let wants_versioned = matches!(max_version, Some((maj, _)) if maj >= 1);
-        let name = if wants_versioned {
-            b"dltensor_versioned\0"
-        } else {
-            b"dltensor\0"
-        };
-
-        let capsule = unsafe {
-            pyo3::ffi::PyCapsule_New(
-                mt_ptr as *mut std::ffi::c_void,
-                name.as_ptr() as *const c_char,
-                Some(capsule_destructor),
-            )
-        };
-        if capsule.is_null() {
-            unsafe { dl_managed_deleter(mt_ptr) };
-            return Err(PyValueError::new_err("failed to create DLPack capsule"));
-        }
-
-        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+        export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }
 }
 

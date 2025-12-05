@@ -56,7 +56,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaSinwma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::gaussian_wrapper::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::{DeviceArrayF32Py, make_device_array_py};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -2320,15 +2320,14 @@ pub fn sinwma_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let handle = py.allow_threads(|| {
+    let inner = py.allow_threads(|| {
         let cuda = CudaSinwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let h = cuda
+        cuda
             .sinwma_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>(cuda.py_wrap_device_array(h))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(handle)
+    Ok(make_device_array_py(device_id, inner)?)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2351,15 +2350,14 @@ pub fn sinwma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let handle = py.allow_threads(|| {
+    let inner = py.allow_threads(|| {
         let cuda = CudaSinwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let h = cuda
+        cuda
             .sinwma_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>(cuda.py_wrap_device_array(h))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(handle)
+    Ok(make_device_array_py(device_id, inner)?)
 }
 
 #[cfg(feature = "wasm")]

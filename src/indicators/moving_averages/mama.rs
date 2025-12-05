@@ -3479,8 +3479,9 @@ pub fn mama_batch_into(
 
         fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
+        #[cfg(feature = "mama_legacy_dlpack")]
         #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
-        fn __dlpack__<'py>(
+        fn __dlpack_legacy__<'py>(
             &mut self,
             py: pyo3::Python<'py>,
             _stream: Option<&pyo3::types::PyAny>,
@@ -3674,5 +3675,55 @@ pub fn mama_batch_into(
                 if cap.is_null() { return Err(pyo3::exceptions::PyValueError::new_err("failed to create DLPack capsule")); }
                 Ok(unsafe { pyo3::PyObject::from_owned_ptr(py, cap) })
             }
+        }
+
+        #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+        fn __dlpack__<'py>(
+            &mut self,
+            py: pyo3::Python<'py>,
+            stream: Option<pyo3::PyObject>,
+            max_version: Option<pyo3::PyObject>,
+            dl_device: Option<pyo3::PyObject>,
+            copy: Option<pyo3::PyObject>,
+        ) -> pyo3::PyResult<pyo3::PyObject> {
+            use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+
+            // Compute target device id and validate `dl_device` hint if provided.
+            let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+            if let Some(dev_obj) = dl_device.as_ref() {
+                if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
+                    if dev_ty != kdl || dev_id != alloc_dev {
+                        let wants_copy = copy
+                            .as_ref()
+                            .and_then(|c| c.extract::<bool>(py).ok())
+                            .unwrap_or(false);
+                        if wants_copy {
+                            return Err(pyo3::exceptions::PyValueError::new_err(
+                                "device copy not implemented for __dlpack__",
+                            ));
+                        } else {
+                            return Err(pyo3::exceptions::PyValueError::new_err(
+                                "dl_device mismatch for __dlpack__",
+                            ));
+                        }
+                    }
+                }
+            }
+            let _ = stream;
+
+            // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+            let buf = self
+                .buf
+                .take()
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    "__dlpack__ may only be called once",
+                ))?;
+
+            let rows = self.rows;
+            let cols = self.cols;
+
+            let max_version_bound = max_version.map(|obj| obj.into_bound(py));
+
+            export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
         }
     }

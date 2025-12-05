@@ -50,6 +50,8 @@ use crate::cuda::{cuda_available, CudaMarketefi};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::DeviceArrayF32Py as SharedDeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
@@ -900,10 +902,7 @@ impl MarketefiStreamPy {
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "MarketefiDeviceArrayF32", unsendable)]
 pub struct MarketefiDeviceArrayF32Py {
-    pub(crate) inner: Option<DeviceArrayF32>,
-    _ctx_guard: Arc<Context>,
-    device_id: u32,
-    producer_stream: usize,
+    pub(crate) inner: SharedDeviceArrayF32Py,
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -911,255 +910,35 @@ pub struct MarketefiDeviceArrayF32Py {
 impl MarketefiDeviceArrayF32Py {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let itemsize = std::mem::size_of::<f32>();
-        let inner = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
-        let d = PyDict::new(py);
-        d.set_item("shape", (inner.rows, inner.cols))?;
-        d.set_item("typestr", "<f4")?;
-        d.set_item("strides", (inner.cols * itemsize, itemsize))?;
-        let ptr_val = inner.buf.as_device_ptr().as_raw() as usize;
-        d.set_item("data", (ptr_val, false))?;
-        d.set_item("version", 3)?;
-        // Stream key omitted: kernels synchronize before returning the handle.
-        Ok(d)
+        self.inner.__cuda_array_interface__(py)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) {
-        (2, self.device_id as i32)
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        self.inner.__dlpack_device__()
     }
 
     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<usize>,
-        max_version: Option<(u32, u32)>,
-        dl_device: Option<(i32, i32)>,
-        copy: Option<bool>,
+        stream: Option<PyObject>,
+        max_version: Option<PyObject>,
+        dl_device: Option<PyObject>,
+        copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        use pyo3::ffi as pyffi;
-        use std::ffi::{c_void, CStr, CString};
-
-        // Interpret producer stream per Array API semantics but we fully
-        // synchronize before returning, so this is currently a no-op.
-        let _ = stream;
-        // Validate device request and copy semantics.
-        if let Some((dt, did)) = dl_device {
-            if dt != 2 || did != self.device_id as i32 {
-                return Err(PyValueError::new_err("dlpack device mismatch for marketefi buffer"));
-            }
-        }
-        if copy.unwrap_or(false) {
-            return Err(PyValueError::new_err(
-                "copy=True not implemented for marketefi __dlpack__",
-            ));
-        }
-
-        #[repr(C)]
-        struct DLDevice {
-            device_type: i32,
-            device_id: i32,
-        }
-        #[repr(C)]
-        struct DLDataType {
-            code: u8,
-            bits: u8,
-            lanes: u16,
-        }
-        #[repr(C)]
-        struct DLTensor {
-            data: *mut c_void,
-            device: DLDevice,
-            ndim: i32,
-            dtype: DLDataType,
-            shape: *mut i64,
-            strides: *mut i64,
-            byte_offset: u64,
-        }
-        #[repr(C)]
-        struct DLManagedTensor {
-            dl_tensor: DLTensor,
-            manager_ctx: *mut c_void,
-            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
-        }
-        #[repr(C)]
-        struct DLManagedTensorVersioned {
-            manager: *mut DLManagedTensor,
-            version: u32,
-        }
-
-        #[repr(C)]
-        struct ManagerCtx {
-            shape: *mut i64,
-            strides: *mut i64,
-            _shape: Box<[i64; 2]>,
-            _strides: Box<[i64; 2]>,
-            _arr: DeviceArrayF32,
-            _ctx_guard: Arc<Context>,
-        }
-
-        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
-            if p.is_null() {
-                return;
-            }
-            let mt = Box::from_raw(p);
-            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
-            if !ctx_ptr.is_null() {
-                let _ = Box::from_raw(ctx_ptr);
-            }
-        }
-
-        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
-            if capsule.is_null() {
-                return;
-            }
-            let name_ptr = pyffi::PyCapsule_GetName(capsule);
-            if name_ptr.is_null() {
-                return;
-            }
-            let name = CStr::from_ptr(name_ptr);
-            if let Ok(s) = name.to_str() {
-                if s == "dltensor" {
-                    let ptr = pyffi::PyCapsule_GetPointer(capsule, name_ptr);
-                    if ptr.is_null() {
-                        return;
-                    }
-                    let mt = ptr as *mut DLManagedTensor;
-                    if let Some(del) = unsafe { (*mt).deleter } {
-                        unsafe { del(mt) };
-                    }
-                } else if s == "dltensor_versioned" {
-                    let ptr = pyffi::PyCapsule_GetPointer(capsule, name_ptr);
-                    if ptr.is_null() {
-                        return;
-                    }
-                    let ver = ptr as *mut DLManagedTensorVersioned;
-                    let manager = unsafe { (*ver).manager };
-                    if !manager.is_null() {
-                        if let Some(del) = unsafe { (*manager).deleter } {
-                            unsafe { del(manager) };
-                        }
-                    }
-                    unsafe {
-                        let _ = Box::from_raw(ver);
-                    }
-                }
-            }
-        }
-
-        let inner = self
-            .inner
-            .take()
-            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
-
-        let rows = inner.rows as i64;
-        let cols = inner.cols as i64;
-        let total = (rows as i128) * (cols as i128);
-        let mut shape = Box::new([rows, cols]);
-        let mut strides = Box::new([cols, 1]);
-        let shape_ptr = shape.as_mut_ptr();
-        let strides_ptr = strides.as_mut_ptr();
-
-        let mgr = Box::new(ManagerCtx {
-            shape: shape_ptr,
-            strides: strides_ptr,
-            _shape: shape,
-            _strides: strides,
-            _ctx_guard: self._ctx_guard.clone(),
-            _arr: inner,
-        });
-        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
-
-        let data_ptr = if total == 0 {
-            std::ptr::null_mut()
-        } else {
-            unsafe {
-                (*(mgr_ptr as *mut ManagerCtx))
-                    ._arr
-                    .buf
-                    .as_device_ptr()
-                    .as_raw() as *mut c_void
-            }
-        };
-
-        let dl = DLTensor {
-            data: data_ptr,
-            device: DLDevice {
-                device_type: 2,
-                device_id: self.device_id as i32,
-            },
-            ndim: 2,
-            dtype: DLDataType {
-                code: 2, // kDLFloat
-                bits: 32,
-                lanes: 1,
-            },
-            shape: shape_ptr,
-            strides: strides_ptr,
-            byte_offset: 0,
-        };
-        let mt = Box::new(DLManagedTensor {
-            dl_tensor: dl,
-            manager_ctx: mgr_ptr,
-            deleter: Some(deleter),
-        });
-
-        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
-
-        unsafe {
-            if want_versioned {
-                let wrapped = Box::new(DLManagedTensorVersioned {
-                    manager: Box::into_raw(mt),
-                    version: 1,
-                });
-                let ptr = Box::into_raw(wrapped) as *mut c_void;
-                let name = CString::new("dltensor_versioned").unwrap();
-                let cap = pyffi::PyCapsule_New(
-                    ptr,
-                    name.as_ptr(),
-                    Some(capsule_destructor),
-                );
-                if cap.is_null() {
-                    let ver = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
-                    if !ver.manager.is_null() {
-                        let mt = Box::from_raw(ver.manager);
-                        if !mt.manager_ctx.is_null() {
-                            let _ = Box::from_raw(mt.manager_ctx as *mut ManagerCtx);
-                        }
-                    }
-                    return Err(PyValueError::new_err("failed to create DLPack capsule"));
-                }
-                Ok(PyObject::from_owned_ptr(py, cap))
-            } else {
-                let ptr = Box::into_raw(mt) as *mut c_void;
-                let name = CString::new("dltensor").unwrap();
-                let cap =
-                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
-                if cap.is_null() {
-                    let mt = Box::from_raw(ptr as *mut DLManagedTensor);
-                    if !mt.manager_ctx.is_null() {
-                        let _ = Box::from_raw(mt.manager_ctx as *mut ManagerCtx);
-                    }
-                    return Err(PyValueError::new_err("failed to create DLPack capsule"));
-                }
-                Ok(PyObject::from_owned_ptr(py, cap))
-            }
-        }
+        self.inner.__dlpack__(py, stream, max_version, dl_device, copy)
     }
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl MarketefiDeviceArrayF32Py {
     fn new_from_rust(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
-        Self {
-            inner: Some(inner),
-            _ctx_guard: ctx_guard,
-            device_id,
-            producer_stream: 0,
-        }
+        let shared = SharedDeviceArrayF32Py {
+            inner,
+            _ctx: Some(ctx_guard),
+            device_id: Some(device_id),
+        };
+        Self { inner: shared }
     }
 }
 

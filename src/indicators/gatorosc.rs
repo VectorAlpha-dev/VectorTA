@@ -3963,7 +3963,11 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::gatorosc_wrapper::CudaGatorOsc;
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
@@ -3982,11 +3986,20 @@ impl DeviceArrayF32GatorPy {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
-        let item = std::mem::size_of::<f32>();
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
-        d.set_item("strides", (self.inner.cols * item, item))?;
-        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr_val: usize = if self.inner.rows == 0 || self.inner.cols == 0 {
+            0
+        } else {
+            self.inner.buf.as_device_ptr().as_raw() as usize
+        };
         d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
         Ok(d)
@@ -3996,121 +4009,62 @@ impl DeviceArrayF32GatorPy {
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
-        slf: pyo3::PyRef<'py, Self>,
+        &mut self,
         py: Python<'py>,
         stream: Option<pyo3::PyObject>,
-        max_version: Option<(u8, u8)>,
-        dl_device: Option<(i32, i32)>,
-        copy: Option<bool>,
+        max_version: Option<pyo3::PyObject>,
+        dl_device: Option<pyo3::PyObject>,
+        copy: Option<pyo3::PyObject>,
     ) -> PyResult<pyo3::PyObject> {
-        use std::ffi::{c_char, c_void, CString};
-        use std::ptr::null_mut;
-        use pyo3::ffi as pyffi;
-
-        // Currently we always return a view on the existing allocation.
-        // Respect Array API surface but ignore parameters for now.
+        // Compute target device id and validate `dl_device` hint if provided.
+        let (kdl, alloc_dev) = self.__dlpack_device__();
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
+                if dev_ty != kdl || dev_id != alloc_dev {
+                    let wants_copy = copy
+                        .as_ref()
+                        .and_then(|c| c.extract::<bool>(py).ok())
+                        .unwrap_or(false);
+                    if wants_copy {
+                        return Err(PyValueError::new_err(
+                            "__dlpack__(copy=True) not implemented for Gator CUDA handle",
+                        ));
+                    } else {
+                        return Err(PyValueError::new_err(
+                            "dl_device mismatch for Gator DLPack tensor",
+                        ));
+                    }
+                }
+            }
+        }
         let _ = stream;
-        let _ = dl_device;
-        let _ = copy;
-
-        #[repr(C)]
-        struct DLDevice { device_type: i32, device_id: i32 }
-        #[repr(C)]
-        struct DLDataType { code: u8, bits: u8, lanes: u16 }
-        #[repr(C)]
-        struct DLTensor {
-            data: *mut c_void,
-            device: DLDevice,
-            ndim: i32,
-            dtype: DLDataType,
-            shape: *mut i64,
-            strides: *mut i64,
-            byte_offset: usize,
-        }
-        #[repr(C)]
-        struct DLManagedTensor { dl_tensor: DLTensor, manager_ctx: *mut c_void, deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)> }
-        #[repr(C)]
-        struct ManagerCtx { shape: *mut i64, strides: *mut i64, _shape_box: Box<[i64; 2]>, _strides_box: Box<[i64; 2]>, _self_ref: pyo3::PyObject }
-
-        unsafe extern "C" fn deleter(self_ptr: *mut DLManagedTensor) {
-            if self_ptr.is_null() { return; }
-            let mt = Box::from_raw(self_ptr);
-            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
-            if !ctx_ptr.is_null() { let _ctx = Box::from_raw(ctx_ptr); }
-            // drop mt after ctx
-        }
-        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
-            if capsule.is_null() {
-                return;
-            }
-            let versioned = b"dltensor_versioned\0";
-            let legacy = b"dltensor\0";
-            // Per DLPack Python spec, only call deleter while capsule name is still dltensor[_versioned]
-            let mut ptr = pyffi::PyCapsule_GetPointer(
-                capsule,
-                versioned.as_ptr() as *const c_char,
-            );
-            if ptr.is_null() {
-                ptr = pyffi::PyCapsule_GetPointer(capsule, legacy.as_ptr() as *const c_char);
-            }
-            if !ptr.is_null() {
-                let mt = ptr as *mut DLManagedTensor;
-                if let Some(del) = unsafe { (*mt).deleter } {
-                    unsafe { del(mt) };
-                }
-                unsafe {
-                    pyffi::PyCapsule_SetPointer(capsule, null_mut());
-                }
-            }
-        }
-
-        let rows = slf.inner.rows as i64;
-        let cols = slf.inner.cols as i64;
-        let mut shape_box = Box::new([rows, cols]);
-        let mut strides_box = Box::new([cols, 1]);
-        let shape_ptr: *mut i64 = shape_box.as_mut_ptr();
-        let strides_ptr: *mut i64 = strides_box.as_mut_ptr();
-
-        // Capsule reuse safety: we tie lifetime to self
-        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
-        let mgr = Box::new(ManagerCtx { shape: shape_ptr, strides: strides_ptr, _shape_box: shape_box, _strides_box: strides_box, _self_ref: self_ref });
-        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
-
-        // data=NULL for size-zero tensors per DLPack
-        let data_ptr = if rows == 0 || cols == 0 {
-            std::ptr::null_mut()
-        } else {
-            slf.inner.buf.as_device_ptr().as_raw() as *mut c_void
-        };
-
-        let tensor = DLTensor {
-            data: data_ptr,
-            device: DLDevice { device_type: 2, device_id: slf._device_id as i32 },
-            ndim: 2,
-            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-            shape: shape_ptr,
-            strides: strides_ptr,
-            byte_offset: 0,
-        };
-        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
-        let ptr = Box::into_raw(mt) as *mut c_void;
-
-        let wants_versioned = match max_version { Some((maj, _min)) if maj >= 1 => true, _ => false };
-        let cap_name = if wants_versioned { b"dltensor_versioned\0" } else { b"dltensor\0" };
-        unsafe {
-            let cap = pyffi::PyCapsule_New(
-                ptr,
-                cap_name.as_ptr() as *const c_char,
-                Some(capsule_destructor),
-            );
-            if cap.is_null() {
-                let _ = Box::from_raw(ptr as *mut DLManagedTensor);
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "failed to create DLPack capsule",
+        // copy=True is not yet supported (no cross-device copy path here).
+        if let Some(copy_obj) = copy.as_ref() {
+            let do_copy: bool = copy_obj.extract(py)?;
+            if do_copy {
+                return Err(PyValueError::new_err(
+                    "__dlpack__(copy=True) not implemented for Gator CUDA handle",
                 ));
             }
-            Ok(pyo3::PyObject::from_owned_ptr(py, cap))
         }
+
+        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let rows = self.inner.rows;
+        let cols = self.inner.cols;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            crate::cuda::moving_averages::DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
+
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
+
+        export_f32_cuda_dlpack_2d(py, inner.buf, rows, cols, alloc_dev, max_version_bound)
     }
 }
 

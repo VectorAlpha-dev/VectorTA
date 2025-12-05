@@ -59,7 +59,10 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::{cuda::moving_averages::CudaTsf, indicators::moving_averages::alma::DeviceArrayF32Py};
+use crate::{
+    cuda::moving_averages::CudaTsf,
+    indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py},
+};
 
 impl<'a> AsRef<[f64]> for TsfInput<'a> {
     #[inline(always)]
@@ -1962,7 +1965,7 @@ pub fn tsf_into(
         let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
         dict.set_item("periods", periods.into_pyarray(py))?;
 
-        Ok((DeviceArrayF32Py { inner }, dict))
+        Ok((make_device_array_py(device_id, inner)?, dict))
     }
 
     #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1994,7 +1997,7 @@ pub fn tsf_into(
                 .map_err(|e| PyValueError::new_err(e.to_string()))
         })?;
 
-        Ok(DeviceArrayF32Py { inner })
+        Ok(make_device_array_py(device_id, inner)?)
     }
 }
 

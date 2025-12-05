@@ -140,6 +140,8 @@ impl CudaCmo {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
+    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
     pub fn synchronize(&self) -> Result<(), CudaCmoError> {
         self.stream.synchronize().map_err(Into::into)
     }

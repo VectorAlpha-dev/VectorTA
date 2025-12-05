@@ -27,7 +27,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaOtt;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -1932,7 +1932,8 @@ pub fn ott_cuda_batch_dev_py(
         cuda.ott_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1963,7 +1964,8 @@ pub fn ott_cuda_many_series_one_param_dev_py(
         cuda.ott_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 // ==================== WASM BINDINGS ====================

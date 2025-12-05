@@ -29,7 +29,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::mass_wrapper::CudaMass;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]

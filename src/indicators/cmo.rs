@@ -1324,10 +1324,14 @@ pub fn cmo_cuda_batch_dev_py<'py>(
     let sweep = CmoBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda = CudaCmo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.cmo_batch_dev(prices, &sweep)
+        let ctx_arc = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda
+            .cmo_batch_dev(prices, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
+            .map(|inner| (inner, ctx_arc, dev_id))
     })?;
 
     let dict = PyDict::new(py);
@@ -1337,7 +1341,14 @@ pub fn cmo_cuda_batch_dev_py<'py>(
         .collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((
+        DeviceArrayF32Py {
+            inner,
+            _ctx: Some(ctx_arc),
+            device_id: Some(dev_id),
+        },
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1360,12 +1371,20 @@ pub fn cmo_cuda_many_series_one_param_dev_py(
     let params = CmoParams {
         period: Some(period),
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda = CudaCmo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.cmo_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+        let ctx_arc = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda
+            .cmo_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
+            .map(|inner| (inner, ctx_arc, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx_arc),
+        device_id: Some(dev_id),
+    })
 }
 
 #[cfg(test)]

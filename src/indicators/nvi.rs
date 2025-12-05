@@ -1428,7 +1428,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaNvi;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::wma_wrapper::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "nvi_cuda_batch_dev")]
@@ -1456,7 +1456,11 @@ pub fn nvi_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx),
+        device_id: Some(dev_id),
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1484,5 +1488,9 @@ pub fn nvi_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx),
+        device_id: Some(dev_id),
+    })
 }

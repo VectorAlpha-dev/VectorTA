@@ -2211,7 +2211,7 @@ pub fn fvg_trailing_stop_py<'py>(
 
 // ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(all(feature = "python", feature = "cuda"))]
 // PyReadonlyArray1 already in scope elsewhere when needed.
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2250,11 +2250,15 @@ pub fn fvg_trailing_stop_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((batch.upper, batch.lower, batch.upper_ts, batch.lower_ts))
     })?;
+    let upper_dev = make_device_array_py(device_id, u)?;
+    let lower_dev = make_device_array_py(device_id, lwr)?;
+    let upper_ts_dev = make_device_array_py(device_id, uts)?;
+    let lower_ts_dev = make_device_array_py(device_id, lts)?;
     Ok((
-        DeviceArrayF32Py { inner: u },
-        DeviceArrayF32Py { inner: lwr },
-        DeviceArrayF32Py { inner: uts },
-        DeviceArrayF32Py { inner: lts },
+        upper_dev,
+        lower_dev,
+        upper_ts_dev,
+        lower_ts_dev,
     ))
 }
 
@@ -2303,11 +2307,15 @@ pub fn fvg_trailing_stop_cuda_many_series_one_param_dev_py(
         cuda.fvg_ts_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
+    let upper_dev = make_device_array_py(device_id, u)?;
+    let lower_dev = make_device_array_py(device_id, lw)?;
+    let upper_ts_dev = make_device_array_py(device_id, uts)?;
+    let lower_ts_dev = make_device_array_py(device_id, lts)?;
     Ok((
-        DeviceArrayF32Py { inner: u },
-        DeviceArrayF32Py { inner: lw },
-        DeviceArrayF32Py { inner: uts },
-        DeviceArrayF32Py { inner: lts },
+        upper_dev,
+        lower_dev,
+        upper_ts_dev,
+        lower_ts_dev,
     ))
 }
 

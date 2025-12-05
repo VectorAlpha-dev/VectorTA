@@ -1894,7 +1894,7 @@ pub fn eri_js(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::eri_wrapper::CudaEri;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "eri_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, source_f32, period_range, ma_type, device_id=0))]
@@ -1918,19 +1918,15 @@ pub fn eri_cuda_batch_dev_py(
         period: period_range,
         ma_type: ma_type.to_string(),
     };
-    let ((bull, bear), ctx_arc, dev_id) = py.allow_threads(|| {
+    let (bull, bear) = py.allow_threads(|| {
         let cuda = CudaEri::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let ctx_arc = cuda.context_arc();
-        let dev_id = cuda.device_id();
         cuda.eri_batch_dev(h, l, s, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
-            .map(|((bull, bear), _combos)| ((bull, bear), ctx_arc, dev_id))
+            .map(|((bull, bear), _combos)| (bull, bear))
     })?;
-    let ctx_bull = std::sync::Arc::clone(&ctx_arc);
-    Ok((
-        DeviceArrayF32Py { inner: bull, _ctx: Some(ctx_bull), device_id: Some(dev_id) },
-        DeviceArrayF32Py { inner: bear, _ctx: Some(ctx_arc), device_id: Some(dev_id) },
-    ))
+    let bull_dev = make_device_array_py(device_id, bull)?;
+    let bear_dev = make_device_array_py(device_id, bear)?;
+    Ok((bull_dev, bear_dev))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1954,19 +1950,15 @@ pub fn eri_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let s = source_tm_f32.as_slice()?;
-    let (bull, bear, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (bull, bear) = py.allow_threads(|| {
         let cuda = CudaEri::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let ctx_arc = cuda.context_arc();
-        let dev_id = cuda.device_id();
         cuda.eri_many_series_one_param_time_major_dev(h, l, s, cols, rows, period, ma_type)
             .map_err(|e| PyValueError::new_err(e.to_string()))
-            .map(|(bull, bear)| (bull, bear, ctx_arc, dev_id))
+            .map(|(bull, bear)| (bull, bear))
     })?;
-    let ctx_bull = std::sync::Arc::clone(&ctx_arc);
-    Ok((
-        DeviceArrayF32Py { inner: bull, _ctx: Some(ctx_bull), device_id: Some(dev_id) },
-        DeviceArrayF32Py { inner: bear, _ctx: Some(ctx_arc), device_id: Some(dev_id) },
-    ))
+    let bull_dev = make_device_array_py(device_id, bull)?;
+    let bear_dev = make_device_array_py(device_id, bear)?;
+    Ok((bull_dev, bear_dev))
 }
 
 #[cfg(feature = "wasm")]

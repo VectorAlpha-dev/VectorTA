@@ -1129,7 +1129,7 @@ use pyo3::types::PyDict;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaPma};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{DeviceArrayF32Py, make_device_array_py};
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "pma")]
@@ -1251,14 +1251,9 @@ pub fn pma_cuda_batch_dev_py(
         cuda.pma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((
-        DeviceArrayF32Py {
-            inner: pair.predict,
-        },
-        DeviceArrayF32Py {
-            inner: pair.trigger,
-        },
-    ))
+    let predict = make_device_array_py(device_id, pair.predict)?;
+    let trigger = make_device_array_py(device_id, pair.trigger)?;
+    Ok((predict, trigger))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1284,14 +1279,9 @@ pub fn pma_cuda_many_series_one_param_dev_py(
         cuda.pma_many_series_one_param_time_major_dev(flat, cols, rows)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((
-        DeviceArrayF32Py {
-            inner: pair.predict,
-        },
-        DeviceArrayF32Py {
-            inner: pair.trigger,
-        },
-    ))
+    let predict = make_device_array_py(device_id, pair.predict)?;
+    let trigger = make_device_array_py(device_id, pair.trigger)?;
+    Ok((predict, trigger))
 }
 
 //--------------------------

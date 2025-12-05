@@ -5,9 +5,11 @@ use pyo3::exceptions::PyValueError;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyDict};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::Bound;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
 
 /// Shared helper to export a 2D `DeviceBuffer<f32>` as a CUDA DLPack capsule.
 ///
@@ -244,4 +246,128 @@ pub fn export_f32_cuda_dlpack_2d<'py>(
         }
         Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
     }
+}
+
+/// Shared CUDA VRAM handle for a single `DeviceArrayF32` matrix, exposing
+/// `__cuda_array_interface__` v3 and `__dlpack__` backed by
+/// `export_f32_cuda_dlpack_2d`.
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    // Optional context + device id to keep primary context alive for VRAM frees
+    pub(crate) _ctx: Option<std::sync::Arc<cust::context::Context>>, // kept for lifetime
+    pub(crate) device_id: Option<u32>,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32Py {
+    #[getter]
+    pub fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = &self.inner;
+        let d = PyDict::new(py);
+        // shape: (rows, cols)
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        // typestr: little-endian float32
+        d.set_item("typestr", "<f4")?;
+        // Explicit strides for row-major FP32: (row stride in bytes, item stride in bytes)
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let size = inner.rows.saturating_mul(inner.cols);
+        let ptr = if size == 0 { 0usize } else { inner.device_ptr() as usize };
+        d.set_item("data", (ptr, false))?;
+        // Stream is omitted because producing kernels synchronize before returning
+        // the VRAM handle; consumers need no additional synchronization per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    pub fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        // Discover allocation device from pointer attributes to avoid relying on current context.
+        let mut device_ordinal: i32 = 0;
+        unsafe {
+            let attr = cust::sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
+            let mut value = std::mem::MaybeUninit::<i32>::uninit();
+            let err = cust::sys::cuPointerGetAttribute(
+                value.as_mut_ptr() as *mut std::ffi::c_void,
+                attr,
+                self.inner.buf.as_device_ptr().as_raw(),
+            );
+            if err == cust::sys::CUresult::CUDA_SUCCESS {
+                device_ordinal = value.assume_init();
+            } else {
+                // Fallback: try current device
+                let _ = cust::sys::cuCtxGetDevice(&mut device_ordinal);
+            }
+        }
+        Ok((2, device_ordinal))
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    pub fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<pyo3::PyObject>,
+        dl_device: Option<pyo3::PyObject>,
+        copy: Option<pyo3::PyObject>,
+    ) -> PyResult<PyObject> {
+        // Compute target device id and validate `dl_device` hint if provided.
+        let (kdl, alloc_dev) = self.__dlpack_device__()?; // (2, device_id)
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
+                if dev_ty != kdl || dev_id != alloc_dev {
+                    let wants_copy = copy
+                        .as_ref()
+                        .and_then(|c| c.extract::<bool>(py).ok())
+                        .unwrap_or(false);
+                    if wants_copy {
+                        return Err(PyValueError::new_err(
+                            "device copy not implemented for __dlpack__",
+                        ));
+                    } else {
+                        return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
+                    }
+                }
+            }
+        }
+        let _ = stream;
+
+        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+        );
+
+        let rows = inner.rows;
+        let cols = inner.cols;
+        let buf = inner.buf;
+
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
+
+        export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
+    }
+}
+
+/// Helper to wrap a generic `DeviceArrayF32` into the shared Python handle.
+/// Context is not retained here; callers that need a primary-context guard
+/// should construct `DeviceArrayF32Py` directly.
+#[cfg(all(feature = "python", feature = "cuda"))]
+pub fn make_device_array_py(
+    device_id: usize,
+    inner: DeviceArrayF32,
+) -> PyResult<DeviceArrayF32Py> {
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: None,
+        device_id: Some(device_id as u32),
+    })
 }

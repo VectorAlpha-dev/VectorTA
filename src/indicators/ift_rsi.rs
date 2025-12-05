@@ -45,6 +45,8 @@ use crate::utilities::helpers::{
     make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -52,10 +54,6 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context as CudaContext;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc;
 
 impl<'a> AsRef<[f64]> for IftRsiInput<'a> {
     #[inline(always)]
@@ -2331,19 +2329,18 @@ pub fn ift_rsi_cuda_batch_dev_py(
     }
     let slice_in: &[f32] = data_f32.as_slice()?;
     let sweep = IftRsiBatchRange { rsi_period: rsi_range, wma_period: wma_range };
-    let (inner, dev_id, stream_h, ctx) = py.allow_threads(|| {
+    let (inner, dev_id, ctx) = py.allow_threads(|| {
         let cuda = CudaIftRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
-        let stream_h = cuda.stream_handle_usize();
         let ctx = cuda.context_arc();
         let (dev, _combos) = cuda
             .ift_rsi_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.synchronize().map_err(|e| PyValueError::new_err(e.to_string()))?; // CAI stream can be omitted
-        Ok::<_, PyErr>((dev, dev_id, stream_h, ctx))
+        Ok::<_, PyErr>((dev, dev_id, ctx))
     })?;
-    let obj = Py::new(py, IftRsiDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id, stream: stream_h })?;
-    Ok(obj.into_py(py))
+    let handle = DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) };
+    Ok(handle.into_py(py))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2366,19 +2363,18 @@ pub fn ift_rsi_cuda_many_series_one_param_dev_py(
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
     let params = IftRsiParams { rsi_period: Some(rsi_period), wma_period: Some(wma_period) };
-    let (inner, dev_id, stream_h, ctx) = py.allow_threads(|| {
+    let (inner, dev_id, ctx) = py.allow_threads(|| {
         let cuda = CudaIftRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
-        let stream_h = cuda.stream_handle_usize();
         let ctx = cuda.context_arc();
         let dev = cuda
             .ift_rsi_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.synchronize().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((dev, dev_id, stream_h, ctx))
+        Ok::<_, PyErr>((dev, dev_id, ctx))
     })?;
-    let obj = Py::new(py, IftRsiDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id, stream: stream_h })?;
-    Ok(obj.into_py(py))
+    let handle = DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) };
+    Ok(handle.into_py(py))
 }
 
 #[cfg(feature = "wasm")]
@@ -2401,166 +2397,6 @@ pub fn ift_rsi_js(data: &[f64], rsi_period: usize, wma_period: usize) -> Result<
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
-}
-
-// ==================== PYTHON: CUDA VRAM handle for IFT RSI ====================
-#[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::prelude::*;
-
-#[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Py", unsendable)]
-pub struct IftRsiDeviceArrayF32Py {
-    pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
-    pub(crate) _ctx: Arc<CudaContext>,
-    pub(crate) device_id: u32,
-    pub(crate) stream: usize,
-}
-
-#[cfg(all(feature = "python", feature = "cuda"))]
-#[pymethods]
-impl IftRsiDeviceArrayF32Py {
-    #[getter]
-    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let d = PyDict::new(py);
-        let itemsize = std::mem::size_of::<f32>();
-        let rows = self.inner.rows;
-        let cols = self.inner.cols;
-        d.set_item("shape", (rows, cols))?;
-        d.set_item("typestr", "<f4")?;
-        d.set_item("strides", (cols * itemsize, itemsize))?; // bytes
-        let ptr_val: usize = if rows == 0 || cols == 0 {
-            0
-        } else {
-            self.inner.device_ptr() as usize
-        };
-        d.set_item("data", (ptr_val, false))?;
-        // Stream omitted: producer synchronizes before return
-        d.set_item("version", 3)?;
-        Ok(d)
-    }
-
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
-
-    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
-    fn __dlpack__<'py>(
-        slf: pyo3::PyRef<'py, Self>,
-        py: Python<'py>,
-        stream: Option<usize>,
-        max_version: Option<(u32, u32)>,
-        dl_device: Option<(i32, i32)>,
-        copy: Option<bool>,
-    ) -> PyResult<PyObject> {
-        use pyo3::ffi as pyffi;
-        use std::ffi::{c_void, CString};
-
-        #[repr(C)]
-        struct DLDevice { device_type: i32, device_id: i32 }
-        #[repr(C)]
-        struct DLDataType { code: u8, bits: u8, lanes: u16 }
-        #[repr(C)]
-        struct DLTensor {
-            data: *mut c_void,
-            device: DLDevice,
-            ndim: i32,
-            dtype: DLDataType,
-            shape: *mut i64,
-            strides: *mut i64,
-            byte_offset: u64,
-        }
-        #[repr(C)]
-        struct DLManagedTensor { dl_tensor: DLTensor, manager_ctx: *mut c_void, deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)> }
-
-        // v1.x wrapper (minimal): just adds version tag; most consumers ignore it
-        #[repr(C)]
-        struct DLManagedTensorVersioned { manager: *mut DLManagedTensor, version: u32 }
-
-        #[repr(C)]
-        struct ManagerCtx { shape: *mut i64, strides: *mut i64, _shape: Box<[i64; 2]>, _strides: Box<[i64; 2]>, _self_ref: pyo3::PyObject }
-
-        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
-            if p.is_null() { return; }
-            let mt = Box::from_raw(p);
-            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
-            if !ctx_ptr.is_null() { let _ = Box::from_raw(ctx_ptr); }
-            drop(mt);
-        }
-
-        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
-            let name = b"dltensor\0";
-            let ptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
-            if !ptr.is_null() {
-                if let Some(del) = (*ptr).deleter {
-                    del(ptr);
-                }
-                let used = b"used_dltensor\0";
-                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
-            }
-        }
-
-        unsafe extern "C" fn capsule_destructor_versioned(capsule: *mut pyffi::PyObject) {
-            let name = b"dltensor_versioned\0";
-            let vptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensorVersioned;
-            if !vptr.is_null() {
-                let mgr = (*vptr).manager;
-                if !mgr.is_null() {
-                    if let Some(del) = (*mgr).deleter {
-                        del(mgr);
-                    }
-                }
-                let used = b"used_dltensor_versioned\0";
-                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
-                let _ = Box::from_raw(vptr);
-            }
-        }
-
-        let rows = slf.inner.rows as i64;
-        let cols = slf.inner.cols as i64;
-        let total_elems = (rows as i128) * (cols as i128);
-
-        let mut shape = Box::new([rows, cols]);
-        let mut strides = Box::new([cols, 1]); // elements (v1.2+)
-        let shape_ptr = shape.as_mut_ptr();
-        let strides_ptr = strides.as_mut_ptr();
-
-        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
-        let mgr = Box::new(ManagerCtx { shape: shape_ptr, strides: strides_ptr, _shape: shape, _strides: strides, _self_ref: self_ref });
-        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
-
-        let data_ptr: *mut c_void = if total_elems == 0 { std::ptr::null_mut() } else { slf.inner.device_ptr() as usize as *mut c_void };
-        let tensor = DLTensor {
-            data: data_ptr,
-            device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
-            ndim: 2,
-            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-            shape: shape_ptr,
-            strides: strides_ptr,
-            byte_offset: 0,
-        };
-        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
-        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
-        unsafe {
-            if want_versioned {
-                let wrapped = Box::new(DLManagedTensorVersioned { manager: Box::into_raw(mt), version: 1 });
-                let ptr = Box::into_raw(wrapped) as *mut c_void;
-                let name = CString::new("dltensor_versioned").unwrap();
-                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor_versioned));
-                if cap.is_null() {
-                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create versioned DLPack capsule"));
-                }
-                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
-            } else {
-                let ptr = Box::into_raw(mt) as *mut c_void;
-                let name = CString::new("dltensor").unwrap();
-                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
-                if cap.is_null() {
-                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
-                }
-                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
-            }
-        }
-    }
 }
 
 #[cfg(feature = "wasm")]

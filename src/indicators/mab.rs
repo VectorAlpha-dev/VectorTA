@@ -2201,7 +2201,7 @@ pub unsafe fn mab_scalar_classic_sma(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaMab};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(all(feature = "python", feature = "cuda"))]
 // PyValueError already imported above under `#[cfg(feature = "python")]`.
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2250,11 +2250,12 @@ pub fn mab_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, pyo3::PyErr>((trip.upper, trip.middle, trip.lower))
     })?;
-    Ok((
-        DeviceArrayF32Py { inner: up },
-        DeviceArrayF32Py { inner: mid },
-        DeviceArrayF32Py { inner: lo },
-    ))
+
+    let up_py = make_device_array_py(device_id, up)?;
+    let mid_py = make_device_array_py(device_id, mid)?;
+    let lo_py = make_device_array_py(device_id, lo)?;
+
+    Ok((up_py, mid_py, lo_py))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2292,11 +2293,12 @@ pub fn mab_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, pyo3::PyErr>((trip.upper, trip.middle, trip.lower))
     })?;
-    Ok((
-        DeviceArrayF32Py { inner: up },
-        DeviceArrayF32Py { inner: mid },
-        DeviceArrayF32Py { inner: lo },
-    ))
+
+    let up_py = make_device_array_py(device_id, up)?;
+    let mid_py = make_device_array_py(device_id, mid)?;
+    let lo_py = make_device_array_py(device_id, lo)?;
+
+    Ok((up_py, mid_py, lo_py))
 }
 
 #[cfg(test)]

@@ -2488,7 +2488,7 @@ pub fn rsmk_cuda_batch_dev_py(
         let dev_id = cuda.device_id();
         cuda
             .rsmk_batch_dev(main, comp, &sweep)
-            .map(|pair| (pair, ctx, dev_id))
+            .map(|(pair, _combos)| (pair, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((

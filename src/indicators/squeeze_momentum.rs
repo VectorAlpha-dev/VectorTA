@@ -2274,7 +2274,7 @@ pub fn squeeze_momentum_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaSqueezeMomentum};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
 // PyReadonlyArray1 and PyValueError already imported for Python above.
 #[cfg(all(feature = "python", feature = "cuda"))]

@@ -31,7 +31,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaEhma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{DeviceArrayF32Py, make_device_array_py};
+use crate::utilities::dlpack_cuda::{DeviceArrayF32Py, make_device_array_py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]

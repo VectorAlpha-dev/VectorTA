@@ -1847,7 +1847,7 @@ use crate::cuda::cuda_available as cuda_is_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::lpc_wrapper::CudaLpc;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::wma_wrapper::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "lpc_cuda_batch_dev")]
@@ -1900,15 +1900,27 @@ pub fn lpc_cuda_batch_dev_py<'py>(
     let d = pyo3::types::PyDict::new(py);
     d.set_item(
         "filter",
-        DeviceArrayF32Py::new_from_rust(triplet.wt1, ctx.clone(), dev_id),
+        DeviceArrayF32Py {
+            inner: triplet.wt1,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id),
+        },
     )?;
     d.set_item(
         "high",
-        DeviceArrayF32Py::new_from_rust(triplet.wt2, ctx.clone(), dev_id),
+        DeviceArrayF32Py {
+            inner: triplet.wt2,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id),
+        },
     )?;
     d.set_item(
         "low",
-        DeviceArrayF32Py::new_from_rust(triplet.hist, ctx, dev_id),
+        DeviceArrayF32Py {
+            inner: triplet.hist,
+            _ctx: Some(ctx),
+            device_id: Some(dev_id),
+        },
     )?;
     d.set_item(
         "fixed_periods",
@@ -1998,15 +2010,27 @@ pub fn lpc_cuda_many_series_one_param_dev_py<'py>(
     let d = pyo3::types::PyDict::new(py);
     d.set_item(
         "filter",
-        DeviceArrayF32Py::new_from_rust(triplet.wt1, ctx.clone(), dev_id),
+        DeviceArrayF32Py {
+            inner: triplet.wt1,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id),
+        },
     )?;
     d.set_item(
         "high",
-        DeviceArrayF32Py::new_from_rust(triplet.wt2, ctx.clone(), dev_id),
+        DeviceArrayF32Py {
+            inner: triplet.wt2,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id),
+        },
     )?;
     d.set_item(
         "low",
-        DeviceArrayF32Py::new_from_rust(triplet.hist, ctx, dev_id),
+        DeviceArrayF32Py {
+            inner: triplet.hist,
+            _ctx: Some(ctx),
+            device_id: Some(dev_id),
+        },
     )?;
     d.set_item("rows", rows)?;
     d.set_item("cols", cols)?;

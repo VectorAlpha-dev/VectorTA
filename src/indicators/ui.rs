@@ -51,7 +51,7 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaUi;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 
 impl<'a> AsRef<[f64]> for UiInput<'a> {
     #[inline(always)]

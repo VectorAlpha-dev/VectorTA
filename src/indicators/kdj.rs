@@ -3717,7 +3717,7 @@ pub fn kdj_batch_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaKdj};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(all(feature = "python", feature = "cuda"))]
 // PyReadonlyArray1 and PyValueError already imported earlier in this module.
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3748,16 +3748,15 @@ pub fn kdj_cuda_batch_dev_py(
         slow_d_period: slow_d_range,
         slow_d_ma_type: slow_d_ma_range,
     };
-    let (k, d, j) = py.allow_threads(|| {
+    let (k_dev, d_dev, j_dev) = py.allow_threads(|| {
         let cuda = CudaKdj::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.kdj_batch_dev(h, l, c, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((
-        DeviceArrayF32Py { inner: k },
-        DeviceArrayF32Py { inner: d },
-        DeviceArrayF32Py { inner: j },
-    ))
+    let k = make_device_array_py(device_id, k_dev)?;
+    let d = make_device_array_py(device_id, d_dev)?;
+    let j = make_device_array_py(device_id, j_dev)?;
+    Ok((k, d, j))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3790,16 +3789,15 @@ pub fn kdj_cuda_many_series_one_param_dev_py(
         slow_d_period: Some(slow_d),
         slow_d_ma_type: Some(slow_d_ma),
     };
-    let (k, d, j) = py.allow_threads(|| {
+    let (k_dev, d_dev, j_dev) = py.allow_threads(|| {
         let cuda = CudaKdj::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.kdj_many_series_one_param_time_major_dev(htm, ltm, ctm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((
-        DeviceArrayF32Py { inner: k },
-        DeviceArrayF32Py { inner: d },
-        DeviceArrayF32Py { inner: j },
-    ))
+    let k = make_device_array_py(device_id, k_dev)?;
+    let d = make_device_array_py(device_id, d_dev)?;
+    let j = make_device_array_py(device_id, j_dev)?;
+    Ok((k, d, j))
 }
 
 // ========== WASM Bindings ==========

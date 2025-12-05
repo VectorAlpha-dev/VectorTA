@@ -3007,7 +3007,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaSafeZoneStop;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "safezonestop_cuda_batch_dev")]
@@ -3049,7 +3049,10 @@ pub fn safezonestop_cuda_batch_dev_py<'py>(
     dict.set_item("periods", periods.into_pyarray(py))?;
     dict.set_item("mults", mults.into_pyarray(py))?;
     dict.set_item("max_lookbacks", looks.into_pyarray(py))?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+
+    let handle = make_device_array_py(device_id, inner)?;
+
+    Ok((handle, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3087,5 +3090,6 @@ pub fn safezonestop_cuda_many_series_one_param_dev_py<'py>(
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+
+    make_device_array_py(device_id, inner)
 }

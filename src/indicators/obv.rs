@@ -1346,7 +1346,7 @@ pub fn obv_batch_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaObv;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "obv_cuda_batch_dev")]

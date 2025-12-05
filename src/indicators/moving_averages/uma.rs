@@ -42,11 +42,11 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaUma;
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::ffi::c_void;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 #[cfg(feature = "python")]
@@ -2009,133 +2009,40 @@ impl UmaDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Move DeviceBuffer into DLManagedTensor so consumer owns it
+        // Determine allocation device and validate `dl_device` hint if provided.
+        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
+                if dev_ty != kdl || dev_id != alloc_dev {
+                    let wants_copy = copy
+                        .as_ref()
+                        .and_then(|c| c.extract::<bool>(py).ok())
+                        .unwrap_or(false);
+                    if wants_copy {
+                        return Err(PyValueError::new_err(
+                            "__dlpack__(copy=True) not implemented for UMA device handle",
+                        ));
+                    } else {
+                        return Err(PyValueError::new_err("dl_device mismatch for UMA tensor"));
+                    }
+                }
+            }
+        }
+
+        let _ = stream;
+
+        // Move DeviceBuffer into shared DLPack helper so the consumer owns it.
         let buf = self
             .buf
             .take()
             .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
 
-        // Minimal DLPack FFI defs
-        #[repr(C)]
-        struct DLDevice { device_type: i32, device_id: i32 }
-        #[repr(C)]
-        struct DLDataType { code: u8, bits: u8, lanes: u16 }
-        #[repr(C)]
-        struct DLTensor {
-            data: *mut c_void,
-            device: DLDevice,
-            ndim: i32,
-            dtype: DLDataType,
-            shape: *mut i64,
-            strides: *mut i64,
-            byte_offset: u64,
-        }
-        #[repr(C)]
-        struct DLManagedTensor {
-            dl_tensor: DLTensor,
-            manager_ctx: *mut c_void,
-            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
-        }
+        let rows = self.rows;
+        let cols = self.cols;
 
-        // Keep context, buffer, and shape/strides alive until deleter runs
-        struct Manager {
-            _ctx: Arc<Context>,
-            _buf: DeviceBuffer<f32>,
-            _shape: Box<[i64; 2]>,
-            _strides: Box<[i64; 2]>,
-        }
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
-        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
-            if p.is_null() { return; }
-            let mt = Box::from_raw(p);
-            let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
-            drop(mt);
-        }
-
-        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
-            use pyo3::ffi::{PyCapsule_GetName, PyCapsule_GetPointer};
-            if capsule.is_null() { return; }
-            let cname = PyCapsule_GetName(capsule);
-            if cname.is_null() { return; }
-            let n = std::ffi::CStr::from_ptr(cname);
-            let name_str = n.to_string_lossy();
-            // Only call deleter if capsule still named one of the producer names
-            if name_str == "dltensor" || name_str == "dltensor_versioned" {
-                let want = std::ffi::CString::new(name_str.as_ref()).unwrap();
-                let ptr = PyCapsule_GetPointer(capsule, want.as_ptr());
-                if !ptr.is_null() {
-                    let mt = ptr as *mut DLManagedTensor;
-                    if let Some(del) = (*mt).deleter { del(mt) }
-                }
-            }
-        }
-
-        // If consumer specifies a device, ensure it matches our allocation device
-        if let Some(dev_obj) = dl_device {
-            // Expect tuple (device_type, device_id)
-            let ty_id: (i32, i32) = dev_obj.extract(py).unwrap_or((2, self.device_id as i32));
-            if ty_id.0 != 2 || ty_id.1 != self.device_id as i32 {
-                // Optional: support copy parameter – currently not implemented
-                let do_copy = copy
-                    .as_ref()
-                    .and_then(|c| c.extract::<bool>(py).ok())
-                    .unwrap_or(false);
-                if do_copy {
-                    return Err(PyValueError::new_err(
-                        "__dlpack__(copy=True) not implemented for UMA device handle",
-                    ));
-                } else {
-                    return Err(PyValueError::new_err("dl_device mismatch for UMA tensor"));
-                }
-            }
-        }
-
-        // Determine capsule name by version negotiation
-        let mut capsule_name = "dltensor";
-        if let Some(ver_obj) = max_version {
-            // Accept (major, minor) – treat >= (1, 0) as versioned
-            if let Ok((maj, _min)) = ver_obj.extract::<(i32, i32)>(py) {
-                if maj >= 1 { capsule_name = "dltensor_versioned"; }
-            }
-        }
-
-        let rows = self.rows as i64;
-        let cols = self.cols as i64;
-        let shape = Box::new([rows, cols]);
-        let strides = Box::new([cols, 1]); // element strides (row-major)
-        let data_ptr = if rows == 0 || cols == 0 {
-            core::ptr::null_mut()
-        } else {
-            buf.as_device_ptr().as_raw() as *mut c_void
-        };
-        let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
-        let mgr_ptr = Box::into_raw(mgr);
-        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
-        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
-
-        let mt = Box::new(DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
-                ndim: 2,
-                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                shape: shape_ptr,
-                strides: strides_ptr,
-                byte_offset: 0,
-            },
-            manager_ctx: mgr_ptr as *mut c_void,
-            deleter: Some(dlpack_deleter),
-        });
-
-        // Wrap in PyCapsule (name depends on version negotiation)
-        let raw_capsule = unsafe {
-            let name = std::ffi::CString::new(capsule_name).unwrap();
-            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
-        };
-        if raw_capsule.is_null() {
-            return Err(PyValueError::new_err("failed to create DLPack capsule"));
-        }
-        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+        export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }
 }
 

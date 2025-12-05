@@ -2744,7 +2744,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::vi_wrapper::CudaVi;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "vi_cuda_batch_dev")]

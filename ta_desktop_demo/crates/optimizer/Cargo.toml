@@ -1,0 +1,10 @@
+[package]
+name = "ta_optimizer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+ta_strategies = { path = "../strategies" }
+my_project = { path = "../../.." }
+rayon = "1.10.0"

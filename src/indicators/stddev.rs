@@ -43,7 +43,7 @@
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaStddev;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{DeviceArrayF32Py, make_device_array_py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -1426,7 +1426,8 @@ pub fn stddev_cuda_batch_dev_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1452,7 +1453,8 @@ pub fn stddev_cuda_many_series_one_param_dev_py<'py>(
         cuda.stddev_many_series_one_param_time_major_dev(slice_in, cols, rows, period, nbdev as f32)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 // ============================

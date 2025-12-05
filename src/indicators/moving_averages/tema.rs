@@ -53,7 +53,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaTema;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -1884,7 +1884,7 @@ pub fn tema_cuda_batch_dev_py(
             // CUDA stream is synchronized inside wrapper; CAI v3 can omit stream
             Ok(inner)
         })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1917,7 +1917,7 @@ pub fn tema_cuda_many_series_one_param_dev_py(
             // CUDA stream is synchronized inside wrapper; CAI v3 can omit stream
             Ok(inner)
         })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 // ========== WASM Bindings ==========

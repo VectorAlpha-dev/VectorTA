@@ -30,7 +30,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaWad;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{DeviceArrayF32Py, make_device_array_py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -1546,7 +1546,8 @@ pub fn wad_cuda_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1570,7 +1571,8 @@ pub fn wad_cuda_batch_dev_py(
         cuda.wad_batch_dev(high, low, close)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1600,7 +1602,8 @@ pub fn wad_cuda_many_series_one_param_dev_py(
         cuda.wad_many_series_one_param_time_major_dev(high, low, close, cols, rows)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok(handle)
 }
 
 #[cfg(feature = "python")]

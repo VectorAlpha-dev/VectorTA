@@ -3810,7 +3810,7 @@ pub fn register_rvi_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaRvi;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "rvi_cuda_batch_dev")]

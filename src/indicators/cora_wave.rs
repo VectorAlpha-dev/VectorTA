@@ -57,7 +57,7 @@ use crate::cuda::moving_averages::CudaCoraWave;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
 
 impl<'a> AsRef<[f64]> for CoraWaveInput<'a> {
     #[inline(always)]

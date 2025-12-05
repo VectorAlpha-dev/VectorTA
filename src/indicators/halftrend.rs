@@ -36,7 +36,7 @@
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaHalftrend};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -3214,22 +3214,34 @@ pub fn halftrend_cuda_batch_dev_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
     })?;
+    let mut halftrend_dev = make_device_array_py(dev_id as usize, batch.halftrend)?;
+    halftrend_dev._ctx = Some(ctx_arc.clone());
+    let mut trend_dev = make_device_array_py(dev_id as usize, batch.trend)?;
+    trend_dev._ctx = Some(ctx_arc.clone());
+    let mut atr_high_dev = make_device_array_py(dev_id as usize, batch.atr_high)?;
+    atr_high_dev._ctx = Some(ctx_arc.clone());
+    let mut atr_low_dev = make_device_array_py(dev_id as usize, batch.atr_low)?;
+    atr_low_dev._ctx = Some(ctx_arc.clone());
+    let mut buy_dev = make_device_array_py(dev_id as usize, batch.buy)?;
+    buy_dev._ctx = Some(ctx_arc.clone());
+    let mut sell_dev = make_device_array_py(dev_id as usize, batch.sell)?;
+    sell_dev._ctx = Some(ctx_arc.clone());
     let dict = PyDict::new(py);
     dict.set_item(
         "halftrend",
-        Py::new(py, DeviceArrayF32Py { inner: batch.halftrend, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?,
+        Py::new(py, halftrend_dev)?,
     )?;
-    dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: batch.trend, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?)?;
+    dict.set_item("trend", Py::new(py, trend_dev)?)?;
     dict.set_item(
         "atr_high",
-        Py::new(py, DeviceArrayF32Py { inner: batch.atr_high, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?,
+        Py::new(py, atr_high_dev)?,
     )?;
     dict.set_item(
         "atr_low",
-        Py::new(py, DeviceArrayF32Py { inner: batch.atr_low, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?,
+        Py::new(py, atr_low_dev)?,
     )?;
-    dict.set_item("buy_signal", Py::new(py, DeviceArrayF32Py { inner: batch.buy, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?)?;
-    dict.set_item("sell_signal", Py::new(py, DeviceArrayF32Py { inner: batch.sell, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?)?;
+    dict.set_item("buy_signal", Py::new(py, buy_dev)?)?;
+    dict.set_item("sell_signal", Py::new(py, sell_dev)?)?;
     use numpy::IntoPyArray;
     dict.set_item(
         "amplitudes",
@@ -3289,19 +3301,31 @@ pub fn halftrend_cuda_many_series_one_param_dev_py<'py>(
         ).map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
     })?;
+    let mut halftrend_dev = make_device_array_py(dev_id as usize, out.halftrend)?;
+    halftrend_dev._ctx = Some(ctx_arc.clone());
+    let mut trend_dev = make_device_array_py(dev_id as usize, out.trend)?;
+    trend_dev._ctx = Some(ctx_arc.clone());
+    let mut atr_high_dev = make_device_array_py(dev_id as usize, out.atr_high)?;
+    atr_high_dev._ctx = Some(ctx_arc.clone());
+    let mut atr_low_dev = make_device_array_py(dev_id as usize, out.atr_low)?;
+    atr_low_dev._ctx = Some(ctx_arc.clone());
+    let mut buy_dev = make_device_array_py(dev_id as usize, out.buy)?;
+    buy_dev._ctx = Some(ctx_arc.clone());
+    let mut sell_dev = make_device_array_py(dev_id as usize, out.sell)?;
+    sell_dev._ctx = Some(ctx_arc.clone());
     let dict = PyDict::new(py);
     dict.set_item(
         "halftrend",
-        Py::new(py, DeviceArrayF32Py { inner: out.halftrend, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?,
+        Py::new(py, halftrend_dev)?,
     )?;
-    dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: out.trend, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?)?;
+    dict.set_item("trend", Py::new(py, trend_dev)?)?;
     dict.set_item(
         "atr_high",
-        Py::new(py, DeviceArrayF32Py { inner: out.atr_high, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?,
+        Py::new(py, atr_high_dev)?,
     )?;
-    dict.set_item("atr_low", Py::new(py, DeviceArrayF32Py { inner: out.atr_low, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?)?;
-    dict.set_item("buy_signal", Py::new(py, DeviceArrayF32Py { inner: out.buy, _ctx: Some(ctx_arc.clone()), device_id: Some(dev_id) })?)?;
-    dict.set_item("sell_signal", Py::new(py, DeviceArrayF32Py { inner: out.sell, _ctx: Some(ctx_arc), device_id: Some(dev_id) })?)?;
+    dict.set_item("atr_low", Py::new(py, atr_low_dev)?)?;
+    dict.set_item("buy_signal", Py::new(py, buy_dev)?)?;
+    dict.set_item("sell_signal", Py::new(py, sell_dev)?)?;
     Ok(dict)
 }
 

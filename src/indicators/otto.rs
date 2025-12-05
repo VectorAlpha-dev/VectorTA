@@ -26,7 +26,7 @@
 //! - Decision log: SIMD disabled; CUDA wrapper present for batch and many-series paths; Python CUDA handles expose CAI v3 + DLPack v1.x; numerical outputs match the scalar reference path.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -2343,10 +2343,9 @@ pub fn otto_cuda_batch_dev_py(
             .map(|(h, l, _)| (h, l))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((
-        DeviceArrayF32Py { inner: hott },
-        DeviceArrayF32Py { inner: lott },
-    ))
+    let hott_dev = make_device_array_py(device_id, hott)?;
+    let lott_dev = make_device_array_py(device_id, lott)?;
+    Ok((hott_dev, lott_dev))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2384,10 +2383,9 @@ pub fn otto_cuda_many_series_one_param_dev_py(
         cuda.otto_many_series_one_param_time_major_dev(prices, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((
-        DeviceArrayF32Py { inner: hott },
-        DeviceArrayF32Py { inner: lott },
-    ))
+    let hott_dev = make_device_array_py(device_id, hott)?;
+    let lott_dev = make_device_array_py(device_id, lott)?;
+    Ok((hott_dev, lott_dev))
 }
 
 // ============= TESTS =============

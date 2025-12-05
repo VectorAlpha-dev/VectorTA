@@ -39,7 +39,7 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaDevStop;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -2062,7 +2062,9 @@ pub fn devstop_cuda_batch_dev_py<'py>(
     dict.set_item("periods", periods.into_pyarray(py))?;
     dict.set_item("mults", mults.into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    let handle = make_device_array_py(device_id, inner)?;
+
+    Ok((handle, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2103,7 +2105,7 @@ pub fn devstop_cuda_many_series_one_param_dev_py(
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 /// Fused, single-pass DevStop classic kernel:

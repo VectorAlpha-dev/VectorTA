@@ -2104,11 +2104,9 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::rsx_wrapper::CudaRsx;
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::ffi as pyffi;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::ffi::{c_void, CString};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
@@ -2142,212 +2140,62 @@ impl RsxDeviceArrayF32Py {
 
     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
-        slf: pyo3::PyRef<'py, Self>,
+        &mut self,
         py: Python<'py>,
-        stream: Option<usize>,
-        max_version: Option<(u32, u32)>,
-        dl_device: Option<(i32, i32)>,
-        copy: Option<bool>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<pyo3::PyObject>,
+        dl_device: Option<pyo3::PyObject>,
+        copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
         // Array API stream semantics: producer is already synchronized, so we only validate.
-        if let Some(s) = stream {
-            if s == 0 {
+        if let Some(stream_obj) = stream.as_ref() {
+            if let Ok(s) = stream_obj.extract::<usize>(py) {
+                if s == 0 {
+                    return Err(PyValueError::new_err(
+                        "__dlpack__ stream=0 is invalid for CUDA",
+                    ));
+                }
+            }
+        }
+
+        // Compute target device id and validate `dl_device` hint if provided.
+        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
+                if dev_ty != kdl || dev_id != alloc_dev {
+                    return Err(PyValueError::new_err(
+                        "dl_device mismatch; cross-device copy not supported for RsxDeviceArrayF32",
+                    ));
+                }
+            }
+        }
+
+        // copy=True is not supported for this handle.
+        if let Some(copy_obj) = copy.as_ref() {
+            let do_copy: bool = copy_obj.extract(py)?;
+            if do_copy {
                 return Err(PyValueError::new_err(
-                    "__dlpack__ stream=0 is invalid for CUDA",
+                    "copy=True not supported for RsxDeviceArrayF32",
                 ));
             }
         }
-        if let Some((dev_ty, dev_id)) = dl_device {
-            if dev_ty != 2 || dev_id != slf.device_id as i32 {
-                return Err(PyValueError::new_err(
-                    "dl_device mismatch; cross-device copy not supported for RsxDeviceArrayF32",
-                ));
-            }
-        }
-        if let Some(true) = copy {
-            return Err(PyValueError::new_err(
-                "copy=True not supported for RsxDeviceArrayF32",
-            ));
-        }
 
-        // DLPack v0.6 and v1.x (versioned) producer
-        #[repr(C)]
-        struct DLDevice {
-            device_type: i32,
-            device_id: i32,
-        }
-        #[repr(C)]
-        struct DLDataType {
-            code: u8,
-            bits: u8,
-            lanes: u16,
-        }
-        #[repr(C)]
-        struct DLTensor {
-            data: *mut c_void,
-            device: DLDevice,
-            ndim: i32,
-            dtype: DLDataType,
-            shape: *mut i64,
-            strides: *mut i64,
-            byte_offset: u64,
-        }
-        #[repr(C)]
-        struct DLManagedTensor {
-            dl_tensor: DLTensor,
-            manager_ctx: *mut c_void,
-            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
-        }
-        #[repr(C)]
-        struct DLManagedTensorVersioned {
-            manager: *mut DLManagedTensor,
-            version: u32,
-        }
+        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        use cust::memory::DeviceBuffer;
+        let dummy = DeviceBuffer::<f32>::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+        );
 
-        #[repr(C)]
-        struct ManagerCtx {
-            shape: *mut i64,
-            strides: *mut i64,
-            _shape_box: Box<[i64; 2]>,
-            _strides_box: Box<[i64; 2]>,
-            py_self: *mut pyffi::PyObject,
-        }
+        let rows = inner.rows;
+        let cols = inner.cols;
+        let buf = inner.buf;
 
-        unsafe extern "C" fn capsule_destructor(cap: *mut pyffi::PyObject) {
-            if cap.is_null() {
-                return;
-            }
-            let name_c = unsafe { pyffi::PyCapsule_GetName(cap) };
-            if name_c.is_null() {
-                return;
-            }
-            let name = unsafe { std::ffi::CStr::from_ptr(name_c) }.to_string_lossy();
-            let valid = name == "dltensor" || name == "dltensor_versioned";
-            let ptr = unsafe { pyffi::PyCapsule_GetPointer(cap, name_c as *const _) };
-            if ptr.is_null() || !valid {
-                return;
-            }
-            unsafe {
-                if name == "dltensor_versioned" {
-                    let v = ptr as *mut DLManagedTensorVersioned;
-                    if !v.is_null() {
-                        let mt = (*v).manager;
-                        if !mt.is_null() {
-                            if let Some(del) = (*mt).deleter {
-                                del(mt);
-                            }
-                        }
-                        let _ = Box::from_raw(v);
-                    }
-                } else {
-                    let mt = ptr as *mut DLManagedTensor;
-                    if !mt.is_null() {
-                        if let Some(del) = (*mt).deleter {
-                            del(mt);
-                        }
-                    }
-                }
-            }
-        }
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
-        unsafe extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
-            if p.is_null() {
-                return;
-            }
-            unsafe {
-                let ctx = (*p).manager_ctx as *mut ManagerCtx;
-                if !ctx.is_null() {
-                    let pyobj = (*ctx).py_self;
-                    let _ = Box::from_raw(ctx);
-                    if !pyobj.is_null() {
-                        pyffi::Py_DECREF(pyobj);
-                    }
-                }
-                let _ = Box::from_raw(p);
-            }
-        }
-
-        let rows = slf.inner.rows as i64;
-        let cols = slf.inner.cols as i64;
-        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
-
-        // Allocate shape/strides (elements) and INCREF self so the VRAM buffer outlives the capsule
-        let mut shape_box = Box::new([rows, cols]);
-        let mut strides_box = Box::new([cols, 1]);
-        let shape_ptr = shape_box.as_mut_ptr();
-        let strides_ptr = strides_box.as_mut_ptr();
-        let py_self = slf.as_ptr();
-        unsafe {
-            pyffi::Py_INCREF(py_self);
-        }
-        let mgr = Box::new(ManagerCtx {
-            shape: shape_ptr,
-            strides: strides_ptr,
-            _shape_box: shape_box,
-            _strides_box: strides_box,
-            py_self,
-        });
-        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
-
-        let total_elems = (rows as i128).saturating_mul(cols as i128);
-        let data_ptr = if total_elems == 0 {
-            std::ptr::null_mut()
-        } else {
-            slf.inner.device_ptr() as usize as *mut c_void
-        };
-
-        let mt = Box::new(DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice {
-                    device_type: 2,
-                    device_id: slf.device_id as i32,
-                },
-                ndim: 2,
-                dtype: DLDataType {
-                    code: 2,
-                    bits: 32,
-                    lanes: 1,
-                },
-                shape: shape_ptr,
-                strides: strides_ptr,
-                byte_offset: 0,
-            },
-            manager_ctx: mgr_ptr,
-            deleter: Some(managed_deleter),
-        });
-
-        unsafe {
-            if want_versioned {
-                let wrapped = Box::new(DLManagedTensorVersioned {
-                    manager: Box::into_raw(mt),
-                    version: 1,
-                });
-                let ptr = Box::into_raw(wrapped) as *mut c_void;
-                let name = CString::new("dltensor_versioned").unwrap();
-                let cap =
-                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
-                if cap.is_null() {
-                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
-                    return Err(PyValueError::new_err(
-                        "failed to create versioned DLPack capsule",
-                    ));
-                }
-                Ok(PyObject::from_owned_ptr(py, cap))
-            } else {
-                let ptr = Box::into_raw(mt) as *mut c_void;
-                let name = CString::new("dltensor").unwrap();
-                let cap =
-                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
-                if cap.is_null() {
-                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
-                    return Err(PyValueError::new_err(
-                        "failed to create DLPack capsule",
-                    ));
-                }
-                Ok(PyObject::from_owned_ptr(py, cap))
-            }
-        }
+        export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }
 }
 

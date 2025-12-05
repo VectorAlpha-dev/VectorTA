@@ -39,7 +39,7 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaTrix;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]

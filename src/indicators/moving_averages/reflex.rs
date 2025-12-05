@@ -58,7 +58,7 @@ use crate::cuda::moving_averages::CudaReflex;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -1106,16 +1106,17 @@ pub fn reflex_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py
+    let (inner, ctx, dev_id) = py
         .allow_threads(|| {
             let cuda = CudaReflex::new(device_id)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let arr = cuda
-                .reflex_batch_dev(slice_in, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok::<_, PyErr>(arr)
+            let ctx = cuda.context_arc();
+            let dev_id = device_id as u32;
+            cuda.reflex_batch_dev(slice_in, &sweep)
+                .map(|inner| (inner, ctx, dev_id))
+                .map_err(|e| PyValueError::new_err(e.to_string()))
         })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1141,16 +1142,17 @@ pub fn reflex_cuda_many_series_one_param_dev_py(
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
 
-    let inner = py
+    let (inner, ctx, dev_id) = py
         .allow_threads(|| {
             let cuda = CudaReflex::new(device_id)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let arr = cuda
-                .reflex_many_series_one_param_time_major_dev(flat, cols, rows, period)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok::<_, PyErr>(arr)
+            let ctx = cuda.context_arc();
+            let dev_id = device_id as u32;
+            cuda.reflex_many_series_one_param_time_major_dev(flat, cols, rows, period)
+                .map(|inner| (inner, ctx, dev_id))
+                .map_err(|e| PyValueError::new_err(e.to_string()))
         })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 #[cfg(feature = "python")]

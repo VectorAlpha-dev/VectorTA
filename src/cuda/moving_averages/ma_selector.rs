@@ -914,127 +914,88 @@ impl DeviceArrayF32Sel {
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
-pub struct DeviceArrayF32PySel { inner: DeviceArrayF32Sel }
+pub struct DeviceArrayF32PySel { inner: Option<DeviceArrayF32Sel>, device_id: u32 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pymethods]
 impl DeviceArrayF32PySel {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
         let d = PyDict::new(py);
-        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("shape", (inner.rows, inner.cols))?;
         d.set_item("typestr", "<f4")?;
         // Byte strides; even for contiguous arrays (CAI v3)
-        let row_stride = self
-            .inner
+        let row_stride = inner
             .cols
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| PyValueError::new_err("byte stride overflow"))?;
         d.set_item("strides", (row_stride, std::mem::size_of::<f32>()))?;
-        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
         // Producer work is synchronized before return; omit stream
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.inner.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
-        slf: pyo3::PyRef<'py, Self>,
+        &mut self,
         py: Python<'py>,
-        _stream: Option<isize>,
-        max_version: Option<(u32, u32)>,
-        _dl_device: Option<(i32, i32)>,
-        _copy: Option<bool>,
+        stream: Option<PyObject>,
+        max_version: Option<PyObject>,
+        dl_device: Option<PyObject>,
+        copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        use pyo3::ffi as pyffi;
-        use std::ffi::{c_void, CString};
+        use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        #[repr(C)]
-        struct DLDevice { device_type: i32, device_id: i32 }
-        #[repr(C)]
-        struct DLDataType { code: u8, bits: u8, lanes: u16 }
-        #[repr(C)]
-        struct DLTensor {
-            data: *mut c_void,
-            device: DLDevice,
-            ndim: i32,
-            dtype: DLDataType,
-            shape: *mut i64,
-            strides: *mut i64,
-            byte_offset: u64,
-        }
-        #[repr(C)]
-        struct DLManagedTensor { dl_tensor: DLTensor, manager_ctx: *mut c_void, deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)> }
-        #[repr(C)]
-        struct DLManagedTensorVersioned { manager: *mut DLManagedTensor, version: u32 }
-
-        #[repr(C)]
-        struct ManagerCtx { shape: *mut i64, strides: *mut i64, _shape: Box<[i64; 2]>, _strides: Box<[i64; 2]>, _ctx_guard: Arc<Context>, _self_ref: pyo3::PyObject }
-
-        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
-            if p.is_null() { return; }
-            let mt = Box::from_raw(p);
-            let ctx = mt.manager_ctx as *mut ManagerCtx;
-            if !ctx.is_null() { let _ = Box::from_raw(ctx); }
-        }
-
-        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
-            let name = b"dltensor\0";
-            let ptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
-            if !ptr.is_null() {
-                if let Some(del) = (*ptr).deleter { del(ptr); }
-                let used = b"used_dltensor\0";
-                let _ = pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+        // Compute target device id and validate `dl_device` hint if provided.
+        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
+                if dev_ty != kdl || dev_id != alloc_dev {
+                    let wants_copy = copy
+                        .as_ref()
+                        .and_then(|c| c.extract::<bool>(py).ok())
+                        .unwrap_or(false);
+                    if wants_copy {
+                        return Err(PyValueError::new_err(
+                            "device copy not implemented for __dlpack__",
+                        ));
+                    } else {
+                        return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
+                    }
+                }
             }
         }
 
-        let rows = slf.inner.rows as i64;
-        let cols = slf.inner.cols as i64;
-        let mut shape = Box::new([rows, cols]);
-        let mut strides = Box::new([cols, 1]); // elements per v1.2+
-        let shape_ptr = shape.as_mut_ptr();
-        let strides_ptr = strides.as_mut_ptr();
-        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
-        let mgr = Box::new(ManagerCtx { shape: shape_ptr, strides: strides_ptr, _shape: shape, _strides: strides, _ctx_guard: slf.inner.ctx.clone(), _self_ref: self_ref });
-        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+        // Ignore `stream` parameter: selector kernels synchronize before returning the handle.
+        let _ = stream;
 
-        let data_ptr: *mut c_void = if rows == 0 || cols == 0 { std::ptr::null_mut() } else { slf.inner.device_ptr() as usize as *mut c_void };
-        let tensor = DLTensor {
-            data: data_ptr,
-            device: DLDevice { device_type: 2, device_id: slf.inner.device_id as i32 },
-            ndim: 2,
-            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-            shape: shape_ptr,
-            strides: strides_ptr,
-            byte_offset: 0,
-        };
-        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
-        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
-        unsafe {
-            if want_versioned {
-                let wrapped = Box::new(DLManagedTensorVersioned { manager: Box::into_raw(mt), version: 1 });
-                let ptr = Box::into_raw(wrapped) as *mut c_void;
-                let name = CString::new("dltensor_versioned").unwrap();
-                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
-                if cap.is_null() { let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned); return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create versioned DLPack capsule")); }
-                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
-            } else {
-                let ptr = Box::into_raw(mt) as *mut c_void;
-                let name = CString::new("dltensor").unwrap();
-                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
-                if cap.is_null() { let _ = Box::from_raw(ptr as *mut DLManagedTensor); return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule")); }
-                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
-            }
-        }
+        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        let rows = inner.rows;
+        let cols = inner.cols;
+        let buf = inner.buf;
+
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
+
+        export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-fn not_empty_f32<'a>(arr: PyReadonlyArray1<'a, f32>) -> PyResult<&'a [f32]> {
+fn not_empty_f32(arr: PyReadonlyArray1<'_, f32>) -> PyResult<Vec<f32>> {
     let s = arr.as_slice()?;
-    if s.is_empty() { Err(PyValueError::new_err("empty data")) } else { Ok(s) }
+    if s.is_empty() { Err(PyValueError::new_err("empty data")) } else { Ok(s.to_vec()) }
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1055,20 +1016,21 @@ pub fn ma_selector_cuda_to_device_py(
             let cuda = CudaSma::new(device_id).map_err(|e| e.to_string())?;
             let ctx = cuda.context_arc_clone();
             let dev_id = cuda.device_id();
-            let (dev, _c) = cuda.sma_batch_dev(prices, &sweep).map_err(|e| e.to_string())?;
+            let (dev, _c) = cuda.sma_batch_dev(&prices, &sweep).map_err(|e| e.to_string())?;
             return Ok(DeviceArrayF32Sel { buf: dev.buf, rows: dev.rows, cols: dev.cols, ctx, device_id: dev_id });
         }
         if is("ema") {
             let sweep = crate::indicators::moving_averages::ema::EmaBatchRange { period: (period, period, 0) };
             let cuda = CudaEma::new(device_id).map_err(|e| e.to_string())?;
             let ctx = cuda.context_arc();
-            let dev = cuda.ema_batch_dev(prices, &sweep).map_err(|e| e.to_string())?;
+            let dev = cuda.ema_batch_dev(&prices, &sweep).map_err(|e| e.to_string())?;
             let dev_id = device_id as u32;
             return Ok(DeviceArrayF32Sel { buf: dev.buf, rows: dev.rows, cols: dev.cols, ctx, device_id: dev_id });
         }
         Err(format!("unsupported MA type: {}", ma_type))
     }).map_err(PyValueError::new_err)?;
-    Ok(DeviceArrayF32PySel { inner })
+    let device_id = inner.device_id;
+    Ok(DeviceArrayF32PySel { inner: Some(inner), device_id })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1089,18 +1051,19 @@ pub fn ma_selector_cuda_sweep_to_device_py(
             let cuda = CudaSma::new(device_id).map_err(|e| e.to_string())?;
             let ctx = cuda.context_arc_clone();
             let dev_id = cuda.device_id();
-            let (dev, _c) = cuda.sma_batch_dev(prices, &sweep).map_err(|e| e.to_string())?;
+            let (dev, _c) = cuda.sma_batch_dev(&prices, &sweep).map_err(|e| e.to_string())?;
             return Ok(DeviceArrayF32Sel { buf: dev.buf, rows: dev.rows, cols: dev.cols, ctx, device_id: dev_id });
         }
         if is("ema") {
             let sweep = crate::indicators::moving_averages::ema::EmaBatchRange { period: period_range };
             let cuda = CudaEma::new(device_id).map_err(|e| e.to_string())?;
             let ctx = cuda.context_arc();
-            let dev = cuda.ema_batch_dev(prices, &sweep).map_err(|e| e.to_string())?;
+            let dev = cuda.ema_batch_dev(&prices, &sweep).map_err(|e| e.to_string())?;
             let dev_id = device_id as u32;
             return Ok(DeviceArrayF32Sel { buf: dev.buf, rows: dev.rows, cols: dev.cols, ctx, device_id: dev_id });
         }
         Err(format!("ma_sweep_to_device unsupported for {}", ma_type))
     }).map_err(PyValueError::new_err)?;
-    Ok(DeviceArrayF32PySel { inner })
+    let device_id = inner.device_id;
+    Ok(DeviceArrayF32PySel { inner: Some(inner), device_id })
 }

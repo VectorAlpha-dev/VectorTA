@@ -40,7 +40,7 @@ use wasm_bindgen::prelude::*;
 use crate::cuda::{cuda_available, CudaVlma};
 use crate::indicators::deviation::{deviation, DevInput, DevParams};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;

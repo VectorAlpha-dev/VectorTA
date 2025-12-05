@@ -272,7 +272,6 @@ use crate::indicators::kurtosis::{kurtosis_batch_py, kurtosis_py, KurtosisStream
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::kurtosis::{
     kurtosis_cuda_batch_dev_py, kurtosis_cuda_many_series_one_param_dev_py,
-    KurtosisDeviceArrayF32Py,
 };
 #[cfg(feature = "python")]
 use crate::indicators::kvo::{kvo_batch_py, kvo_py, KvoStreamPy};
@@ -1272,7 +1271,7 @@ use crate::cuda::moving_averages::CudaTsf;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::roc_wrapper::CudaRoc;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::roc::RocBatchRange;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1313,7 +1312,7 @@ pub fn tsf_cuda_batch_dev_py_bindings<'py>(
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((make_device_array_py(device_id, inner)?, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1348,7 +1347,7 @@ pub fn tsf_cuda_many_series_one_param_dev_py_bindings(
         cuda.tsf_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(make_device_array_py(device_id, inner)?)
 }
 
 // ROC CUDA pyfunction shims
@@ -3460,7 +3459,6 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
             kurtosis_cuda_many_series_one_param_dev_py,
             m
         )?)?;
-        m.add_class::<KurtosisDeviceArrayF32Py>()?;
     }
     m.add_class::<KurtosisStreamPy>()?;
 

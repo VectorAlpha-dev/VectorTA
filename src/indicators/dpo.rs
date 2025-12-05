@@ -1702,7 +1702,7 @@ mod tests {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1720,6 +1720,9 @@ use pyo3::types::PyDict;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+pub type DpoDeviceArrayF32Py = DeviceArrayF32Py;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "dpo")]
@@ -1836,7 +1839,7 @@ pub fn dpo_cuda_batch_dev_py<'py>(
     data_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+) -> PyResult<(DpoDeviceArrayF32Py, Bound<'py, PyDict>)> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -1865,7 +1868,8 @@ pub fn dpo_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok((handle, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1876,7 +1880,7 @@ pub fn dpo_cuda_many_series_one_param_dev_py<'py>(
     data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DpoDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -1898,7 +1902,7 @@ pub fn dpo_cuda_many_series_one_param_dev_py<'py>(
         cuda.dpo_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 // ============================================================================

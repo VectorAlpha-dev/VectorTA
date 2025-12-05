@@ -1,0 +1,1498 @@
+    Checking my_project v0.1.0 (/mnt/c/Rust Projects/my_project)
+error: expected argument from function definition `_stream` but got argument `stream`
+    --> src/indicators/correl_hl.rs:1692:25
+     |
+1692 |     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+     |                         ^^^^^^
+
+error: expected argument from function definition `_stream` but got argument `stream`
+    --> src/indicators/moving_averages/mama.rs:3483:27
+     |
+3483 |         #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+     |                           ^^^^^^
+
+error: expected argument from function definition `_stream` but got argument `stream`
+    --> src/indicators/zscore.rs:2216:23
+     |
+2216 |     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+     |                       ^^^^^^
+
+error[E0432]: unresolved import `pyo3::IntoPy`
+    --> src/indicators/correlation_cycle.rs:2883:13
+     |
+2883 |         use pyo3::IntoPy;
+     |             ^^^^^^^^^^^^ no `IntoPy` in the root
+
+error[E0432]: unresolved import `cust::sys::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL`
+    --> src/indicators/dx.rs:2141:52
+     |
+2141 |             use cust::sys::{cuPointerGetAttribute, CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL};
+     |                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL` in the root
+
+error[E0432]: unresolved import `ma_selector_cuda_to_device_py`
+    --> src/bindings/python.rs:1521:24
+     |
+1521 |         m.add_function(wrap_pyfunction!(ma_selector_cuda_to_device_py, m)?)?;
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no external crate `ma_selector_cuda_to_device_py`
+     |
+     = note: this error originates in the macro `wrap_pyfunction` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider importing this module instead
+    -->  /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/macros.rs:144:13
+     |
+144  -         use $function as wrapped_pyfunction;
+144  +         use crate::cuda::moving_averages::ma_selector::ma_selector_cuda_to_device_py as wrapped_pyfunction;
+     |
+
+error[E0432]: unresolved import `ma_selector_cuda_sweep_to_device_py`
+    --> src/bindings/python.rs:1522:24
+     |
+1522 |         m.add_function(wrap_pyfunction!(ma_selector_cuda_sweep_to_device_py, m)?)?;
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no external crate `ma_selector_cuda_sweep_to_device_py`
+     |
+     = note: this error originates in the macro `wrap_pyfunction` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider importing this module instead
+    -->  /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/macros.rs:144:13
+     |
+144  -         use $function as wrapped_pyfunction;
+144  +         use crate::cuda::moving_averages::ma_selector::ma_selector_cuda_sweep_to_device_py as wrapped_pyfunction;
+     |
+
+error: cannot find attribute `pyo3` in this scope
+    --> src/indicators/moving_averages/mama.rs:3680:11
+     |
+3680 |         #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+     |           ^^^^
+     |
+     = note: `pyo3` is in scope, but it is a crate, not an attribute
+
+error[E0424]: expected value, found module `self`
+    --> src/indicators/bandpass.rs:1019:32
+     |
+1011 |     fn __dlpack__<'py>(
+     |        ---------- this function doesn't have a `self` parameter
+...
+1019 |         let (kdl, alloc_dev) = self.__dlpack_device__()?; // (2, device_id)
+     |                                ^^^^ `self` value is a keyword only available in methods with a `self` parameter
+     |
+help: add a `self` receiver parameter to make the associated `fn` a method
+     |
+1012 |         &self, py: Python<'py>,
+     |         ++++++
+
+error[E0424]: expected value, found module `self`
+    --> src/indicators/bandpass.rs:1043:18
+     |
+1011 |     fn __dlpack__<'py>(
+     |        ---------- this function doesn't have a `self` parameter
+...
+1043 |             &mut self.inner,
+     |                  ^^^^ `self` value is a keyword only available in methods with a `self` parameter
+     |
+help: add a `self` receiver parameter to make the associated `fn` a method
+     |
+1012 |         &self, py: Python<'py>,
+     |         ++++++
+
+error[E0425]: cannot find value `CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL` in crate `cust::sys`
+  --> src/indicators/cvi.rs:88:39
+   |
+88 |                 let attr = cust::sys::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
+   |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `cust::sys`
+
+error[E0425]: cannot find value `CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL` in crate `cust::sys`
+    --> src/indicators/dti.rs:1362:35
+     |
+1362 |             let attr = cust::sys::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
+     |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `cust::sys`
+
+error[E0425]: cannot find value `CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL` in crate `cust::sys`
+  --> src/indicators/moving_averages/ehlers_ecema.rs:95:39
+   |
+95 |                 let attr = cust::sys::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
+   |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `cust::sys`
+
+error[E0425]: cannot find function `cuDevicePrimaryCtxRelease` in crate `cust::sys`
+    --> src/indicators/moving_averages/pwma.rs:91:37
+     |
+91   |         unsafe { let _ = cust::sys::cuDevicePrimaryCtxRelease(self.dev); }
+     |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^ help: a function with a similar name exists: `cuDevicePrimaryCtxRelease_v2`
+     |
+    ::: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cust_raw-0.11.3/src/cuda.rs:6982:5
+     |
+6982 |     pub fn cuDevicePrimaryCtxRelease_v2(dev: CUdevice) -> CUresult;
+     |     --------------------------------------------------------------- similarly named function `cuDevicePrimaryCtxRelease_v2` defined here
+
+error[E0425]: cannot find value `CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL` in crate `cust::sys`
+  --> src/indicators/nadaraya_watson_envelope.rs:75:39
+   |
+75 |                 let attr = cust::sys::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
+   |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `cust::sys`
+
+error[E0425]: cannot find value `CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL` in crate `cust::sys`
+  --> src/indicators/vosc.rs:88:39
+   |
+88 |                 let attr = cust::sys::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
+   |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `cust::sys`
+
+error[E0424]: expected value, found module `self`
+    --> src/indicators/vpt.rs:1697:32
+     |
+1689 |     fn __dlpack__<'py>(
+     |        ---------- this function doesn't have a `self` parameter
+...
+1697 |         let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+     |                                ^^^^ `self` value is a keyword only available in methods with a `self` parameter
+     |
+help: add a `self` receiver parameter to make the associated `fn` a method
+     |
+1690 |         &self, py: Python<'py>,
+     |         ++++++
+
+error[E0424]: expected value, found module `self`
+    --> src/indicators/vpt.rs:1718:19
+     |
+1689 |     fn __dlpack__<'py>(
+     |        ---------- this function doesn't have a `self` parameter
+...
+1718 |         let buf = self
+     |                   ^^^^ `self` value is a keyword only available in methods with a `self` parameter
+     |
+help: add a `self` receiver parameter to make the associated `fn` a method
+     |
+1690 |         &self, py: Python<'py>,
+     |         ++++++
+
+error[E0424]: expected value, found module `self`
+    --> src/indicators/vpt.rs:1723:20
+     |
+1689 |     fn __dlpack__<'py>(
+     |        ---------- this function doesn't have a `self` parameter
+...
+1723 |         let rows = self.rows;
+     |                    ^^^^ `self` value is a keyword only available in methods with a `self` parameter
+     |
+help: add a `self` receiver parameter to make the associated `fn` a method
+     |
+1690 |         &self, py: Python<'py>,
+     |         ++++++
+
+error[E0424]: expected value, found module `self`
+    --> src/indicators/vpt.rs:1724:20
+     |
+1689 |     fn __dlpack__<'py>(
+     |        ---------- this function doesn't have a `self` parameter
+...
+1724 |         let cols = self.cols;
+     |                    ^^^^ `self` value is a keyword only available in methods with a `self` parameter
+     |
+help: add a `self` receiver parameter to make the associated `fn` a method
+     |
+1690 |         &self, py: Python<'py>,
+     |         ++++++
+
+error[E0424]: expected value, found module `self`
+    --> src/indicators/wavetrend.rs:1528:32
+     |
+1520 |     fn __dlpack__<'py>(
+     |        ---------- this function doesn't have a `self` parameter
+...
+1528 |         let (kdl, alloc_dev) = self.__dlpack_device__();
+     |                                ^^^^ `self` value is a keyword only available in methods with a `self` parameter
+     |
+help: add a `self` receiver parameter to make the associated `fn` a method
+     |
+1521 |         &self, py: Python<'py>,
+     |         ++++++
+
+error[E0424]: expected value, found module `self`
+    --> src/indicators/wavetrend.rs:1554:18
+     |
+1520 |     fn __dlpack__<'py>(
+     |        ---------- this function doesn't have a `self` parameter
+...
+1554 |             &mut self.inner,
+     |                  ^^^^ `self` value is a keyword only available in methods with a `self` parameter
+     |
+help: add a `self` receiver parameter to make the associated `fn` a method
+     |
+1521 |         &self, py: Python<'py>,
+     |         ++++++
+
+error[E0599]: no method named `into_py` found for tuple `(i32, i32)` in the current scope
+    --> src/indicators/aroon.rs:1416:39
+     |
+1416 |             ((maj as i32, min as i32).into_py(py)).into_bound(py)
+     |                                       ^^^^^^^
+     |
+help: there is a method `into` with a similar name, but with different arguments
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/convert/mod.rs:452:5
+
+error[E0277]: the trait bound `pyo3::Python<'_>: TryFrom<BoundRef<'_, '_, BandPassDeviceArrayF32Py>>` is not satisfied
+    --> src/indicators/bandpass.rs:1012:13
+     |
+1012 |         py: Python<'py>,
+     |             ^^^^^^^^^^^ the trait `From<BoundRef<'_, '_, BandPassDeviceArrayF32Py>>` is not implemented for `pyo3::Python<'_>`
+     |
+     = note: required for `BoundRef<'_, '_, BandPassDeviceArrayF32Py>` to implement `Into<pyo3::Python<'_>>`
+     = note: required for `pyo3::Python<'_>` to implement `TryFrom<BoundRef<'_, '_, BandPassDeviceArrayF32Py>>`
+
+error[E0282]: type annotations needed
+    --> src/indicators/bandpass.rs:3014:9
+     |
+3014 |         Ok((res.outputs, res.combos, dev_id, ctx))
+     |         ^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+     |
+help: consider specifying the generic arguments
+     |
+3014 |         Ok::<(DeviceArrayF32Quad, Vec<bandpass::BandPassParams>, u32, Arc<cust::context::Context>), E>((res.outputs, res.combos, dev_id, ctx))
+     |           ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0282]: type annotations needed
+    --> src/indicators/bandpass.rs:3080:9
+     |
+3080 |         Ok((out, dev_id, ctx))
+     |         ^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+     |
+help: consider specifying the generic arguments
+     |
+3080 |         Ok::<(DeviceArrayF32Quad, u32, Arc<cust::context::Context>), E>((out, dev_id, ctx))
+     |           +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0599]: no method named `extract` found for reference `&&pyo3::PyAny` in the current scope
+    --> src/indicators/bollinger_bands.rs:3430:51
+     |
+3430 |             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>() {
+     |                                                   ^^^^^^^ method not found in `&&pyo3::PyAny`
+
+error[E0599]: no method named `extract` found for reference `&&pyo3::PyAny` in the current scope
+    --> src/indicators/bollinger_bands.rs:3434:41
+     |
+3434 |                         .and_then(|c| c.extract::<bool>().ok())
+     |                                         ^^^^^^^ method not found in `&&pyo3::PyAny`
+
+error[E0599]: no method named `into_py` found for reference `&pyo3::PyAny` in the current scope
+    --> src/indicators/bollinger_bands.rs:3468:59
+     |
+3468 |         let max_version_bound = max_version.map(|obj| obj.into_py(py).into_bound(py));
+     |                                                           ^^^^^^^
+     |
+help: there is a method `into` with a similar name, but with different arguments
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/convert/mod.rs:452:5
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+    --> src/indicators/bollinger_bands.rs:3422:17
+     |
+3422 |         stream: Option<&pyo3::types::PyAny>,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+     |
+     = help: the following other types implement trait `PyClass`:
+               AcoscDeviceArrayF32Py
+               AcoscStreamPy
+               AdDeviceArrayF32Py
+               AdStreamPy
+               AdoscStreamPy
+               AdxStreamPy
+               AdxrDeviceArrayF32Py
+               AdxrStreamPy
+             and 307 others
+     = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+     = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+     = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+     |
+130  | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+     |        ------------------------- required by a bound in this function
+...
+137  |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+    --> src/indicators/bollinger_bands.rs:3423:22
+     |
+3423 |         max_version: Option<&pyo3::types::PyAny>,
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+     |
+     = help: the following other types implement trait `PyClass`:
+               AcoscDeviceArrayF32Py
+               AcoscStreamPy
+               AdDeviceArrayF32Py
+               AdStreamPy
+               AdoscStreamPy
+               AdxStreamPy
+               AdxrDeviceArrayF32Py
+               AdxrStreamPy
+             and 307 others
+     = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+     = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+     = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+     |
+130  | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+     |        ------------------------- required by a bound in this function
+...
+137  |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+    --> src/indicators/bollinger_bands.rs:3424:20
+     |
+3424 |         dl_device: Option<&pyo3::types::PyAny>,
+     |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+     |
+     = help: the following other types implement trait `PyClass`:
+               AcoscDeviceArrayF32Py
+               AcoscStreamPy
+               AdDeviceArrayF32Py
+               AdStreamPy
+               AdoscStreamPy
+               AdxStreamPy
+               AdxrDeviceArrayF32Py
+               AdxrStreamPy
+             and 307 others
+     = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+     = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+     = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+     |
+130  | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+     |        ------------------------- required by a bound in this function
+...
+137  |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+    --> src/indicators/bollinger_bands.rs:3425:15
+     |
+3425 |         copy: Option<&pyo3::types::PyAny>,
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+     |
+     = help: the following other types implement trait `PyClass`:
+               AcoscDeviceArrayF32Py
+               AcoscStreamPy
+               AdDeviceArrayF32Py
+               AdStreamPy
+               AdoscStreamPy
+               AdxStreamPy
+               AdxrDeviceArrayF32Py
+               AdxrStreamPy
+             and 307 others
+     = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+     = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+     = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+     |
+130  | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+     |        ------------------------- required by a bound in this function
+...
+137  |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0599]: no method named `stream` found for struct `cci_wrapper::CudaCci` in the current scope
+    --> src/indicators/cci.rs:2330:14
+     |
+2330 |         cuda.stream()
+     |              ^^^^^^ private field, not a method
+     |
+    ::: src/cuda/cci_wrapper.rs:49:1
+     |
+49   | pub struct CudaCci {
+     | ------------------ method `stream` not found for this struct
+
+error[E0599]: no method named `stream` found for struct `cci_wrapper::CudaCci` in the current scope
+    --> src/indicators/cci.rs:2367:14
+     |
+2367 |         cuda.stream()
+     |              ^^^^^^ private field, not a method
+     |
+    ::: src/cuda/cci_wrapper.rs:49:1
+     |
+49   | pub struct CudaCci {
+     | ------------------ method `stream` not found for this struct
+
+error[E0599]: no method named `into_py` found for tuple `(i32, i32)` in the current scope
+    --> src/indicators/correlation_cycle.rs:2924:53
+     |
+2924 |             max_version.map(|(maj, min)| (maj, min).into_py(py).into_bound(py));
+     |                                                     ^^^^^^^
+     |
+help: there is a method `into` with a similar name, but with different arguments
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/convert/mod.rs:452:5
+
+error[E0308]: mismatched types
+    --> src/indicators/cvi.rs:93:21
+     |
+90   |                   let rc = cust::sys::cuPointerGetAttribute(
+     |                            -------------------------------- arguments to this function are incorrect
+...
+93   | /                     self.buf
+94   | |                         .as_ref()
+95   | |                         .map(|b| b.as_device_ptr().as_raw() as *mut c_void)
+96   | |                         .unwrap_or(std::ptr::null_mut()),
+     | |________________________________________________________^ expected `u64`, found `*mut c_void`
+     |
+     = note:     expected type `u64`
+             found raw pointer `*mut std::ffi::c_void`
+note: function defined here
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cust_raw-0.11.3/src/cuda.rs:7768:12
+     |
+7768 |     pub fn cuPointerGetAttribute(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/indicators/dti.rs:1367:17
+     |
+1364 |             let err = cust::sys::cuPointerGetAttribute(
+     |                       -------------------------------- arguments to this function are incorrect
+...
+1367 |                 self.inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u64`, found `*mut c_void`
+     |
+     = note:     expected type `u64`
+             found raw pointer `*mut std::ffi::c_void`
+note: function defined here
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cust_raw-0.11.3/src/cuda.rs:7768:12
+     |
+7768 |     pub fn cuPointerGetAttribute(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/indicators/dx.rs:2147:17
+     |
+2144 |             let res = cuPointerGetAttribute(
+     |                       --------------------- arguments to this function are incorrect
+...
+2147 |                 ptr,
+     |                 ^^^ expected `u64`, found `*mut c_void`
+     |
+     = note:     expected type `u64`
+             found raw pointer `*mut std::ffi::c_void`
+note: function defined here
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cust_raw-0.11.3/src/cuda.rs:7768:12
+     |
+7768 |     pub fn cuPointerGetAttribute(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `extract` found for reference `&pyo3::PyAny` in the current scope
+    --> src/indicators/er.rs:1430:54
+     |
+1430 |             if let Ok((want_ty, want_dev)) = dev_obj.extract::<(i32, i32)>() {
+     |                                                      ^^^^^^^ method not found in `&pyo3::PyAny`
+
+error[E0599]: no method named `into_py` found for tuple `(i32, i32)` in the current scope
+    --> src/indicators/er.rs:1468:39
+     |
+1468 |             ((maj as i32, min as i32).into_py(py)).into_bound(py)
+     |                                       ^^^^^^^
+     |
+help: there is a method `into` with a similar name, but with different arguments
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/convert/mod.rs:452:5
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+    --> src/indicators/er.rs:1418:17
+     |
+1418 |         stream: Option<&PyAny>,
+     |                 ^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+     |
+     = help: the following other types implement trait `PyClass`:
+               AcoscDeviceArrayF32Py
+               AcoscStreamPy
+               AdDeviceArrayF32Py
+               AdStreamPy
+               AdoscStreamPy
+               AdxStreamPy
+               AdxrDeviceArrayF32Py
+               AdxrStreamPy
+             and 307 others
+     = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+     = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+     = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+     |
+130  | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+     |        ------------------------- required by a bound in this function
+...
+137  |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+    --> src/indicators/er.rs:1420:20
+     |
+1420 |         dl_device: Option<&PyAny>,
+     |                    ^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+     |
+     = help: the following other types implement trait `PyClass`:
+               AcoscDeviceArrayF32Py
+               AcoscStreamPy
+               AdDeviceArrayF32Py
+               AdStreamPy
+               AdoscStreamPy
+               AdxStreamPy
+               AdxrDeviceArrayF32Py
+               AdxrStreamPy
+             and 307 others
+     = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+     = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+     = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+     |
+130  | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+     |        ------------------------- required by a bound in this function
+...
+137  |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0599]: no method named `into_py` found for struct `dlpack_cuda::DeviceArrayF32Py` in the current scope
+    --> src/indicators/ift_rsi.rs:2343:15
+     |
+2343 |     Ok(handle.into_py(py))
+     |               ^^^^^^^
+     |
+    ::: src/utilities/dlpack_cuda.rs:256:1
+     |
+256  | pub struct DeviceArrayF32Py {
+     | --------------------------- method `into_py` not found for this struct
+     |
+help: there is a method `into` with a similar name, but with different arguments
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/convert/mod.rs:452:5
+
+error[E0599]: no method named `into_py` found for struct `dlpack_cuda::DeviceArrayF32Py` in the current scope
+    --> src/indicators/ift_rsi.rs:2377:15
+     |
+2377 |     Ok(handle.into_py(py))
+     |               ^^^^^^^
+     |
+    ::: src/utilities/dlpack_cuda.rs:256:1
+     |
+256  | pub struct DeviceArrayF32Py {
+     | --------------------------- method `into_py` not found for this struct
+     |
+help: there is a method `into` with a similar name, but with different arguments
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/convert/mod.rs:452:5
+
+error[E0609]: no field `line` on type `(DeviceKstPair, Vec<kst::KstParams>)`
+    --> src/indicators/kst.rs:3431:25
+     |
+3431 |             inner: pair.line,
+     |                         ^^^^ unknown field
+
+error[E0609]: no field `signal` on type `(DeviceKstPair, Vec<kst::KstParams>)`
+    --> src/indicators/kst.rs:3436:25
+     |
+3436 |             inner: pair.signal,
+     |                         ^^^^^^ unknown field
+
+error[E0282]: type annotations needed
+    --> src/indicators/marketefi.rs:1011:9
+     |
+1011 |         Ok((inner, ctx, dev))
+     |         ^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+     |
+help: consider specifying the generic arguments
+     |
+1011 |         Ok::<(alma_wrapper::DeviceArrayF32, Arc<cust::context::Context>, u32), E>((inner, ctx, dev))
+     |           +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0282]: type annotations needed
+    --> src/indicators/marketefi.rs:1053:9
+     |
+1053 |         Ok((inner, ctx, dev))
+     |         ^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+     |
+help: consider specifying the generic arguments
+     |
+1053 |         Ok::<(alma_wrapper::DeviceArrayF32, Arc<cust::context::Context>, u32), E>((inner, ctx, dev))
+     |           +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0282]: type annotations needed
+   --> src/indicators/minmax.rs:566:9
+    |
+566 |         Ok((quad, combos, cuda.context_arc(), cuda.device_id()))
+    |         ^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+    |
+help: consider specifying the generic arguments
+    |
+566 |         Ok::<(DeviceMinmaxQuad, Vec<minmax::MinmaxParams>, Arc<cust::context::Context>, u32), E>((quad, combos, cuda.context_arc(), cuda.device_id()))
+    |           ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0282]: type annotations needed
+   --> src/indicators/minmax.rs:665:9
+    |
+665 |         Ok((quad, cuda.context_arc(), cuda.device_id()))
+    |         ^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+    |
+help: consider specifying the generic arguments
+    |
+665 |         Ok::<(DeviceMinmaxQuad, Arc<cust::context::Context>, u32), E>((quad, cuda.context_arc(), cuda.device_id()))
+    |           +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0308]: mismatched types
+    --> src/indicators/moving_averages/ehlers_ecema.rs:100:21
+     |
+97   |                   let rc = cust::sys::cuPointerGetAttribute(
+     |                            -------------------------------- arguments to this function are incorrect
+...
+100  | /                     self.buf
+101  | |                         .as_ref()
+102  | |                         .map(|b| b.as_device_ptr().as_raw() as *mut std::ffi::c_void)
+103  | |                         .unwrap_or(std::ptr::null_mut()),
+     | |________________________________________________________^ expected `u64`, found `*mut c_void`
+     |
+     = note:     expected type `u64`
+             found raw pointer `*mut std::ffi::c_void`
+note: function defined here
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cust_raw-0.11.3/src/cuda.rs:7768:12
+     |
+7768 |     pub fn cuPointerGetAttribute(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `extract` found for reference `&pyo3::PyAny` in the current scope
+   --> src/indicators/moving_averages/ehlers_ecema.rs:126:51
+    |
+126 |                 if let Ok((dev_type, dev_id)) = d.extract::<(i32, i32)>() {
+    |                                                   ^^^^^^^ method not found in `&pyo3::PyAny`
+
+error[E0599]: no method named `extract` found for reference `&&pyo3::PyAny` in the current scope
+   --> src/indicators/moving_averages/ehlers_ecema.rs:130:45
+    |
+130 | ...                   .and_then(|c| c.extract::<bool>().ok())
+    |                                       ^^^^^^^ method not found in `&&pyo3::PyAny`
+
+error[E0599]: no method named `into_py` found for reference `&pyo3::PyAny` in the current scope
+   --> src/indicators/moving_averages/ehlers_ecema.rs:158:32
+    |
+158 |                 .map(|obj| obj.into_py(py).into_bound(py));
+    |                                ^^^^^^^
+    |
+help: there is a method `into` with a similar name, but with different arguments
+   --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/convert/mod.rs:452:5
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+   --> src/indicators/moving_averages/ehlers_ecema.rs:116:21
+    |
+116 |             stream: Option<&pyo3::types::PyAny>,
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+    |
+    = help: the following other types implement trait `PyClass`:
+              AcoscDeviceArrayF32Py
+              AcoscStreamPy
+              AdDeviceArrayF32Py
+              AdStreamPy
+              AdoscStreamPy
+              AdxStreamPy
+              AdxrDeviceArrayF32Py
+              AdxrStreamPy
+            and 307 others
+    = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+    = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+    = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+   --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+    |
+130 | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+    |        ------------------------- required by a bound in this function
+...
+137 |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+   --> src/indicators/moving_averages/ehlers_ecema.rs:117:26
+    |
+117 |             max_version: Option<&pyo3::types::PyAny>,
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+    |
+    = help: the following other types implement trait `PyClass`:
+              AcoscDeviceArrayF32Py
+              AcoscStreamPy
+              AdDeviceArrayF32Py
+              AdStreamPy
+              AdoscStreamPy
+              AdxStreamPy
+              AdxrDeviceArrayF32Py
+              AdxrStreamPy
+            and 307 others
+    = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+    = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+    = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+   --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+    |
+130 | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+    |        ------------------------- required by a bound in this function
+...
+137 |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+   --> src/indicators/moving_averages/ehlers_ecema.rs:118:24
+    |
+118 |             dl_device: Option<&pyo3::types::PyAny>,
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+    |
+    = help: the following other types implement trait `PyClass`:
+              AcoscDeviceArrayF32Py
+              AcoscStreamPy
+              AdDeviceArrayF32Py
+              AdStreamPy
+              AdoscStreamPy
+              AdxStreamPy
+              AdxrDeviceArrayF32Py
+              AdxrStreamPy
+            and 307 others
+    = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+    = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+    = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+   --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+    |
+130 | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+    |        ------------------------- required by a bound in this function
+...
+137 |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+   --> src/indicators/moving_averages/ehlers_ecema.rs:119:19
+    |
+119 |             copy: Option<&pyo3::types::PyAny>,
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+    |
+    = help: the following other types implement trait `PyClass`:
+              AcoscDeviceArrayF32Py
+              AcoscStreamPy
+              AdDeviceArrayF32Py
+              AdStreamPy
+              AdoscStreamPy
+              AdxStreamPy
+              AdxrDeviceArrayF32Py
+              AdxrStreamPy
+            and 307 others
+    = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+    = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+    = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+   --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+    |
+130 | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+    |        ------------------------- required by a bound in this function
+...
+137 |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0599]: no method named `extract` found for reference `&pyo3::PyAny` in the current scope
+    --> src/indicators/moving_averages/ehlers_kama.rs:1506:45
+     |
+1506 |             if let Ok((dev_ty, dev_id)) = d.extract::<(i32, i32)>() {
+     |                                             ^^^^^^^ method not found in `&pyo3::PyAny`
+
+error[E0599]: no method named `extract` found for reference `&&pyo3::PyAny` in the current scope
+    --> src/indicators/moving_averages/ehlers_kama.rs:1510:41
+     |
+1510 |                         .and_then(|c| c.extract::<bool>().ok())
+     |                                         ^^^^^^^ method not found in `&&pyo3::PyAny`
+
+error[E0599]: no method named `into_py` found for reference `&pyo3::PyAny` in the current scope
+    --> src/indicators/moving_averages/ehlers_kama.rs:1541:28
+     |
+1541 |             .map(|obj| obj.into_py(py).into_bound(py));
+     |                            ^^^^^^^
+     |
+help: there is a method `into` with a similar name, but with different arguments
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/convert/mod.rs:452:5
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+    --> src/indicators/moving_averages/ehlers_kama.rs:1495:17
+     |
+1495 |         stream: Option<&pyo3::types::PyAny>,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+     |
+     = help: the following other types implement trait `PyClass`:
+               AcoscDeviceArrayF32Py
+               AcoscStreamPy
+               AdDeviceArrayF32Py
+               AdStreamPy
+               AdoscStreamPy
+               AdxStreamPy
+               AdxrDeviceArrayF32Py
+               AdxrStreamPy
+             and 307 others
+     = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+     = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+     = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+     |
+130  | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+     |        ------------------------- required by a bound in this function
+...
+137  |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+    --> src/indicators/moving_averages/ehlers_kama.rs:1496:22
+     |
+1496 |         max_version: Option<&pyo3::types::PyAny>,
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+     |
+     = help: the following other types implement trait `PyClass`:
+               AcoscDeviceArrayF32Py
+               AcoscStreamPy
+               AdDeviceArrayF32Py
+               AdStreamPy
+               AdoscStreamPy
+               AdxStreamPy
+               AdxrDeviceArrayF32Py
+               AdxrStreamPy
+             and 307 others
+     = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+     = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+     = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+     |
+130  | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+     |        ------------------------- required by a bound in this function
+...
+137  |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+    --> src/indicators/moving_averages/ehlers_kama.rs:1497:20
+     |
+1497 |         dl_device: Option<&pyo3::types::PyAny>,
+     |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+     |
+     = help: the following other types implement trait `PyClass`:
+               AcoscDeviceArrayF32Py
+               AcoscStreamPy
+               AdDeviceArrayF32Py
+               AdStreamPy
+               AdoscStreamPy
+               AdxStreamPy
+               AdxrDeviceArrayF32Py
+               AdxrStreamPy
+             and 307 others
+     = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+     = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+     = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+     |
+130  | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+     |        ------------------------- required by a bound in this function
+...
+137  |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0277]: the trait bound `&pyo3::PyAny: PyFunctionArgument<'_, '_, false>` is not satisfied
+    --> src/indicators/moving_averages/ehlers_kama.rs:1498:15
+     |
+1498 |         copy: Option<&pyo3::types::PyAny>,
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PyClass` is not implemented for `&pyo3::PyAny`
+     |
+     = help: the following other types implement trait `PyClass`:
+               AcoscDeviceArrayF32Py
+               AcoscStreamPy
+               AdDeviceArrayF32Py
+               AdStreamPy
+               AdoscStreamPy
+               AdxStreamPy
+               AdxrDeviceArrayF32Py
+               AdxrStreamPy
+             and 307 others
+     = note: required for `&pyo3::PyAny` to implement `FromPyObject<'_>`
+     = note: required for `&pyo3::PyAny` to implement `FromPyObjectBound<'_, '_>`
+     = note: required for `&pyo3::PyAny` to implement `PyFunctionArgument<'_, '_, false>`
+note: required by a bound in `extract_optional_argument`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/impl_/extract_argument.rs:137:8
+     |
+130  | pub fn extract_optional_argument<'a, 'py, T, const IS_OPTION: bool>(
+     |        ------------------------- required by a bound in this function
+...
+137  |     T: PyFunctionArgument<'a, 'py, IS_OPTION>,
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `extract_optional_argument`
+
+error[E0599]: no method named `into_py` found for tuple `(i32, i32)` in the current scope
+   --> src/indicators/moving_averages/ehlers_pma.rs:249:17
+    |
+249 |             tpl.into_py(py).into_bound(py)
+    |                 ^^^^^^^
+    |
+help: there is a method `into` with a similar name, but with different arguments
+   --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/convert/mod.rs:452:5
+
+error[E0027]: pattern does not mention fields `_ctx`, `_device_id`
+    --> src/indicators/moving_averages/ehlers_pma.rs:1281:17
+     |
+1281 |             let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger } = pair;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing fields `_ctx`, `_device_id`
+     |
+help: include the missing fields in the pattern
+     |
+1281 |             let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger, _ctx, _device_id } = pair;
+     |                                                                                     ++++++++++++++++++
+help: if you don't care about these missing fields, you can explicitly ignore them
+     |
+1281 |             let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger, _ctx: _, _device_id: _ } = pair;
+     |                                                                                     ++++++++++++++++++++++++
+help: or always ignore missing fields here
+     |
+1281 |             let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger, .. } = pair;
+     |                                                                                     ++++
+
+error[E0027]: pattern does not mention fields `_ctx`, `_device_id`
+    --> src/indicators/moving_averages/ehlers_pma.rs:1320:17
+     |
+1320 |             let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger } = pair;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing fields `_ctx`, `_device_id`
+     |
+help: include the missing fields in the pattern
+     |
+1320 |             let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger, _ctx, _device_id } = pair;
+     |                                                                                     ++++++++++++++++++
+help: if you don't care about these missing fields, you can explicitly ignore them
+     |
+1320 |             let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger, _ctx: _, _device_id: _ } = pair;
+     |                                                                                     ++++++++++++++++++++++++
+help: or always ignore missing fields here
+     |
+1320 |             let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger, .. } = pair;
+     |                                                                                     ++++
+
+error[E0599]: no method named `result` found for enum `CUresult` in the current scope
+    --> src/indicators/moving_averages/maaq.rs:2122:18
+     |
+2121 | /             cust::sys::cuDevicePrimaryCtxRetain(&mut ctx as *mut _, dev)
+2122 | |                 .result()
+     | |                 -^^^^^^ method not found in `CUresult`
+     | |_________________|
+     |
+
+error[E0559]: variant `CudaError::UnknownError` has no field named `msg`
+    --> src/indicators/moving_averages/maaq.rs:2123:69
+     |
+2123 |                 .map_err(|e| cust::error::CudaError::UnknownError { msg: format!("cuDevicePrimaryCtxRetain: {:?}", e) })?;
+     |                                                                     ^^^ `CudaError::UnknownError` does not have this field
+     |
+     = note: all struct fields are already assigned
+
+error[E0599]: no method named `result` found for enum `CUresult` in the current scope
+  --> src/indicators/moving_averages/pwma.rs:78:74
+   |
+78 |             cust::sys::cuDevicePrimaryCtxRetain(&mut ctx as *mut _, dev).result()?;
+   |                                                                          ^^^^^^ method not found in `CUresult`
+
+error[E0308]: mismatched types
+    --> src/indicators/nadaraya_watson_envelope.rs:80:21
+     |
+77   |                   let rc = cust::sys::cuPointerGetAttribute(
+     |                            -------------------------------- arguments to this function are incorrect
+...
+80   | /                     self.buf
+81   | |                         .as_ref()
+82   | |                         .map(|b| b.as_device_ptr().as_raw() as *mut c_void)
+83   | |                         .unwrap_or(std::ptr::null_mut()),
+     | |________________________________________________________^ expected `u64`, found `*mut c_void`
+     |
+     = note:     expected type `u64`
+             found raw pointer `*mut std::ffi::c_void`
+note: function defined here
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cust_raw-0.11.3/src/cuda.rs:7768:12
+     |
+7768 |     pub fn cuPointerGetAttribute(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: `*mut PyTypeObject` cannot be sent between threads safely
+    --> src/indicators/stochf.rs:2380:34
+     |
+2380 |     let (pair, ctx, dev_id) = py.allow_threads(|| {
+     |                                  ^^^^^^^^^^^^^ `*mut PyTypeObject` cannot be sent between threads safely
+     |
+     = help: within `Result<(stochf_wrapper::DeviceArrayF32Pair, Arc<cust::context::Context>, u32), PyValueError>`, the trait `Send` is not implemented for `*mut PyTypeObject`
+note: required because it appears within the type `pyo3::ffi::PyObject`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-ffi-0.25.1/src/object.rs:74:12
+     |
+74   | pub struct PyObject {
+     |            ^^^^^^^^
+note: required because it appears within the type `UnsafeCell<pyo3::ffi::PyObject>`
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/cell.rs:2094:12
+note: required because it appears within the type `pyo3::PyAny`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/types/any.rs:33:12
+     |
+33   | pub struct PyAny(UnsafeCell<ffi::PyObject>);
+     |            ^^^^^
+note: required because it appears within the type `PyValueError`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/exceptions.rs:534:24
+     |
+534  | impl_native_exception!(PyValueError, PyExc_ValueError, native_doc!("ValueError"));
+     |                        ^^^^^^^^^^^^
+note: required because it appears within the type `Result<(stochf_wrapper::DeviceArrayF32Pair, Arc<cust::context::Context>, u32), PyValueError>`
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/result.rs:548:10
+     = note: required for `Result<(stochf_wrapper::DeviceArrayF32Pair, Arc<cust::context::Context>, u32), PyValueError>` to implement `Ungil`
+note: required by a bound in `pyo3::Python::<'py>::allow_threads`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/marker.rs:513:12
+     |
+510  |     pub fn allow_threads<T, F>(self, f: F) -> T
+     |            ------------- required by a bound in this associated function
+...
+513  |         T: Ungil,
+     |            ^^^^^ required by this bound in `Python::<'py>::allow_threads`
+
+error[E0277]: `?` couldn't convert the error to `PyValueError`
+    --> src/indicators/stochf.rs:2381:94
+     |
+2381 |         let cuda = CudaStochf::new(device_id).map_err(|e| PyErrValue::new_err(e.to_string()))?;
+     |                    -------------------------- -----------------------------------------------^ the trait `From<pyo3::PyErr>` is not implemented for `PyValueError`
+     |                    |                          |
+     |                    |                          this can't be annotated with `?` because it has type `Result<_, pyo3::PyErr>`
+     |                    this can't be annotated with `?` because it has type `Result<_, CudaStochfError>`
+     |
+     = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+
+error[E0277]: `?` couldn't convert the error to `PyValueError`
+    --> src/indicators/stochf.rs:2386:61
+     |
+2385 |             .stochf_batch_dev(h, l, c, &sweep)
+     |              --------------------------------- this can't be annotated with `?` because it has type `Result<_, CudaStochfError>`
+2386 |             .map_err(|e| PyErrValue::new_err(e.to_string()))?;
+     |              -----------------------------------------------^ the trait `From<pyo3::PyErr>` is not implemented for `PyValueError`
+     |              |
+     |              this can't be annotated with `?` because it has type `Result<_, pyo3::PyErr>`
+     |
+     = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+
+error[E0277]: `?` couldn't convert the error to `pyo3::PyErr`
+    --> src/indicators/stochf.rs:2388:7
+     |
+2366 |   ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+     |        ---------------------------------------------- expected `pyo3::PyErr` because of this
+...
+2380 |       let (pair, ctx, dev_id) = py.allow_threads(|| {
+     |  __________________________________-
+2381 | |         let cuda = CudaStochf::new(device_id).map_err(|e| PyErrValue::new_err(e.to_string()))?;
+2382 | |         let ctx = cuda.context_arc();
+2383 | |         let dev_id = cuda.device_id();
+...    |
+2387 | |         Ok::<_, PyErrValue>((pair, ctx, dev_id))
+2388 | |     })?;
+     | |      -^ the trait `From<PyValueError>` is not implemented for `pyo3::PyErr`
+     | |______|
+     |        this can't be annotated with `?` because it has type `Result<_, PyValueError>`
+     |
+     = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+     = help: the following other types implement trait `From<T>`:
+               `pyo3::PyErr` implements `From<AddrParseError>`
+               `pyo3::PyErr` implements `From<AtrError>`
+               `pyo3::PyErr` implements `From<DecodeUtf16Error>`
+               `pyo3::PyErr` implements `From<DowncastError<'_, '_>>`
+               `pyo3::PyErr` implements `From<DowncastIntoError<'_>>`
+               `pyo3::PyErr` implements `From<FromUtf16Error>`
+               `pyo3::PyErr` implements `From<FromVecError>`
+               `pyo3::PyErr` implements `From<Infallible>`
+             and 18 others
+
+error[E0277]: `*mut PyTypeObject` cannot be sent between threads safely
+    --> src/indicators/stochf.rs:2421:34
+     |
+2421 |     let (k, d, ctx, dev_id) = py.allow_threads(|| {
+     |                                  ^^^^^^^^^^^^^ `*mut PyTypeObject` cannot be sent between threads safely
+     |
+     = help: within `Result<(DeviceArrayF32, DeviceArrayF32, Arc<Context>, u32), ...>`, the trait `Send` is not implemented for `*mut PyTypeObject`
+note: required because it appears within the type `pyo3::ffi::PyObject`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-ffi-0.25.1/src/object.rs:74:12
+     |
+74   | pub struct PyObject {
+     |            ^^^^^^^^
+note: required because it appears within the type `UnsafeCell<pyo3::ffi::PyObject>`
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/cell.rs:2094:12
+note: required because it appears within the type `pyo3::PyAny`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/types/any.rs:33:12
+     |
+33   | pub struct PyAny(UnsafeCell<ffi::PyObject>);
+     |            ^^^^^
+note: required because it appears within the type `PyValueError`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/exceptions.rs:534:24
+     |
+534  | impl_native_exception!(PyValueError, PyExc_ValueError, native_doc!("ValueError"));
+     |                        ^^^^^^^^^^^^
+note: required because it appears within the type `Result<(DeviceArrayF32, DeviceArrayF32, Arc<Context>, u32), ...>`
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/result.rs:548:10
+     = note: required for `Result<(DeviceArrayF32, DeviceArrayF32, Arc<Context>, u32), ...>` to implement `Ungil`
+note: required by a bound in `pyo3::Python::<'py>::allow_threads`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/marker.rs:513:12
+     |
+510  |     pub fn allow_threads<T, F>(self, f: F) -> T
+     |            ------------- required by a bound in this associated function
+...
+513  |         T: Ungil,
+     |            ^^^^^ required by this bound in `Python::<'py>::allow_threads`
+     = note: the full name for the type has been written to '/mnt/c/Rust Projects/my_project/target/debug/deps/my_project-cff0dcac15f0d326.long-type-4062694012852866381.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: `?` couldn't convert the error to `PyValueError`
+    --> src/indicators/stochf.rs:2422:94
+     |
+2422 |         let cuda = CudaStochf::new(device_id).map_err(|e| PyErrValue::new_err(e.to_string()))?;
+     |                    -------------------------- -----------------------------------------------^ the trait `From<pyo3::PyErr>` is not implemented for `PyValueError`
+     |                    |                          |
+     |                    |                          this can't be annotated with `?` because it has type `Result<_, pyo3::PyErr>`
+     |                    this can't be annotated with `?` because it has type `Result<_, CudaStochfError>`
+     |
+     = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+
+error[E0277]: `?` couldn't convert the error to `PyValueError`
+    --> src/indicators/stochf.rs:2427:61
+     |
+2426 |             .stochf_many_series_one_param_time_major_dev(htm, ltm, ctm, cols, rows, &params)
+     |              ------------------------------------------------------------------------------- this can't be annotated with `?` because it has type `Result<_, CudaStochfError>`
+2427 |             .map_err(|e| PyErrValue::new_err(e.to_string()))?;
+     |              -----------------------------------------------^ the trait `From<pyo3::PyErr>` is not implemented for `PyValueError`
+     |              |
+     |              this can't be annotated with `?` because it has type `Result<_, pyo3::PyErr>`
+     |
+     = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+
+error[E0277]: `?` couldn't convert the error to `pyo3::PyErr`
+    --> src/indicators/stochf.rs:2429:7
+     |
+2409 |   ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+     |        ---------------------------------------------- expected `pyo3::PyErr` because of this
+...
+2421 |       let (k, d, ctx, dev_id) = py.allow_threads(|| {
+     |  __________________________________-
+2422 | |         let cuda = CudaStochf::new(device_id).map_err(|e| PyErrValue::new_err(e.to_string()))?;
+2423 | |         let ctx = cuda.context_arc();
+2424 | |         let dev_id = cuda.device_id();
+...    |
+2428 | |         Ok::<_, PyErrValue>((k, d, ctx, dev_id))
+2429 | |     })?;
+     | |      -^ the trait `From<PyValueError>` is not implemented for `pyo3::PyErr`
+     | |______|
+     |        this can't be annotated with `?` because it has type `Result<_, PyValueError>`
+     |
+     = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+     = help: the following other types implement trait `From<T>`:
+               `pyo3::PyErr` implements `From<AddrParseError>`
+               `pyo3::PyErr` implements `From<AtrError>`
+               `pyo3::PyErr` implements `From<DecodeUtf16Error>`
+               `pyo3::PyErr` implements `From<DowncastError<'_, '_>>`
+               `pyo3::PyErr` implements `From<DowncastIntoError<'_>>`
+               `pyo3::PyErr` implements `From<FromUtf16Error>`
+               `pyo3::PyErr` implements `From<FromVecError>`
+               `pyo3::PyErr` implements `From<Infallible>`
+             and 18 others
+
+error[E0282]: type annotations needed
+    --> src/indicators/trix.rs:1248:9
+     |
+1248 |         Ok(arr)
+     |         ^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+     |
+help: consider specifying the generic arguments
+     |
+1248 |         Ok::<alma_wrapper::DeviceArrayF32, E>(arr)
+     |           +++++++++++++++++++++++++++++++++++
+
+error[E0282]: type annotations needed
+    --> src/indicators/trix.rs:1296:9
+     |
+1296 |         Ok(arr)
+     |         ^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+     |
+help: consider specifying the generic arguments
+     |
+1296 |         Ok::<alma_wrapper::DeviceArrayF32, E>(arr)
+     |           +++++++++++++++++++++++++++++++++++
+
+error[E0282]: type annotations needed
+    --> src/indicators/ultosc.rs:2510:9
+     |
+2510 |         Ok((buf, rows, cols, ctx, dev_id))
+     |         ^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+     |
+help: consider specifying the generic arguments
+     |
+2510 |         Ok::<(cust::memory::DeviceBuffer<f32>, usize, usize, Arc<cust::context::Context>, u32), E>((buf, rows, cols, ctx, dev_id))
+     |           ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0282]: type annotations needed
+    --> src/indicators/ultosc.rs:2563:9
+     |
+2563 |         Ok((buf, rows_out, cols_out, ctx, dev_id))
+     |         ^^ cannot infer type of the type parameter `E` declared on the enum `Result`
+     |
+help: consider specifying the generic arguments
+     |
+2563 |         Ok::<(cust::memory::DeviceBuffer<f32>, usize, usize, Arc<cust::context::Context>, u32), E>((buf, rows_out, cols_out, ctx, dev_id))
+     |           ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0599]: no method named `into_py` found for tuple `(i32, i32)` in the current scope
+    --> src/indicators/var.rs:2404:40
+     |
+2404 |             ((maj as i32, min as i32)).into_py(py).into_bound(py)
+     |                                        ^^^^^^^
+     |
+help: there is a method `into` with a similar name, but with different arguments
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/convert/mod.rs:452:5
+
+error[E0308]: mismatched types
+    --> src/indicators/vi.rs:2773:9
+     |
+2773 |       let (pair, combos, ctx, dev_id) = py.allow_threads(|| {
+     |  _________^^^^^^^^^^^^^^^^^^^^^^^^^^^___-
+     | |         |
+     | |         expected a tuple with 3 elements, found one with 4 elements
+2774 | |         let cuda = CudaVi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+2775 | |         let ctx = cuda.context_arc();
+2776 | |         let dev_id = cuda.device_id();
+...    |
+2779 | |             .map_err(|e| PyValueError::new_err(e.to_string()))
+2780 | |     })?;
+     | |_______- this expression has type `((vi_wrapper::DeviceArrayF32Pair, Vec<vi::ViParams>), Arc<cust::context::Context>, u32)`
+     |
+     = note: expected tuple `((vi_wrapper::DeviceArrayF32Pair, Vec<vi::ViParams>), Arc<cust::context::Context>, u32)`
+                found tuple `(_, _, _, _)`
+
+error[E0308]: mismatched types
+    --> src/indicators/vosc.rs:93:21
+     |
+90   |                   let rc = cust::sys::cuPointerGetAttribute(
+     |                            -------------------------------- arguments to this function are incorrect
+...
+93   | /                     self.buf
+94   | |                         .as_ref()
+95   | |                         .map(|b| b.as_device_ptr().as_raw() as *mut c_void)
+96   | |                         .unwrap_or(std::ptr::null_mut()),
+     | |________________________________________________________^ expected `u64`, found `*mut c_void`
+     |
+     = note:     expected type `u64`
+             found raw pointer `*mut std::ffi::c_void`
+note: function defined here
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cust_raw-0.11.3/src/cuda.rs:7768:12
+     |
+7768 |     pub fn cuPointerGetAttribute(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `pyo3::Python<'_>: TryFrom<BoundRef<'_, '_, VptDeviceArrayF32Py>>` is not satisfied
+    --> src/indicators/vpt.rs:1690:13
+     |
+1690 |         py: Python<'py>,
+     |             ^^^^^^^^^^^ the trait `From<BoundRef<'_, '_, VptDeviceArrayF32Py>>` is not implemented for `pyo3::Python<'_>`
+     |
+     = note: required for `BoundRef<'_, '_, VptDeviceArrayF32Py>` to implement `Into<pyo3::Python<'_>>`
+     = note: required for `pyo3::Python<'_>` to implement `TryFrom<BoundRef<'_, '_, VptDeviceArrayF32Py>>`
+
+error[E0277]: the trait bound `pyo3::Python<'_>: TryFrom<BoundRef<'_, '_, WavetrendDeviceArrayF32Py>>` is not satisfied
+    --> src/indicators/wavetrend.rs:1521:13
+     |
+1521 |         py: Python<'py>,
+     |             ^^^^^^^^^^^ the trait `From<BoundRef<'_, '_, WavetrendDeviceArrayF32Py>>` is not implemented for `pyo3::Python<'_>`
+     |
+     = note: required for `BoundRef<'_, '_, WavetrendDeviceArrayF32Py>` to implement `Into<pyo3::Python<'_>>`
+     = note: required for `pyo3::Python<'_>` to implement `TryFrom<BoundRef<'_, '_, WavetrendDeviceArrayF32Py>>`
+
+error[E0277]: expected a `FnOnce()` closure, found `Result<(alma_wrapper::DeviceArrayF32, Arc<cust::context::Context>, u32), pyo3::PyErr>`
+    --> src/indicators/willr.rs:2928:58
+     |
+2928 |     let (inner, ctx, dev_id_u32) = py.allow_threads::<_, PyResult<(DeviceArrayF32, Arc<Context>, u32)>>(|| {
+     |                                       -------------      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected an `FnOnce()` closure, found `Result<(alma_wrapper::DeviceArrayF32, Arc<cust::context::Context>, u32), pyo3::PyErr>`
+     |                                       |
+     |                                       required by a bound introduced by this call
+     |
+     = help: the trait `FnOnce()` is not implemented for `Result<(alma_wrapper::DeviceArrayF32, Arc<cust::context::Context>, u32), pyo3::PyErr>`
+     = note: wrap the `Result<(alma_wrapper::DeviceArrayF32, Arc<cust::context::Context>, u32), pyo3::PyErr>` in a closure with no arguments: `|| { /* code */ }`
+note: required by a bound in `pyo3::Python::<'py>::allow_threads`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/marker.rs:512:20
+     |
+510  |     pub fn allow_threads<T, F>(self, f: F) -> T
+     |            ------------- required by a bound in this associated function
+511  |     where
+512  |         F: Ungil + FnOnce() -> T,
+     |                    ^^^^^^^^^^^^^ required by this bound in `Python::<'py>::allow_threads`
+
+error[E0308]: mismatched types
+    --> src/indicators/willr.rs:2928:105
+     |
+2928 |       let (inner, ctx, dev_id_u32) = py.allow_threads::<_, PyResult<(DeviceArrayF32, Arc<Context>, u32)>>(|| {
+     |  _______________________________________-----------------------------------------------------------------_^
+     | |                                       |
+     | |                                       arguments to this method are incorrect
+2929 | |         let cuda = CudaWillr::new(device_id)
+2930 | |             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+2931 | |         let ctx = cuda.context();
+...    |
+2936 | |         Ok((inner, ctx, dev_id_u32))
+2937 | |     })?;
+     | |_____^ expected `Result<(DeviceArrayF32, ..., u32), ...>`, found closure
+     |
+     = note: expected enum `Result<(alma_wrapper::DeviceArrayF32, Arc<cust::context::Context>, u32), pyo3::PyErr>`
+             found closure `{closure@src/indicators/willr.rs:2928:105: 2928:107}`
+note: method defined here
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/marker.rs:510:12
+     |
+510  |     pub fn allow_threads<T, F>(self, f: F) -> T
+     |            ^^^^^^^^^^^^^
+help: use parentheses to call this closure
+     |
+2928 ~     let (inner, ctx, dev_id_u32) = py.allow_threads::<_, PyResult<(DeviceArrayF32, Arc<Context>, u32)>>((|| {
+2929 |         let cuda = CudaWillr::new(device_id)
+ ...
+2936 |         Ok((inner, ctx, dev_id_u32))
+2937 ~     })())?;
+     |
+
+error[E0277]: expected a `FnOnce()` closure, found `Result<(alma_wrapper::DeviceArrayF32, Arc<cust::context::Context>, u32), pyo3::PyErr>`
+    --> src/indicators/willr.rs:2969:58
+     |
+2969 |     let (inner, ctx, dev_id_u32) = py.allow_threads::<_, PyResult<(DeviceArrayF32, Arc<Context>, u32)>>(|| {
+     |                                       -------------      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected an `FnOnce()` closure, found `Result<(alma_wrapper::DeviceArrayF32, Arc<cust::context::Context>, u32), pyo3::PyErr>`
+     |                                       |
+     |                                       required by a bound introduced by this call
+     |
+     = help: the trait `FnOnce()` is not implemented for `Result<(alma_wrapper::DeviceArrayF32, Arc<cust::context::Context>, u32), pyo3::PyErr>`
+     = note: wrap the `Result<(alma_wrapper::DeviceArrayF32, Arc<cust::context::Context>, u32), pyo3::PyErr>` in a closure with no arguments: `|| { /* code */ }`
+note: required by a bound in `pyo3::Python::<'py>::allow_threads`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/marker.rs:512:20
+     |
+510  |     pub fn allow_threads<T, F>(self, f: F) -> T
+     |            ------------- required by a bound in this associated function
+511  |     where
+512  |         F: Ungil + FnOnce() -> T,
+     |                    ^^^^^^^^^^^^^ required by this bound in `Python::<'py>::allow_threads`
+
+error[E0308]: mismatched types
+    --> src/indicators/willr.rs:2969:105
+     |
+2969 |       let (inner, ctx, dev_id_u32) = py.allow_threads::<_, PyResult<(DeviceArrayF32, Arc<Context>, u32)>>(|| {
+     |  _______________________________________-----------------------------------------------------------------_^
+     | |                                       |
+     | |                                       arguments to this method are incorrect
+2970 | |         let cuda = CudaWillr::new(device_id)
+2971 | |             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+2972 | |         let ctx = cuda.context();
+...    |
+2984 | |         Ok((inner, ctx, dev_id_u32))
+2985 | |     })?;
+     | |_____^ expected `Result<(DeviceArrayF32, ..., u32), ...>`, found closure
+     |
+     = note: expected enum `Result<(alma_wrapper::DeviceArrayF32, Arc<cust::context::Context>, u32), pyo3::PyErr>`
+             found closure `{closure@src/indicators/willr.rs:2969:105: 2969:107}`
+note: method defined here
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-0.25.1/src/marker.rs:510:12
+     |
+510  |     pub fn allow_threads<T, F>(self, f: F) -> T
+     |            ^^^^^^^^^^^^^
+help: use parentheses to call this closure
+     |
+2969 ~     let (inner, ctx, dev_id_u32) = py.allow_threads::<_, PyResult<(DeviceArrayF32, Arc<Context>, u32)>>((|| {
+2970 |         let cuda = CudaWillr::new(device_id)
+ ...
+2984 |         Ok((inner, ctx, dev_id_u32))
+2985 ~     })())?;
+     |
+
+error[E0599]: no method named `extract` found for reference `&pyo3::PyAny` in the current scope
+    --> src/indicators/zscore.rs:2338:47
+     |
+2338 |             if let Ok((dev_ty, dev_id)) = dev.extract::<(i32, i32)>() {
+     |                                               ^^^^^^^ method not found in `&pyo3::PyAny`
+
+error[E0599]: no method named `getattr` found for reference `&pyo3::PyAny` in the current scope
+    --> src/indicators/zscore.rs:2351:15
+     |
+2351 |             v.getattr("__iter")
+     |               ^^^^^^^ method not found in `&pyo3::PyAny`
+
+error[E0599]: no method named `extract` found for reference `&pyo3::PyAny` in the current scope
+    --> src/indicators/zscore.rs:2353:33
+     |
+2353 |                 .and_then(|_| v.extract::<(i32, i32)>().ok())
+     |                                 ^^^^^^^ method not found in `&pyo3::PyAny`
+
+error[E0308]: mismatched types
+    --> src/indicators/zscore.rs:2401:39
+     |
+2401 |                           deleter: Some(|mt| {
+     |  __________________________________----_^
+     | |                                  |
+     | |                                  arguments to this enum variant are incorrect
+2402 | |                             if !mt.is_null() {
+2403 | |                                 let outer = (mt as *mut u8)
+2404 | |                                     .offset(-(std::mem::size_of::<DLVersion>() as isize))
+...    |
+2408 | |                         }),
+     | |_________________________^ expected "C" fn, found "Rust" fn
+     |
+     = note: expected fn pointer `extern "C" fn(*mut ZscoreDeviceArrayF32Py::__dlpack__::DLManagedTensor)`
+                   found closure `{closure@src/indicators/zscore.rs:2401:39: 2401:43}`
+     = note: closure has signature: `fn(*mut ZscoreDeviceArrayF32Py::__dlpack__::DLManagedTensor)`
+help: the type constructed contains `{closure@src/indicators/zscore.rs:2401:39: 2401:43}` due to the type of the argument passed
+    --> src/indicators/zscore.rs:2401:34
+     |
+2401 |                            deleter: Some(|mt| {
+     |   __________________________________^    -
+     |  |_______________________________________|
+2402 | ||                             if !mt.is_null() {
+2403 | ||                                 let outer = (mt as *mut u8)
+2404 | ||                                     .offset(-(std::mem::size_of::<DLVersion>() as isize))
+...    ||
+2408 | ||                         }),
+     | ||_________________________-^
+     | |__________________________|
+     |                            this argument influences the type of `Some`
+note: tuple variant defined here
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/option.rs:599:5
+
+error[E0308]: mismatched types
+    --> src/indicators/zscore.rs:2459:35
+     |
+2459 |                     deleter: Some(deleter_legacy),
+     |                              ---- ^^^^^^^^^^^^^^ expected safe fn, found unsafe fn
+     |                              |
+     |                              arguments to this enum variant are incorrect
+     |
+     = note: expected fn pointer `extern "C" fn(_)`
+                   found fn item `unsafe extern "C" fn(_) {ZscoreDeviceArrayF32Py::__dlpack__::deleter_legacy}`
+     = note: unsafe functions cannot be coerced into safe function pointers
+help: the type constructed contains `unsafe extern "C" fn(*mut ZscoreDeviceArrayF32Py::__dlpack__::DLManagedTensor) {ZscoreDeviceArrayF32Py::__dlpack__::deleter_legacy}` due to the type of the argument passed
+    --> src/indicators/zscore.rs:2459:30
+     |
+2459 |                     deleter: Some(deleter_legacy),
+     |                              ^^^^^--------------^
+     |                                   |
+     |                                   this argument influences the type of `Some`
+note: tuple variant defined here
+    --> /rustc/35f6036521777bdc0dcea1f980be4c192962a168/library/core/src/option.rs:599:5
+
+error[E0063]: missing fields `_ctx` and `device_id` in initializer of `dlpack_cuda::DeviceArrayF32Py`
+    --> src/bindings/python.rs:1375:8
+     |
+1375 |     Ok(DeviceArrayF32Py { inner })
+     |        ^^^^^^^^^^^^^^^^ missing `_ctx` and `device_id`
+
+error[E0063]: missing fields `_ctx` and `device_id` in initializer of `dlpack_cuda::DeviceArrayF32Py`
+    --> src/bindings/python.rs:1404:8
+     |
+1404 |     Ok(DeviceArrayF32Py { inner })
+     |        ^^^^^^^^^^^^^^^^ missing `_ctx` and `device_id`
+
+error[E0308]: mismatched types
+    --> src/bindings/python.rs:1375:27
+     |
+1375 |     Ok(DeviceArrayF32Py { inner })
+     |                           ^^^^^ expected `DeviceArrayF32`, found `DeviceArrayF32Roc`
+
+error[E0308]: mismatched types
+    --> src/bindings/python.rs:1404:27
+     |
+1404 |     Ok(DeviceArrayF32Py { inner })
+     |                           ^^^^^ expected `DeviceArrayF32`, found `DeviceArrayF32Roc`
+
+Some errors have detailed explanations: E0027, E0063, E0277, E0282, E0308, E0424, E0425, E0432, E0559...
+For more information about an error, try `rustc --explain E0027`.
+error: could not compile `my_project` (lib) due to 103 previous errors

@@ -29,6 +29,8 @@ use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -2079,10 +2081,7 @@ pub fn rsi_cuda_batch_dev_py<'py>(
     data_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(
-    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
-    Bound<'py, pyo3::types::PyDict>,
-)> {
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::rsi_wrapper::CudaRsi;
     use numpy::IntoPyArray;
@@ -2117,10 +2116,8 @@ pub fn rsi_cuda_batch_dev_py<'py>(
     }
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((
-        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner },
-        dict,
-    ))
+    let handle = make_device_array_py(device_id, inner)?;
+    Ok((handle, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2131,7 +2128,7 @@ pub fn rsi_cuda_many_series_one_param_dev_py(
     data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::rsi_wrapper::CudaRsi;
     use numpy::PyUntypedArrayMethods;
@@ -2147,7 +2144,7 @@ pub fn rsi_cuda_many_series_one_param_dev_py(
         cuda.rsi_many_series_one_param_time_major_dev(flat, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 #[cfg(feature = "wasm")]

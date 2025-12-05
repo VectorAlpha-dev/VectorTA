@@ -73,7 +73,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::deviation_wrapper::CudaDeviation;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{

@@ -54,7 +54,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaMeanAd;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 
 impl<'a> AsRef<[f64]> for MeanAdInput<'a> {
     #[inline(always)]
@@ -1769,7 +1769,7 @@ pub fn mean_ad_cuda_batch_dev_py<'py>(
         cuda.mean_ad_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1795,7 +1795,7 @@ pub fn mean_ad_cuda_many_series_one_param_dev_py<'py>(
         cuda.mean_ad_many_series_one_param_time_major_dev(slice_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    make_device_array_py(device_id, inner)
 }
 
 #[cfg(feature = "python")]

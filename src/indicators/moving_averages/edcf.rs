@@ -71,7 +71,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 
 // Thread-local storage for WASM dist buffer to avoid repeated allocations
 #[cfg(target_arch = "wasm32")]

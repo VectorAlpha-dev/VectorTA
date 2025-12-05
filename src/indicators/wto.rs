@@ -27,7 +27,7 @@
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaWto, CudaWtoBatchResult, DeviceArrayF32Triplet};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
+use crate::utilities::dlpack_cuda::{DeviceArrayF32Py, make_device_array_py};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]

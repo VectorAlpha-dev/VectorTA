@@ -180,19 +180,6 @@ impl CudaSinwma {
         self.stream.synchronize().map_err(Into::into)
     }
 
-    #[cfg(all(feature = "python", feature = "cuda"))]
-    pub fn py_wrap_device_array(
-        &self,
-        inner: DeviceArrayF32,
-    ) -> crate::cuda::moving_averages::gaussian_wrapper::DeviceArrayF32Py {
-        crate::cuda::moving_averages::gaussian_wrapper::DeviceArrayF32Py::new_from_rust(
-            inner,
-            0usize,
-            Arc::clone(&self._context),
-            self.device_id,
-        )
-    }
-
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);

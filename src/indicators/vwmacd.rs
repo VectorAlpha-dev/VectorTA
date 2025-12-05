@@ -3127,7 +3127,7 @@ pub fn vwmacd_batch_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaVwmacd};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
+use crate::utilities::dlpack_cuda::make_device_array_py;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "vwmacd_cuda_batch_dev")]
