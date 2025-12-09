@@ -696,9 +696,11 @@ fn benchmark_rust_indicator(
     match indicator.rust_name {
         "sma" => {
             let input = sma::SmaInput::from_slice(&data.close, sma::SmaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(sma::sma(input));
+                    sma::sma_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
@@ -706,7 +708,9 @@ fn benchmark_rust_indicator(
             let input = ema::EmaInput::from_slice(&data.close, ema::EmaParams { period: Some(14) });
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(ema::ema(input));
+                    let mut out = vec![0.0; data.len()];
+                    ema::ema_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
@@ -714,7 +718,9 @@ fn benchmark_rust_indicator(
             let input = rsi::RsiInput::from_slice(&data.close, rsi::RsiParams { period: Some(14) });
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(rsi::rsi(input));
+                    let mut out = vec![0.0; data.len()];
+                    rsi::rsi_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
@@ -729,88 +735,113 @@ fn benchmark_rust_indicator(
                     devtype: Some(0),
                 }
             );
+            let mut upper = vec![0.0; data.len()];
+            let mut middle = vec![0.0; data.len()];
+            let mut lower = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(bollinger_bands::bollinger_bands(input));
+                    bollinger_bands::bollinger_bands_into(input, &mut upper, &mut middle, &mut lower).unwrap();
+                    black_box(*upper.last().unwrap_or(&0.0));
                 });
             });
         }
         "atr" => {
             let candles = create_candles(data);
             let input = atr::AtrInput::from_candles(&candles, atr::AtrParams { length: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(atr::atr(input));
+                    atr::atr_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "adx" => {
             let candles = create_candles(data);
             let input = adx::AdxInput::from_candles(&candles, adx::AdxParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(adx::adx(input));
+                    adx::adx_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "ao" => {
             let candles = create_candles(data);
             let input = ao::AoInput::from_candles(&candles, "hl2", ao::AoParams { short_period: Some(5), long_period: Some(34) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(ao::ao(input));
+                    ao::ao_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "aroon" => {
             let candles = create_candles(data);
             let input = aroon::AroonInput::from_candles(&candles, aroon::AroonParams { length: Some(14) });
+            let mut up = vec![0.0; data.len()];
+            let mut down = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(aroon::aroon(input));
+                    aroon::aroon_into(input, &mut up, &mut down).unwrap();
+                    black_box(*up.last().unwrap_or(&0.0));
                 });
             });
         }
         "cci" => {
             let candles = create_candles(data);
             let input = cci::CciInput::from_candles(&candles, "hlc3", cci::CciParams { period: Some(20) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(cci::cci(input));
+                    cci::cci_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "cmo" => {
             let input = cmo::CmoInput::from_slice(&data.close, cmo::CmoParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(cmo::cmo(input));
+                    cmo::cmo_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "plus_di" | "minus_di" => {
             let candles = create_candles(data);
             let input = di::DiInput::from_candles(&candles, di::DiParams { period: Some(14) });
+            let mut plus = vec![0.0; data.len()];
+            let mut minus = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(di::di(input));
+                    di::di_into(input, &mut plus, &mut minus).unwrap();
+                    black_box(*plus.last().unwrap_or(&0.0));
                 });
             });
         }
         "linreg" => {
             let input = linreg::LinRegInput::from_slice(&data.close, linreg::LinRegParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(linreg::linreg(input));
+                    linreg::linreg_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "dmi" => {
             let candles = create_candles(data);
             let input = di::DiInput::from_candles(&candles, di::DiParams { period: Some(14) });
+            let mut plus = vec![0.0; data.len()];
+            let mut minus = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(di::di(input));
+                    di::di_into(input, &mut plus, &mut minus).unwrap();
+                    black_box(*plus.last().unwrap_or(&0.0));
                 });
             });
         }
@@ -819,7 +850,7 @@ fn benchmark_rust_indicator(
                 fast_period: Some(12),
                 slow_period: Some(26),
                 signal_period: Some(9),
-                ma_type: None
+                ma_type: None,
             });
             // Pre-allocate outputs once to avoid per-iter allocations
             let mut macd_buf = vec![0.0; data.len()];
@@ -835,18 +866,22 @@ fn benchmark_rust_indicator(
         "mfi" => {
             let candles = create_candles(data);
             let input = mfi::MfiInput::from_candles(&candles, "hlc3", mfi::MfiParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(mfi::mfi(input));
+                    mfi::mfi_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "obv" => {
             let candles = create_candles(data);
             let input = obv::ObvInput::from_candles(&candles, obv::ObvParams {});
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(obv::obv(input));
+                    obv::obv_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
@@ -854,19 +889,23 @@ fn benchmark_rust_indicator(
             let input = ppo::PpoInput::from_slice(&data.close, ppo::PpoParams {
                 fast_period: Some(12),
                 slow_period: Some(26),
-                ma_type: None
+                ma_type: None,
             });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(ppo::ppo(input));
+                    ppo::ppo_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "roc" => {
             let input = roc::RocInput::from_slice(&data.close, roc::RocParams { period: Some(10) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(roc::roc(input));
+                    roc::roc_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
@@ -879,9 +918,12 @@ fn benchmark_rust_indicator(
                 slowd_period: Some(3),
                 slowd_ma_type: Some("sma".to_string())
             });
+            let mut k = vec![0.0; data.len()];
+            let mut d = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(stoch::stoch(input));
+                    stoch::stoch_into(input, &mut k, &mut d).unwrap();
+                    black_box(*k.last().unwrap_or(&0.0));
                 });
             });
         }
@@ -893,149 +935,186 @@ fn benchmark_rust_indicator(
                 d: Some(3),
                 source: None
             });
+            let mut k = vec![0.0; data.len()];
+            let mut d = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(srsi::srsi(input));
+                    srsi::srsi_into(input, &mut k, &mut d).unwrap();
+                    black_box(*k.last().unwrap_or(&0.0));
                 });
             });
         }
         "trix" => {
             let input = trix::TrixInput::from_slice(&data.close, trix::TrixParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(trix::trix(input));
+                    trix::trix_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "willr" => {
             let candles = create_candles(data);
             let input = willr::WillrInput::from_candles(&candles, willr::WillrParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(willr::willr(input));
+                    willr::willr_into(&mut out, input).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "wma" => {
             let input = wma::WmaInput::from_slice(&data.close, wma::WmaParams { period: Some(10) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(wma::wma(input));
+                    wma::wma_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         // Additional moving averages
         "dema" => {
             let input = dema::DemaInput::from_slice(&data.close, dema::DemaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(dema::dema(input));
+                    dema::dema_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "tema" => {
             let input = tema::TemaInput::from_slice(&data.close, tema::TemaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(tema::tema(input));
+                    tema::tema_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "kama" => {
             let input = kama::KamaInput::from_slice(&data.close, kama::KamaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(kama::kama(input));
+                    kama::kama_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "trima" => {
             let input = trima::TrimaInput::from_slice(&data.close, trima::TrimaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(trima::trima(input));
+                    trima::trima_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "hma" => {
             let input = hma::HmaInput::from_slice(&data.close, hma::HmaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(hma::hma(input));
+                    hma::hma_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "zlema" => {
             let input = zlema::ZlemaInput::from_slice(&data.close, zlema::ZlemaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(zlema::zlema(input));
+                    zlema::zlema_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "vwma" => {
             let candles = create_candles(data);
             let input = vwma::VwmaInput::from_candles(&candles, "close", vwma::VwmaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(vwma::vwma(input));
+                    vwma::vwma_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "vidya" => {
             let input = vidya::VidyaInput::from_slice(&data.close, vidya::VidyaParams { short_period: Some(2), long_period: Some(5), alpha: Some(0.2) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(vidya::vidya(input));
+                    vidya::vidya_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "wilders" => {
             let input = wilders::WildersInput::from_slice(&data.close, wilders::WildersParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(wilders::wilders(input));
+                    wilders::wilders_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         // Additional momentum indicators
         "apo" => {
             let input = apo::ApoInput::from_slice(&data.close, apo::ApoParams { short_period: Some(12), long_period: Some(26) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(apo::apo(input));
+                    apo::apo_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "dpo" => {
             let input = dpo::DpoInput::from_slice(&data.close, dpo::DpoParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(dpo::dpo(input));
+                    dpo::dpo_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "mom" => {
             let input = mom::MomInput::from_slice(&data.close, mom::MomParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(mom::mom(input));
+                    mom::mom_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "rocr" => {
             let input = rocr::RocrInput::from_slice(&data.close, rocr::RocrParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(rocr::rocr(input));
+                    rocr::rocr_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "rocp" => {
             let input = rocp::RocpInput::from_slice(&data.close, rocp::RocpParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(rocp::rocp(input));
+                    rocp::rocp_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
@@ -1043,45 +1122,55 @@ fn benchmark_rust_indicator(
         "ad" => {
             let candles = create_candles(data);
             let input = ad::AdInput::from_candles(&candles, ad::AdParams {});
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(ad::ad(input));
+                    ad::ad_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "adosc" => {
             let candles = create_candles(data);
             let input = adosc::AdoscInput::from_candles(&candles, adosc::AdoscParams { short_period: Some(3), long_period: Some(10) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(adosc::adosc(input));
+                    adosc::adosc_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "nvi" => {
             let candles = create_candles(data);
             let input = nvi::NviInput::from_candles(&candles, "close", nvi::NviParams {});
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(nvi::nvi(input));
+                    nvi::nvi_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "pvi" => {
             let candles = create_candles(data);
             let input = pvi::PviInput::from_candles(&candles, "close", "volume", pvi::PviParams { initial_value: Some(1000.0) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(pvi::pvi(input));
+                    pvi::pvi_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
         "vosc" => {
             let candles = create_candles(data);
             let input = vosc::VoscInput::from_candles(&candles, "volume", vosc::VoscParams { short_period: Some(5), long_period: Some(10) });
+            let mut out = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(vosc::vosc(input));
+                    vosc::vosc_into(input, &mut out).unwrap();
+                    black_box(*out.last().unwrap_or(&0.0));
                 });
             });
         }
@@ -2596,20 +2685,26 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
     match indicator.rust_name {
         "sma" => {
             let input = sma::SmaInput::from_slice(&data.close, sma::SmaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(sma::sma(&input));
+                sma::sma_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "ema" => {
             let input = ema::EmaInput::from_slice(&data.close, ema::EmaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(ema::ema(&input));
+                ema::ema_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "rsi" => {
             let input = rsi::RsiInput::from_slice(&data.close, rsi::RsiParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(rsi::rsi(&input));
+                rsi::rsi_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "bollinger_bands" => {
@@ -2618,8 +2713,12 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
                     period: Some(20), devup: Some(2.0), devdn: Some(2.0),
                     matype: Some("sma".to_string()), devtype: Some(0)
                 });
+            let mut upper = vec![0.0; data.len()];
+            let mut middle = vec![0.0; data.len()];
+            let mut lower = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(bollinger_bands::bollinger_bands(&input));
+                bollinger_bands::bollinger_bands_into(&input, &mut upper, &mut middle, &mut lower).unwrap();
+                black_box(*upper.last().unwrap_or(&0.0));
             }
         }
         "macd" => {
@@ -2628,14 +2727,20 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
                     fast_period: Some(12), slow_period: Some(26),
                     signal_period: Some(9), ma_type: None
                 });
+            let mut macd_buf = vec![0.0; data.len()];
+            let mut sig_buf = vec![0.0; data.len()];
+            let mut hist_buf = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(macd::macd(&input));
+                macd::macd_into(&input, &mut macd_buf, &mut sig_buf, &mut hist_buf).unwrap();
+                black_box(*macd_buf.last().unwrap_or(&0.0));
             }
         }
         "atr" => {
             let input = atr::AtrInput::from_candles(&candles, atr::AtrParams { length: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(atr::atr(&input));
+                atr::atr_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "stoch" => {
@@ -2644,161 +2749,215 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
                     fastk_period: Some(14), slowk_period: Some(3),
                     slowk_ma_type: None, slowd_period: Some(3), slowd_ma_type: None
                 });
+            let mut k = vec![0.0; data.len()];
+            let mut d = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(stoch::stoch(&input));
+                stoch::stoch_into(&input, &mut k, &mut d).unwrap();
+                black_box(*k.last().unwrap_or(&0.0));
             }
         }
         "aroon" => {
             let input = aroon::AroonInput::from_candles(&candles, aroon::AroonParams { length: Some(14) });
+            let mut up = vec![0.0; data.len()];
+            let mut down = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(aroon::aroon(&input));
+                aroon::aroon_into(&input, &mut up, &mut down).unwrap();
+                black_box(*up.last().unwrap_or(&0.0));
             }
         }
         "adx" => {
             let input = adx::AdxInput::from_candles(&candles, adx::AdxParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(adx::adx(&input));
+                adx::adx_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "cci" => {
             let input = cci::CciInput::from_candles(&candles, "hlc3", cci::CciParams { period: Some(20) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(cci::cci(&input));
+                cci::cci_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "dema" => {
             let input = dema::DemaInput::from_slice(&data.close, dema::DemaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(dema::dema(&input));
+                dema::dema_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "tema" => {
             let input = tema::TemaInput::from_slice(&data.close, tema::TemaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(tema::tema(&input));
+                tema::tema_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "wma" => {
             let input = wma::WmaInput::from_slice(&data.close, wma::WmaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(wma::wma(&input));
+                wma::wma_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "kama" => {
             let input = kama::KamaInput::from_slice(&data.close, kama::KamaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(kama::kama(&input));
+                kama::kama_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "trima" => {
             let input = trima::TrimaInput::from_slice(&data.close, trima::TrimaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(trima::trima(&input));
+                trima::trima_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "hma" => {
             let input = hma::HmaInput::from_slice(&data.close, hma::HmaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(hma::hma(&input));
+                hma::hma_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "zlema" => {
             let input = zlema::ZlemaInput::from_slice(&data.close, zlema::ZlemaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(zlema::zlema(&input));
+                zlema::zlema_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "vwma" => {
             let input = vwma::VwmaInput::from_candles(&candles, "close", vwma::VwmaParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(vwma::vwma(&input));
+                vwma::vwma_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "wilders" => {
             let input = wilders::WildersInput::from_slice(&data.close, wilders::WildersParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(wilders::wilders(&input));
+                wilders::wilders_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "apo" => {
             let input = apo::ApoInput::from_slice(&data.close,
                 apo::ApoParams { short_period: Some(12), long_period: Some(26) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(apo::apo(&input));
+                apo::apo_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "cmo" => {
             let input = cmo::CmoInput::from_slice(&data.close, cmo::CmoParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(cmo::cmo(&input));
+                cmo::cmo_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "dpo" => {
             let input = dpo::DpoInput::from_slice(&data.close, dpo::DpoParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(dpo::dpo(&input));
+                dpo::dpo_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "mom" => {
             let input = mom::MomInput::from_slice(&data.close, mom::MomParams { period: Some(10) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(mom::mom(&input));
+                mom::mom_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "ppo" => {
             let input = ppo::PpoInput::from_slice(&data.close,
                 ppo::PpoParams { fast_period: Some(12), slow_period: Some(26), ma_type: None });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(ppo::ppo(&input));
+                ppo::ppo_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "roc" => {
             let input = roc::RocInput::from_slice(&data.close, roc::RocParams { period: Some(10) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(roc::roc(&input));
+                roc::roc_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "rocr" => {
             let input = rocr::RocrInput::from_slice(&data.close, rocr::RocrParams { period: Some(10) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(rocr::rocr(&input));
+                rocr::rocr_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "rocp" => {
             let input = rocp::RocpInput::from_slice(&data.close, rocp::RocpParams { period: Some(10) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(rocp::rocp(&input));
+                rocp::rocp_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "willr" => {
             let input = willr::WillrInput::from_candles(&candles, willr::WillrParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(willr::willr(&input));
+                willr::willr_into(&mut out, &input).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "ad" => {
             let input = ad::AdInput::from_candles(&candles, ad::AdParams {});
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(ad::ad(&input));
+                ad::ad_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "adosc" => {
             let input = adosc::AdoscInput::from_candles(&candles,
                 adosc::AdoscParams { short_period: Some(3), long_period: Some(10) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(adosc::adosc(&input));
+                adosc::adosc_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "obv" => {
             let input = obv::ObvInput::from_candles(&candles, obv::ObvParams {});
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(obv::obv(&input));
+                obv::obv_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "mfi" => {
             let input = mfi::MfiInput::from_candles(&candles, "hlc3", mfi::MfiParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(mfi::mfi(&input));
+                mfi::mfi_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "ao" => {
@@ -2810,238 +2969,403 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
         }
         "bop" => {
             let input = bop::BopInput::from_candles(&candles, bop::BopParams {});
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(bop::bop(&input));
+                bop::bop_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "natr" => {
             let input = natr::NatrInput::from_candles(&candles, natr::NatrParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(natr::natr(&input));
+                natr::natr_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "stddev" => {
             let input = stddev::StdDevInput::from_slice(&data.close, stddev::StdDevParams { period: Some(5), nbdev: Some(1.0) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(stddev::stddev(&input));
+                stddev::stddev_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "var" => {
             let input = var::VarInput::from_slice(&data.close, var::VarParams { period: Some(5), nbdev: Some(1.0) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(var::var(&input));
+                var::var_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "ultosc" => {
             let input = ultosc::UltOscInput::from_candles(&candles, "high", "low", "close",
                 ultosc::UltOscParams { timeperiod1: Some(7), timeperiod2: Some(14), timeperiod3: Some(28) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(ultosc::ultosc(&input));
+                ultosc::ultosc_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "adxr" => {
             let input = adxr::AdxrInput::from_candles(&candles, adxr::AdxrParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(adxr::adxr(&input));
+                adxr::adxr_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "aroonosc" => {
             let input = aroonosc::AroonOscInput::from_candles(&candles, aroonosc::AroonOscParams { length: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(aroonosc::aroon_osc(&input));
+                aroonosc::aroon_osc_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "di" | "dmi" => {
             let input = di::DiInput::from_candles(&candles, di::DiParams { period: Some(14) });
+            let mut plus = vec![0.0; data.len()];
+            let mut minus = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(di::di(&input));
+                di::di_into(&input, &mut plus, &mut minus).unwrap();
+                black_box(*plus.last().unwrap_or(&0.0));
             }
         }
         "dm" => {
             let input = dm::DmInput::from_candles(&candles, dm::DmParams { period: Some(14) });
+            let mut plus = vec![0.0; data.len()];
+            let mut minus = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(dm::dm(&input));
+                dm::dm_into(&input, &mut plus, &mut minus).unwrap();
+                black_box(*plus.last().unwrap_or(&0.0));
             }
         }
         "plus_dm" | "minus_dm" => {
             let input = dm::DmInput::from_candles(&candles, dm::DmParams { period: Some(14) });
+            let mut plus = vec![0.0; data.len()];
+            let mut minus = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(dm::dm(&input));
+                dm::dm_into(&input, &mut plus, &mut minus).unwrap();
+                black_box(*plus.last().unwrap_or(&0.0));
             }
         }
         "dx" => {
             let input = dx::DxInput::from_candles(&candles, dx::DxParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(dx::dx(&input));
+                dx::dx_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "fisher" => {
             let input = fisher::FisherInput::from_candles(&candles, fisher::FisherParams { period: Some(14) });
+            let mut fish = vec![0.0; data.len()];
+            let mut sig = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(fisher::fisher(&input));
+                fisher::fisher_into(&input, &mut fish, &mut sig).unwrap();
+                black_box(*fish.last().unwrap_or(&0.0));
             }
         }
         "fosc" => {
             let input = fosc::FoscInput::from_slice(&data.close, fosc::FoscParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(fosc::fosc(&input));
+                fosc::fosc_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "kvo" => {
             let input = kvo::KvoInput::from_candles(&candles,
                 kvo::KvoParams { short_period: Some(34), long_period: Some(55) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(kvo::kvo(&input));
+                kvo::kvo_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "linearreg_slope" => {
-            let input = linearreg_slope::LinearRegSlopeInput::from_slice(&data.close,
-                linearreg_slope::LinearRegSlopeParams { period: Some(14) });
+            let input = linearreg_slope::LinearRegSlopeInput::from_slice(
+                &data.close,
+                linearreg_slope::LinearRegSlopeParams { period: Some(14) },
+            );
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(linearreg_slope::linearreg_slope(&input));
+                linearreg_slope::linearreg_slope_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "linreg" => {
-            let input = linreg::LinRegInput::from_slice(&data.close, linreg::LinRegParams { period: Some(14) });
+            let input =
+                linreg::LinRegInput::from_slice(&data.close, linreg::LinRegParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(linreg::linreg(&input));
+                linreg::linreg_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "linearreg_intercept" => {
-            let input = linearreg_intercept::LinearRegInterceptInput::from_slice(&data.close,
-                linearreg_intercept::LinearRegInterceptParams { period: Some(14) });
+            let input = linearreg_intercept::LinearRegInterceptInput::from_slice(
+                &data.close,
+                linearreg_intercept::LinearRegInterceptParams { period: Some(14) },
+            );
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(linearreg_intercept::linearreg_intercept(&input));
+                linearreg_intercept::linearreg_intercept_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "mass" => {
-            let input = mass::MassInput::from_candles(&candles, "high", "low",
-                mass::MassParams { period: Some(25) });
+            let input = mass::MassInput::from_candles(
+                &candles,
+                "high",
+                "low",
+                mass::MassParams { period: Some(25) },
+            );
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(mass::mass(&input));
+                mass::mass_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "medprice" => {
-            let input = medprice::MedpriceInput::from_candles(&candles, "high", "low", medprice::MedpriceParams {});
+            let input = medprice::MedpriceInput::from_candles(
+                &candles,
+                "high",
+                "low",
+                medprice::MedpriceParams {},
+            );
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(medprice::medprice(&input));
+                medprice::medprice_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "midpoint" => {
-            let input = midpoint::MidpointInput::from_slice(&data.close, midpoint::MidpointParams { period: Some(14) });
+            let input = midpoint::MidpointInput::from_slice(
+                &data.close,
+                midpoint::MidpointParams { period: Some(14) },
+            );
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(midpoint::midpoint(&input));
+                midpoint::midpoint_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "midprice" => {
-            let input = midprice::MidpriceInput::from_candles(&candles, "high", "low", midprice::MidpriceParams { period: Some(14) });
+            let input = midprice::MidpriceInput::from_candles(
+                &candles,
+                "high",
+                "low",
+                midprice::MidpriceParams { period: Some(14) },
+            );
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(midprice::midprice(&input));
+                midprice::midprice_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "nvi" => {
-            let input = nvi::NviInput::from_candles(&candles, "close", nvi::NviParams {});
+            let input =
+                nvi::NviInput::from_candles(&candles, "close", nvi::NviParams {});
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(nvi::nvi(&input));
+                nvi::nvi_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "pvi" => {
-            let input = pvi::PviInput::from_candles(&candles, "close", "volume", pvi::PviParams { initial_value: Some(1000.0) });
+            let input = pvi::PviInput::from_candles(
+                &candles,
+                "close",
+                "volume",
+                pvi::PviParams { initial_value: Some(1000.0) },
+            );
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(pvi::pvi(&input));
+                pvi::pvi_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "qstick" => {
-            let input = qstick::QstickInput::from_candles(&candles, "open", "close", qstick::QstickParams { period: Some(14) });
+            let input = qstick::QstickInput::from_candles(
+                &candles,
+                "open",
+                "close",
+                qstick::QstickParams { period: Some(14) },
+            );
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(qstick::qstick(&input));
+                qstick::qstick_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "sar" | "psar" => {
-            let input = sar::SarInput::from_candles(&candles,
-                sar::SarParams { acceleration: Some(0.02), maximum: Some(0.2) });
+            let input = sar::SarInput::from_candles(
+                &candles,
+                sar::SarParams { acceleration: Some(0.02), maximum: Some(0.2) },
+            );
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(sar::sar(&input));
+                sar::sar_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "srsi" | "stochrsi" => {
-            let input = srsi::SrsiInput::from_slice(&data.close,
-                srsi::SrsiParams { rsi_period: Some(14), stoch_period: Some(14), k: Some(3), d: Some(3), source: None });
+            let input = srsi::SrsiInput::from_slice(
+                &data.close,
+                srsi::SrsiParams {
+                    rsi_period: Some(14),
+                    stoch_period: Some(14),
+                    k: Some(3),
+                    d: Some(3),
+                    source: None,
+                },
+            );
+            let mut k = vec![0.0; data.len()];
+            let mut d = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(srsi::srsi(&input));
+                srsi::srsi_into(&input, &mut k, &mut d).unwrap();
+                black_box(*k.last().unwrap_or(&0.0));
             }
         }
         "stochf" => {
-            let input = stochf::StochfInput::from_candles(&candles,
-                stochf::StochfParams { fastk_period: Some(5), fastd_period: Some(3), fastd_matype: None });
+            let input = stochf::StochfInput::from_candles(
+                &candles,
+                stochf::StochfParams {
+                    fastk_period: Some(5),
+                    fastd_period: Some(3),
+                    fastd_matype: None,
+                },
+            );
+            let mut k = vec![0.0; data.len()];
+            let mut d = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(stochf::stochf(&input));
+                stochf::stochf_into(&input, &mut k, &mut d).unwrap();
+                black_box(*k.last().unwrap_or(&0.0));
             }
         }
         "trix" => {
-            let input = trix::TrixInput::from_slice(&data.close, trix::TrixParams { period: Some(14) });
+            let input =
+                trix::TrixInput::from_slice(&data.close, trix::TrixParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(trix::trix(&input));
+                trix::trix_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "tsf" => {
-            let input = tsf::TsfInput::from_slice(&data.close, tsf::TsfParams { period: Some(14) });
+            let input =
+                tsf::TsfInput::from_slice(&data.close, tsf::TsfParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(tsf::tsf(&input));
+                tsf::tsf_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "vidya" => {
-            let input = vidya::VidyaInput::from_slice(&data.close,
-                vidya::VidyaParams { short_period: Some(2), long_period: Some(5), alpha: Some(0.2) });
+            let input = vidya::VidyaInput::from_slice(
+                &data.close,
+                vidya::VidyaParams {
+                    short_period: Some(2),
+                    long_period: Some(5),
+                    alpha: Some(0.2),
+                },
+            );
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(vidya::vidya(&input));
+                vidya::vidya_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "vosc" => {
-            let input = vosc::VoscInput::from_candles(&candles, "volume",
-                vosc::VoscParams { short_period: Some(5), long_period: Some(10) });
+            let input = vosc::VoscInput::from_candles(
+                &candles,
+                "volume",
+                vosc::VoscParams {
+                    short_period: Some(5),
+                    long_period: Some(10),
+                },
+            );
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(vosc::vosc(&input));
+                vosc::vosc_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "wad" => {
             let input = wad::WadInput::from_candles(&candles);
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(wad::wad(&input));
+                wad::wad_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "wclprice" | "wcprice" => {
             let input = wclprice::WclpriceInput::from_candles(&candles);
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(wclprice::wclprice(&input));
+                wclprice::wclprice_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "cvi" => {
-            let input = cvi::CviInput::from_candles(&candles, cvi::CviParams { period: Some(14) });
+            let input =
+                cvi::CviInput::from_candles(&candles, cvi::CviParams { period: Some(14) });
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(cvi::cvi(&input));
+                cvi::cvi_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "emv" => {
             let input = emv::EmvInput::from_candles(&candles);
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(emv::emv(&input));
+                emv::emv_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "marketefi" => {
-            let input = marketefi::MarketefiInput::from_candles(&candles, "high", "low", "volume", marketefi::MarketefiParams {});
+            let input = marketefi::MarketefiInput::from_candles(
+                &candles,
+                "high",
+                "low",
+                "volume",
+                marketefi::MarketefiParams {},
+            );
+            let mut out = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(marketefi::marketefi(&input));
+                marketefi::marketefi_into(&input, &mut out).unwrap();
+                black_box(*out.last().unwrap_or(&0.0));
             }
         }
         "minmax" | "minmax_min" => {
-            let input = minmax::MinmaxInput::from_slices(&data.high, &data.low, minmax::MinmaxParams { order: Some(14) });
+            let input = minmax::MinmaxInput::from_slices(
+                &data.high,
+                &data.low,
+                minmax::MinmaxParams { order: Some(14) },
+            );
+            let mut is_min = vec![0.0; data.len()];
+            let mut is_max = vec![0.0; data.len()];
+            let mut last_min = vec![0.0; data.len()];
+            let mut last_max = vec![0.0; data.len()];
             for _ in 0..iterations {
-                let _ = black_box(minmax::minmax(&input));
+                minmax::minmax_into(
+                    &input,
+                    &mut is_min,
+                    &mut is_max,
+                    &mut last_min,
+                    &mut last_max,
+                )
+                .unwrap();
+                black_box(*is_max.last().unwrap_or(&0.0));
             }
         }
         "msw" => {
-            let input = msw::MswInput::from_slice(&data.close, msw::MswParams { period: Some(14) });
+            let input =
+                msw::MswInput::from_slice(&data.close, msw::MswParams { period: Some(14) });
             for _ in 0..iterations {
                 let _ = black_box(msw::msw(&input));
             }

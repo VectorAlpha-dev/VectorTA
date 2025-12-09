@@ -72,18 +72,22 @@ mod nwe_python_cuda_handle {
         fn __dlpack_device__(&self) -> (i32, i32) {
             let mut device_ordinal: i32 = self.device_id as i32;
             unsafe {
-                let attr = cust::sys::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
+                let attr = cust::sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
                 let mut value = std::mem::MaybeUninit::<i32>::uninit();
-                let rc = cust::sys::cuPointerGetAttribute(
-                    value.as_mut_ptr() as *mut c_void,
-                    attr,
-                    self.buf
-                        .as_ref()
-                        .map(|b| b.as_device_ptr().as_raw() as *mut c_void)
-                        .unwrap_or(std::ptr::null_mut()),
-                );
-                if rc == cust::sys::CUresult::CUDA_SUCCESS {
-                    device_ordinal = value.assume_init();
+                let ptr = self
+                    .buf
+                    .as_ref()
+                    .map(|b| b.as_device_ptr().as_raw())
+                    .unwrap_or(0);
+                if ptr != 0 {
+                    let rc = cust::sys::cuPointerGetAttribute(
+                        value.as_mut_ptr() as *mut c_void,
+                        attr,
+                        ptr,
+                    );
+                    if rc == cust::sys::CUresult::CUDA_SUCCESS {
+                        device_ordinal = value.assume_init();
+                    }
                 }
             }
             (2, device_ordinal)

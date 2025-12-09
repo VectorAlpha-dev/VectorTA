@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TA Desktop Demo",
+  "version": "0.1.0",
+  "identifier": "com.example.ta-desktop-demo",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "frontendDist": "../dist",
+    "devUrl": null
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "TA Desktop Demo",
+        "width": 1280,
+        "height": 720
+      }
+    ]
+  }
+}

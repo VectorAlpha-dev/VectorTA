@@ -207,26 +207,31 @@ impl EhlersPmaDeviceArrayF32Py {
     fn __dlpack__<'py>(
         mut slf: pyo3::PyRefMut<'py, Self>,
         py: Python<'py>,
-        stream: Option<usize>,
-        max_version: Option<(u32, u32)>,
-        dl_device: Option<(i32, i32)>,
-        copy: Option<bool>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<pyo3::PyObject>,
+        dl_device: Option<pyo3::PyObject>,
+        copy: Option<pyo3::PyObject>,
     ) -> PyResult<pyo3::PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         // Interpret __dlpack__ arguments per Array API and validate device.
         let (kdl, alloc_dev) = slf.__dlpack_device__();
-        if let Some((dev_ty, dev_id)) = dl_device {
-            if dev_ty != kdl || dev_id != alloc_dev {
-                let wants_copy = copy.unwrap_or(false);
-                if wants_copy {
-                    return Err(PyValueError::new_err(
-                        "device copy not implemented for __dlpack__",
-                    ));
-                } else {
-                    return Err(PyValueError::new_err(
-                        "dl_device mismatch for __dlpack__",
-                    ));
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
+                if dev_ty != kdl || dev_id != alloc_dev {
+                    let wants_copy = copy
+                        .as_ref()
+                        .and_then(|c| c.extract::<bool>(py).ok())
+                        .unwrap_or(false);
+                    if wants_copy {
+                        return Err(PyValueError::new_err(
+                            "device copy not implemented for __dlpack__",
+                        ));
+                    } else {
+                        return Err(PyValueError::new_err(
+                            "dl_device mismatch for __dlpack__",
+                        ));
+                    }
                 }
             }
         }
@@ -244,10 +249,7 @@ impl EhlersPmaDeviceArrayF32Py {
         let cols = inner.cols;
         let buf = inner.buf;
 
-        let max_version_bound = max_version.map(|(maj, min)| {
-            let tpl = (maj as i32, min as i32);
-            tpl.into_py(py).into_bound(py)
-        });
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
         export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }
@@ -1278,7 +1280,7 @@ pub fn ehlers_pma_cuda_batch_dev_py(
             let ctx = cuda.context_arc();
             let did = cuda.device_id();
             let sh = cuda.stream_handle();
-            let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger } = pair;
+            let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger, .. } = pair;
             Ok((predict, trigger, ctx, did, sh))
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1317,7 +1319,7 @@ pub fn ehlers_pma_cuda_many_series_one_param_dev_py(
             let ctx = cuda.context_arc();
             let did = cuda.device_id();
             let sh = cuda.stream_handle();
-            let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger } = pair;
+            let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger, .. } = pair;
             Ok((predict, trigger, ctx, did, sh))
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;

@@ -1366,34 +1366,39 @@ impl AroonDeviceArrayF32Py {
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
-    #[pyo3(signature=(_stream=None, max_version=None, dl_device=None, copy=None))]
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        _stream: Option<usize>,
-        max_version: Option<(u32, u32)>,
-        dl_device: Option<(i32, i32)>,
-        copy: Option<bool>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<pyo3::PyObject>,
+        dl_device: Option<pyo3::PyObject>,
+        copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
         use cust::memory::DeviceBuffer;
-        use pyo3::types::PyAny;
         use pyo3::Bound;
+        use pyo3::types::PyAny;
 
         // Validate dl_device (if provided) against the allocation device.
         let (dev_ty, alloc_dev) = self.__dlpack_device__();
-        if let Some((want_ty, want_dev)) = dl_device {
-            if want_ty != dev_ty || want_dev != alloc_dev {
-                let wants_copy = copy.unwrap_or(false);
-                if wants_copy {
-                    return Err(PyValueError::new_err(
-                        "device copy not implemented for __dlpack__",
-                    ));
-                } else {
-                    return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((want_ty, want_dev)) = dev_obj.extract::<(i32, i32)>(py) {
+                if want_ty != dev_ty || want_dev != alloc_dev {
+                    let wants_copy = copy
+                        .as_ref()
+                        .and_then(|c| c.extract::<bool>(py).ok())
+                        .unwrap_or(false);
+                    if wants_copy {
+                        return Err(PyValueError::new_err(
+                            "device copy not implemented for __dlpack__",
+                        ));
+                    } else {
+                        return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
+                    }
                 }
             }
         }
-        let _ = _stream;
+        let _ = stream;
 
         // Move VRAM handle into the shared DLPack manager; this instance
         // retains only an empty placeholder afterwards.
@@ -1411,10 +1416,9 @@ impl AroonDeviceArrayF32Py {
         let cols = inner.cols;
         let buf = inner.buf;
 
-        // Re-wrap max_version into a Python object for the shared helper.
-        let max_version_bound: Option<Bound<'py, PyAny>> = max_version.map(|(maj, min)| {
-            ((maj as i32, min as i32).into_py(py)).into_bound(py)
-        });
+        // Pass max_version through as a bound Python object for the shared helper.
+        let max_version_bound: Option<Bound<'py, PyAny>> =
+            max_version.map(|obj| obj.into_bound(py));
 
         export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }

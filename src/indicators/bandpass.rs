@@ -1009,6 +1009,7 @@ impl BandPassDeviceArrayF32Py {
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
+        &mut self,
         py: Python<'py>,
         stream: Option<pyo3::PyObject>,
         max_version: Option<pyo3::PyObject>,
@@ -3000,7 +3001,7 @@ pub fn bandpass_cuda_batch_dev_py<'py>(
         period: period_range,
         bandwidth: bandwidth_range,
     };
-    let (outputs, combos, dev_id, ctx) = py.allow_threads(|| {
+    let (outputs, combos, dev_id, ctx) = py.allow_threads(|| -> PyResult<_> {
         let cuda = CudaBandpass::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
@@ -3066,7 +3067,7 @@ pub fn bandpass_cuda_many_series_one_param_dev_py<'py>(
         bandwidth: Some(bandwidth),
     };
 
-    let (outputs, dev_id, ctx) = py.allow_threads(|| {
+    let (outputs, dev_id, ctx) = py.allow_threads(|| -> PyResult<_> {
         let cuda = CudaBandpass::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();

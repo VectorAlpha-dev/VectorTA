@@ -3419,19 +3419,19 @@ impl BollingerDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<&pyo3::types::PyAny>,
-        max_version: Option<&pyo3::types::PyAny>,
-        dl_device: Option<&pyo3::types::PyAny>,
-        copy: Option<&pyo3::types::PyAny>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<pyo3::PyObject>,
+        dl_device: Option<pyo3::PyObject>,
+        copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
         // Validate requested device, if any, against the allocation device.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
-            if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>() {
+            if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
                     let wants_copy = copy
                         .as_ref()
-                        .and_then(|c| c.extract::<bool>().ok())
+                        .and_then(|c| c.extract::<bool>(py).ok())
                         .unwrap_or(false);
                     if wants_copy {
                         return Err(PyValueError::new_err(
@@ -3465,7 +3465,7 @@ impl BollingerDeviceArrayF32Py {
         let cols = inner.cols;
         let buf = inner.buf;
 
-        let max_version_bound = max_version.map(|obj| obj.into_py(py).into_bound(py));
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
         export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }

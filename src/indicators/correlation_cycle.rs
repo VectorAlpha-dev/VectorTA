@@ -2874,36 +2874,42 @@ impl DeviceArrayF32CcPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<i64>,
-        max_version: Option<(i32, i32)>,
-        dl_device: Option<(i32, i32)>,
-        copy: Option<bool>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<pyo3::PyObject>,
+        dl_device: Option<pyo3::PyObject>,
+        copy: Option<pyo3::PyObject>,
     ) -> PyResult<pyo3::PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
-        use pyo3::IntoPy;
 
         // Validate dl_device hint against the allocation device.
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
-        if let Some((dev_ty, dev_id)) = dl_device {
-            if dev_ty != kdl || dev_id != alloc_dev {
-                let wants_copy = copy.unwrap_or(false);
-                if wants_copy {
-                    return Err(PyValueError::new_err(
-                        "device copy not implemented for __dlpack__",
-                    ));
-                } else {
-                    return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
+                if dev_ty != kdl || dev_id != alloc_dev {
+                    let wants_copy = copy
+                        .as_ref()
+                        .and_then(|c| c.extract::<bool>(py).ok())
+                        .unwrap_or(false);
+                    if wants_copy {
+                        return Err(PyValueError::new_err(
+                            "device copy not implemented for __dlpack__",
+                        ));
+                    } else {
+                        return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
+                    }
                 }
             }
         }
 
         // Producer synchronizes its CUDA stream before returning; reject
         // explicitly disallowed stream==0 per Array API semantics.
-        if let Some(s) = stream {
-            if s == 0 {
-                return Err(PyValueError::new_err(
-                    "stream=0 is reserved and not supported by this producer",
-                ));
+        if let Some(obj) = &stream {
+            if let Ok(s) = obj.extract::<i64>(py) {
+                if s == 0 {
+                    return Err(PyValueError::new_err(
+                        "stream=0 is reserved and not supported by this producer",
+                    ));
+                }
             }
         }
 
@@ -2919,9 +2925,8 @@ impl DeviceArrayF32CcPy {
         let cols = inner.cols;
         let buf = inner.buf;
 
-        // Re-wrap max_version tuple as a Python object for the shared helper.
-        let max_version_bound =
-            max_version.map(|(maj, min)| (maj, min).into_py(py).into_bound(py));
+        // Pass max_version through to the shared helper as a bound Python object.
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
         export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }

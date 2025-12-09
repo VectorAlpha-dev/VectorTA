@@ -13,6 +13,7 @@ pub fn grid_search<E: BacktestEngine>(
     engine: &E,
     combos: &[DoubleMaParams],
     objective: ObjectiveKind,
+    num_candles: usize,
 ) -> Option<OptimizationResult> {
     if combos.is_empty() {
         return None;
@@ -45,5 +46,7 @@ pub fn grid_search<E: BacktestEngine>(
         best_params,
         best_metrics,
         all,
+        num_combos: combos.len(),
+        num_candles,
     })
 }

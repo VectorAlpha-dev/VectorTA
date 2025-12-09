@@ -2497,7 +2497,7 @@ pub fn ultosc_cuda_batch_dev_py(
         timeperiod3: timeperiod3_range,
     };
 
-    let (buf, rows, cols, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (buf, rows, cols, ctx_arc, dev_id) = py.allow_threads(|| -> PyResult<_> {
         let cuda = CudaUltosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda
             .ultosc_batch_dev(high_slice, low_slice, close_slice, &sweep)
@@ -2541,7 +2541,7 @@ pub fn ultosc_cuda_many_series_one_param_dev_py(
     let h = high_tm.as_slice()?;
     let l = low_tm.as_slice()?;
     let c = close_tm.as_slice()?;
-    let (buf, rows_out, cols_out, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (buf, rows_out, cols_out, ctx_arc, dev_id) = py.allow_threads(|| -> PyResult<_> {
         let cuda = CudaUltosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda
             .ultosc_many_series_one_param_time_major_dev(

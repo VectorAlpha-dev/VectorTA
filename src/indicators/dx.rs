@@ -2138,13 +2138,13 @@ impl DxDeviceArrayF32Py {
     fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
         // Prefer allocation device via pointer attributes; fallback to stored id.
         unsafe {
-            use cust::sys::{cuPointerGetAttribute, CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL};
+            use cust::sys::cuPointerGetAttribute;
+            let attr = cust::sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
             let mut dev_ordinal: i32 = -1;
-            let mut ptr = self.inner.device_ptr() as *mut std::ffi::c_void;
             let res = cuPointerGetAttribute(
                 &mut dev_ordinal as *mut _ as *mut std::ffi::c_void,
-                CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
-                ptr,
+                attr,
+                self.inner.device_ptr(),
             );
             if res == cust::sys::CUresult::CUDA_SUCCESS && dev_ordinal >= 0 {
                 return Ok((2, dev_ordinal));

@@ -2770,7 +2770,7 @@ pub fn vi_cuda_batch_dev_py<'py>(
     let sweep = ViBatchRange {
         period: period_range,
     };
-    let (pair, combos, ctx, dev_id) = py.allow_threads(|| {
+    let ((pair, combos), ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaVi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

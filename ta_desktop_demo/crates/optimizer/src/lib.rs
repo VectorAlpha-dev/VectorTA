@@ -36,4 +36,6 @@ pub struct OptimizationResult {
     pub best_params: DoubleMaParams,
     pub best_metrics: Metrics,
     pub all: Vec<(DoubleMaParams, Metrics)>,
+    pub num_combos: usize,
+    pub num_candles: usize,
 }

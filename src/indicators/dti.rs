@@ -1359,12 +1359,12 @@ impl DtiDeviceArrayF32Py {
         // Discover allocation device from pointer attributes; fall back to current device.
         let mut device_ordinal: i32 = self.inner.device_id as i32;
         unsafe {
-            let attr = cust::sys::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
+            let attr = cust::sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
             let mut value = std::mem::MaybeUninit::<i32>::uninit();
             let err = cust::sys::cuPointerGetAttribute(
                 value.as_mut_ptr() as *mut std::ffi::c_void,
                 attr,
-                self.inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
+                self.inner.buf.as_device_ptr().as_raw(),
             );
             if err == cust::sys::CUresult::CUDA_SUCCESS {
                 device_ordinal = value.assume_init();

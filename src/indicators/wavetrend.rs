@@ -1518,6 +1518,7 @@ impl WavetrendDeviceArrayF32Py {
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
+        &mut self,
         py: Python<'py>,
         stream: Option<pyo3::PyObject>,
         max_version: Option<pyo3::PyObject>,

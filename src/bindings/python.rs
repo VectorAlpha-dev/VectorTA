@@ -1261,23 +1261,16 @@ use crate::indicators::zscore::{
     zscore_cuda_batch_dev_py, zscore_cuda_many_series_one_param_dev_py,
 };
 
-// Local Python+CUDA wrapper shims for a few indicators whose items are not reliably
-// resolved by wrap_pyfunction! when referenced cross-module. These simply delegate
-// to the same CUDA paths used in the indicator modules, avoiding duplicate logic.
+// Local Python+CUDA helpers. Most indicator CUDA bindings are registered directly
+// from their modules; a few shared utilities (like DeviceArrayF32Py) live in dlpack_cuda.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaTsf;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::roc_wrapper::CudaRoc;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::roc::RocBatchRange;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::tsf::{TsfBatchRange, TsfParams};
-// Redundant with the top-level `use numpy::{IntoPyArray, PyReadonlyArray1, ...};`
-// Keep only PyReadonlyArray2 here; others are already imported module-wide.
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyReadonlyArray2;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1301,9 +1294,7 @@ pub fn tsf_cuda_batch_dev_py_bindings<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_f32.as_slice()?;
-    let sweep = TsfBatchRange {
-        period: period_range,
-    };
+    let sweep = TsfBatchRange { period: period_range };
     let (inner, combos) = py.allow_threads(|| {
         let cuda = CudaTsf::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.tsf_batch_dev(slice_in, &sweep)
@@ -1339,9 +1330,7 @@ pub fn tsf_cuda_many_series_one_param_dev_py_bindings(
             "tsf_cuda_many_series_one_param_dev: time-major input length mismatch",
         ));
     }
-    let params = TsfParams {
-        period: Some(period),
-    };
+    let params = TsfParams { period: Some(period) };
     let inner = py.allow_threads(|| {
         let cuda = CudaTsf::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.tsf_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
@@ -1350,60 +1339,8 @@ pub fn tsf_cuda_many_series_one_param_dev_py_bindings(
     Ok(make_device_array_py(device_id, inner)?)
 }
 
-// ROC CUDA pyfunction shims
-#[cfg(all(feature = "python", feature = "cuda"))]
-#[pyfunction(name = "roc_cuda_batch_dev")]
-#[pyo3(signature = (data, period_range, device_id=0))]
-pub fn roc_cuda_batch_dev_py_bindings(
-    py: Python<'_>,
-    data: PyReadonlyArray1<'_, f32>,
-    period_range: (usize, usize, usize),
-    device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() {
-        return Err(PyValueError::new_err("CUDA not available"));
-    }
-    let prices = data.as_slice()?;
-    let sweep = RocBatchRange {
-        period: period_range,
-    };
-    let inner = py.allow_threads(|| {
-        let cuda = CudaRoc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.roc_batch_dev(prices, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
-    Ok(DeviceArrayF32Py { inner })
-}
-
-#[cfg(all(feature = "python", feature = "cuda"))]
-#[pyfunction(name = "roc_cuda_many_series_one_param_dev")]
-#[pyo3(signature = (data_tm, cols, rows, period, device_id=0))]
-pub fn roc_cuda_many_series_one_param_dev_py_bindings(
-    py: Python<'_>,
-    data_tm: PyReadonlyArray1<'_, f32>,
-    cols: usize,
-    rows: usize,
-    period: usize,
-    device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() {
-        return Err(PyValueError::new_err("CUDA not available"));
-    }
-    let prices_tm = data_tm.as_slice()?;
-    let expected = cols
-        .checked_mul(rows)
-        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
-    if prices_tm.len() != expected {
-        return Err(PyValueError::new_err("time-major input length mismatch"));
-    }
-    let inner = py.allow_threads(|| {
-        let cuda = CudaRoc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.roc_many_series_one_param_time_major_dev(prices_tm, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
-    Ok(DeviceArrayF32Py { inner })
-}
-
+// Older ROC CUDA shim functions have been superseded by the
+// indicator-local `roc_cuda_*` pyfunctions.
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register AD functions with their user-facing names
@@ -1514,6 +1451,9 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
         };
         use crate::indicators::moving_averages::trendflex::{
             trendflex_cuda_batch_dev_py, trendflex_cuda_many_series_one_param_dev_py,
+        };
+        use crate::cuda::moving_averages::ma_selector::{
+            ma_selector_cuda_sweep_to_device_py, ma_selector_cuda_to_device_py,
         };
         m.add_function(wrap_pyfunction!(alma_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(alma_cuda_many_series_one_param_dev_py, m)?)?;
@@ -1997,9 +1937,12 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RocStreamPy>()?;
     #[cfg(all(feature = "python", feature = "cuda"))]
     {
-        m.add_function(wrap_pyfunction!(roc_cuda_batch_dev_py_bindings, m)?)?;
         m.add_function(wrap_pyfunction!(
-            roc_cuda_many_series_one_param_dev_py_bindings,
+            crate::indicators::roc::roc_cuda_batch_dev_py,
+            m
+        )?)?;
+        m.add_function(wrap_pyfunction!(
+            crate::indicators::roc::roc_cuda_many_series_one_param_dev_py,
             m
         )?)?;
     }

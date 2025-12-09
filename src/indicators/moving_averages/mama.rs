@@ -3484,10 +3484,10 @@ pub fn mama_batch_into(
         fn __dlpack_legacy__<'py>(
             &mut self,
             py: pyo3::Python<'py>,
-            _stream: Option<&pyo3::types::PyAny>,
+            stream: Option<&pyo3::types::PyAny>,
             max_version: Option<&pyo3::types::PyAny>,
-            _dl_device: Option<&pyo3::types::PyAny>,
-            _copy: Option<&pyo3::types::PyAny>,
+            dl_device: Option<&pyo3::types::PyAny>,
+            copy: Option<&pyo3::types::PyAny>,
         ) -> pyo3::PyResult<pyo3::PyObject> {
             use std::os::raw::c_char;
 

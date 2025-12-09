@@ -1693,10 +1693,10 @@ impl CorrelHlDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        _stream: Option<usize>,
+        stream: Option<usize>,
         max_version: Option<(u32, u32)>,
-        _dl_device: Option<(i32, i32)>,
-        _copy: Option<bool>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
     ) -> PyResult<PyObject> {
         use pyo3::ffi as pyffi;
         use std::ffi::{c_void, CString};

@@ -1687,6 +1687,7 @@ impl VptDeviceArrayF32Py {
     // Array API stream semantics are accepted but ignored here since the stream is synchronized.
     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
+        &mut self,
         py: Python<'py>,
         stream: Option<pyo3::PyObject>,
         max_version: Option<pyo3::PyObject>,

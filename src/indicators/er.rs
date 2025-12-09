@@ -1415,10 +1415,10 @@ impl DeviceArrayF32ErPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<&PyAny>,
-        max_version: Option<(u32, u32)>,
-        dl_device: Option<&PyAny>,
-        copy: Option<bool>,
+        stream: Option<PyObject>,
+        max_version: Option<PyObject>,
+        dl_device: Option<PyObject>,
+        copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
         use cust::memory::DeviceBuffer;
         use pyo3::types::PyAny;
@@ -1426,8 +1426,8 @@ impl DeviceArrayF32ErPy {
 
         // Validate dl_device (if provided) using the reported allocation device.
         let (dev_ty, alloc_dev) = self.__dlpack_device__();
-        if let Some(dev_obj) = dl_device {
-            if let Ok((want_ty, want_dev)) = dev_obj.extract::<(i32, i32)>() {
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((want_ty, want_dev)) = dev_obj.extract::<(i32, i32)>(py) {
                 if want_ty != dev_ty || want_dev != alloc_dev {
                     return Err(PyValueError::new_err(
                         "__dlpack__ dl_device does not match ER buffer device",
@@ -1464,9 +1464,8 @@ impl DeviceArrayF32ErPy {
             },
         );
 
-        let max_version_bound: Option<Bound<'py, PyAny>> = max_version.map(|(maj, min)| {
-            ((maj as i32, min as i32).into_py(py)).into_bound(py)
-        });
+        let max_version_bound: Option<Bound<'py, PyAny>> =
+            max_version.map(|obj| obj.into_bound(py));
 
         export_f32_cuda_dlpack_2d(py, inner.buf, rows, cols, alloc_dev, max_version_bound)
     }

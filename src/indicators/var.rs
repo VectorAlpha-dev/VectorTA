@@ -2357,33 +2357,39 @@ impl VarDeviceArrayF32Py {
         (2, self.device_id as i32)
     }
 
-    #[pyo3(signature = (_stream=None, max_version=None, dl_device=None, copy=None))]
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
         mut slf: pyo3::PyRefMut<'py, Self>,
         py: Python<'py>,
-        _stream: Option<pyo3::PyObject>,
-        max_version: Option<(u8, u8)>,
-        dl_device: Option<(i32, i32)>,
-        copy: Option<bool>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<pyo3::PyObject>,
+        dl_device: Option<pyo3::PyObject>,
+        copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
         use cust::memory::DeviceBuffer;
 
         // Validate requested device (if any) against this buffer's device.
         let (expected_type, expected_dev) = slf.__dlpack_device__();
-        if let Some((dev_type, dev_id)) = dl_device {
-            if dev_type != expected_type || dev_id != expected_dev {
-                return Err(PyValueError::new_err("dl_device mismatch for VAR buffer"));
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((dev_type, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
+                if dev_type != expected_type || dev_id != expected_dev {
+                    return Err(PyValueError::new_err("dl_device mismatch for VAR buffer"));
+                }
             }
         }
 
         // copy=True is not supported for VAR CUDA buffers.
-        if matches!(copy, Some(true)) {
+        let wants_copy = copy
+            .as_ref()
+            .and_then(|c| c.extract::<bool>(py).ok())
+            .unwrap_or(false);
+        if wants_copy {
             return Err(PyValueError::new_err(
                 "copy=True not supported for VAR DLPack export",
             ));
         }
 
-        let _ = _stream;
+        let _ = stream;
 
         // Move VRAM handle out of this wrapper; the DLPack capsule owns it.
         let dummy = DeviceBuffer::from_slice(&[])
@@ -2399,10 +2405,8 @@ impl VarDeviceArrayF32Py {
             },
         );
 
-        // Repackage max_version into a Python object for the shared helper.
-        let max_version_bound = max_version.map(|(maj, min)| {
-            ((maj as i32, min as i32)).into_py(py).into_bound(py)
-        });
+        // Repackage max_version into a bound Python object for the shared helper.
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
         export_f32_cuda_dlpack_2d(py, inner.buf, rows, cols, expected_dev, max_version_bound)
     }

@@ -1492,22 +1492,22 @@ impl DeviceArrayF32KamaPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<&pyo3::types::PyAny>,
-        max_version: Option<&pyo3::types::PyAny>,
-        dl_device: Option<&pyo3::types::PyAny>,
-        copy: Option<&pyo3::types::PyAny>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<pyo3::PyObject>,
+        dl_device: Option<pyo3::PyObject>,
+        copy: Option<pyo3::PyObject>,
     ) -> PyResult<pyo3::PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
         use cust::memory::DeviceBuffer;
 
         // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__();
-        if let Some(d) = dl_device {
-            if let Ok((dev_ty, dev_id)) = d.extract::<(i32, i32)>() {
+        if let Some(d) = dl_device.as_ref() {
+            if let Ok((dev_ty, dev_id)) = d.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
                     let wants_copy = copy
                         .as_ref()
-                        .and_then(|c| c.extract::<bool>().ok())
+                        .and_then(|c| c.extract::<bool>(py).ok())
                         .unwrap_or(false);
                     if wants_copy {
                         return Err(pyo3::exceptions::PyNotImplementedError::new_err(
@@ -1537,8 +1537,7 @@ impl DeviceArrayF32KamaPy {
         let cols = inner.cols;
         let buf = inner.buf;
 
-        let max_version_bound = max_version
-            .map(|obj| obj.into_py(py).into_bound(py));
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
         export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }

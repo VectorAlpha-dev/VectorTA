@@ -92,18 +92,22 @@ mod ecema_python_cuda_handle {
             // Discover allocation device from pointer attributes when possible.
             let mut device_ordinal: i32 = self.device_id as i32;
             unsafe {
-                let attr = cust::sys::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
+                let attr = cust::sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
                 let mut value = std::mem::MaybeUninit::<i32>::uninit();
-                let rc = cust::sys::cuPointerGetAttribute(
-                    value.as_mut_ptr() as *mut std::ffi::c_void,
-                    attr,
-                    self.buf
-                        .as_ref()
-                        .map(|b| b.as_device_ptr().as_raw() as *mut std::ffi::c_void)
-                        .unwrap_or(std::ptr::null_mut()),
-                );
-                if rc == cust::sys::CUresult::CUDA_SUCCESS {
-                    device_ordinal = value.assume_init();
+                let ptr = self
+                    .buf
+                    .as_ref()
+                    .map(|b| b.as_device_ptr().as_raw())
+                    .unwrap_or(0);
+                if ptr != 0 {
+                    let rc = cust::sys::cuPointerGetAttribute(
+                        value.as_mut_ptr() as *mut std::ffi::c_void,
+                        attr,
+                        ptr,
+                    );
+                    if rc == cust::sys::CUresult::CUDA_SUCCESS {
+                        device_ordinal = value.assume_init();
+                    }
                 }
             }
             (2, device_ordinal)
@@ -113,21 +117,21 @@ mod ecema_python_cuda_handle {
         fn __dlpack__<'py>(
             &mut self,
             py: Python<'py>,
-            stream: Option<&pyo3::types::PyAny>,
-            max_version: Option<&pyo3::types::PyAny>,
-            dl_device: Option<&pyo3::types::PyAny>,
-            copy: Option<&pyo3::types::PyAny>,
+            stream: Option<pyo3::PyObject>,
+            max_version: Option<pyo3::PyObject>,
+            dl_device: Option<pyo3::PyObject>,
+            copy: Option<pyo3::PyObject>,
         ) -> PyResult<PyObject> {
             use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
             // Compute target device id and validate `dl_device` hint if provided.
             let (kdl, alloc_dev) = self.__dlpack_device__();
-            if let Some(d) = dl_device {
-                if let Ok((dev_type, dev_id)) = d.extract::<(i32, i32)>() {
+            if let Some(d) = dl_device.as_ref() {
+                if let Ok((dev_type, dev_id)) = d.extract::<(i32, i32)>(py) {
                     if dev_type != kdl || dev_id != alloc_dev {
                         let wants_copy = copy
                             .as_ref()
-                            .and_then(|c| c.extract::<bool>().ok())
+                            .and_then(|c| c.extract::<bool>(py).ok())
                             .unwrap_or(false);
                         if wants_copy {
                             return Err(PyValueError::new_err(
@@ -154,8 +158,7 @@ mod ecema_python_cuda_handle {
             let rows = self.rows;
             let cols = self.cols;
 
-            let max_version_bound = max_version
-                .map(|obj| obj.into_py(py).into_bound(py));
+            let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
             export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
         }

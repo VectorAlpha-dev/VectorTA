@@ -97,6 +97,27 @@ class TestAlmaCuda:
             msg="ALMA DLPack export mismatch vs CPU",
         )
 
+    def test_alma_cuda_dlpack_device_hint_errors(self, test_data):
+        """Shared DLPack helper: validate dl_device/copy handling."""
+        close = test_data['close']
+        period, offset, sigma = 9, 0.85, 6.0
+
+        handle = ti.alma_cuda_batch_dev(
+            close.astype(np.float32),
+            period_range=(period, period, 0),
+            offset_range=(offset, offset, 0.0),
+            sigma_range=(sigma, sigma, 0.0),
+        )
+
+        kdl, dev = handle.__dlpack_device__()
+        wrong_dev = dev + 1
+
+        with pytest.raises(ValueError, match="dl_device mismatch for __dlpack__"):
+            handle.__dlpack__(dl_device=(kdl, wrong_dev), copy=False)
+
+        with pytest.raises(ValueError, match="device copy not implemented for __dlpack__"):
+            handle.__dlpack__(dl_device=(kdl, wrong_dev), copy=True)
+
     # multi-stream variant removed
 
     def test_alma_cuda_many_series_one_param_matches_cpu(self, test_data):

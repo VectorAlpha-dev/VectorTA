@@ -2319,7 +2319,7 @@ pub fn cci_cuda_batch_dev_py(
     let sweep = CciBatchRange {
         period: period_range,
     };
-    let (inner, dev_id, ctx, stream) = py.allow_threads(|| {
+    let (inner, dev_id, ctx, stream) = py.allow_threads(|| -> PyResult<_> {
         let cuda =
             CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
@@ -2356,7 +2356,7 @@ pub fn cci_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = data_tm.as_slice()?;
-    let (inner, dev_id, ctx, stream) = py.allow_threads(|| {
+    let (inner, dev_id, ctx, stream) = py.allow_threads(|| -> PyResult<_> {
         let cuda =
             CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();

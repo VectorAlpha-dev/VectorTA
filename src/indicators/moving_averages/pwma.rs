@@ -75,7 +75,10 @@ impl PrimaryCtxGuardPwma {
         unsafe {
             let mut ctx: cust::sys::CUcontext = core::ptr::null_mut();
             let dev = device_id as i32;
-            cust::sys::cuDevicePrimaryCtxRetain(&mut ctx as *mut _, dev).result()?;
+            let rc = cust::sys::cuDevicePrimaryCtxRetain(&mut ctx as *mut _, dev);
+            if rc != cust::sys::CUresult::CUDA_SUCCESS {
+                return Err(cust::error::CudaError::UnknownError);
+            }
             Ok(PrimaryCtxGuardPwma { dev, ctx })
         }
     }
@@ -88,7 +91,7 @@ impl PrimaryCtxGuardPwma {
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl Drop for PrimaryCtxGuardPwma {
     fn drop(&mut self) {
-        unsafe { let _ = cust::sys::cuDevicePrimaryCtxRelease(self.dev); }
+        unsafe { let _ = cust::sys::cuDevicePrimaryCtxRelease_v2(self.dev); }
     }
 }
 

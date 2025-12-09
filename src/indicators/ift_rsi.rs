@@ -2321,7 +2321,7 @@ pub fn ift_rsi_cuda_batch_dev_py(
     rsi_range: (usize, usize, usize),
     wma_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<PyObject> {
+) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::CudaIftRsi;
     if !cuda_available() {
@@ -2340,7 +2340,7 @@ pub fn ift_rsi_cuda_batch_dev_py(
         Ok::<_, PyErr>((dev, dev_id, ctx))
     })?;
     let handle = DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) };
-    Ok(handle.into_py(py))
+    Ok(handle)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2352,7 +2352,7 @@ pub fn ift_rsi_cuda_many_series_one_param_dev_py(
     rsi_period: usize,
     wma_period: usize,
     device_id: usize,
-) -> PyResult<PyObject> {
+) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::CudaIftRsi;
     use numpy::PyUntypedArrayMethods;
@@ -2374,7 +2374,7 @@ pub fn ift_rsi_cuda_many_series_one_param_dev_py(
         Ok::<_, PyErr>((dev, dev_id, ctx))
     })?;
     let handle = DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) };
-    Ok(handle.into_py(py))
+    Ok(handle)
 }
 
 #[cfg(feature = "wasm")]

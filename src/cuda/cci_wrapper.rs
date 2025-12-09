@@ -106,6 +106,11 @@ impl CudaCci {
     }
 
     #[inline]
+    pub fn stream(&self) -> &Stream {
+        &self.stream
+    }
+
+    #[inline]
     pub fn stream_handle_usize(&self) -> usize {
         self.stream.as_inner() as usize
     }

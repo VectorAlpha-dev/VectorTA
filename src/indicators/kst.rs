@@ -3424,7 +3424,7 @@ pub fn kst_cuda_batch_dev_py(
         let dev = cuda.device_id();
         cuda.kst_batch_dev(prices, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
-            .map(|res| (res, ctx, dev))
+            .map(|(pair, _combos)| (pair, ctx, dev))
     })?;
     Ok((
         DeviceArrayF32Py {
@@ -3488,7 +3488,7 @@ pub fn kst_cuda_many_series_one_param_dev_py(
         let dev = cuda.device_id();
         cuda.kst_many_series_one_param_time_major_dev(prices_tm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
-            .map(|res| (res, ctx, dev))
+            .map(|pair| (pair, ctx, dev))
     })?;
     Ok((
         DeviceArrayF32Py {

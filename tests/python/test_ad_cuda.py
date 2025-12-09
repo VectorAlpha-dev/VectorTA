@@ -72,3 +72,28 @@ class TestAdCuda:
             msg="CUDA AD series mismatch",
         )
 
+    def test_ad_cuda_dlpack_matches_cuda_array_interface(self, test_data):
+        """Shared DLPack helper: AD handle round-trips via DLPack."""
+        high = test_data["high"][:512].astype(np.float64)
+        low = test_data["low"][:512].astype(np.float64)
+        close = test_data["close"][:512].astype(np.float64)
+        volume = test_data["volume"][:512].astype(np.float64)
+
+        handle = ti.ad_cuda_dev(
+            high.astype(np.float32),
+            low.astype(np.float32),
+            close.astype(np.float32),
+            volume.astype(np.float32),
+        )
+
+        gpu_cai = cp.asarray(handle)
+        gpu_dlpack = cp.fromDlpack(handle)
+
+        assert gpu_cai.shape == gpu_dlpack.shape
+        assert_close(
+            cp.asnumpy(gpu_dlpack),
+            cp.asnumpy(gpu_cai),
+            rtol=1e-6,
+            atol=1e-6,
+            msg="AD DLPack vs __cuda_array_interface__ mismatch",
+        )

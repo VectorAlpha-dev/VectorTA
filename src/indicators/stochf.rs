@@ -2351,6 +2351,8 @@ use crate::cuda::{cuda_available, CudaStochf};
 use numpy::PyReadonlyArray1;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::exceptions::PyValueError as PyErrValue;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::PyErr;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "stochf_cuda_batch_dev")]
@@ -2384,7 +2386,7 @@ pub fn stochf_cuda_batch_dev_py(
         let (pair, _combos) = cuda
             .stochf_batch_dev(h, l, c, &sweep)
             .map_err(|e| PyErrValue::new_err(e.to_string()))?;
-        Ok::<_, PyErrValue>((pair, ctx, dev_id))
+        Ok::<_, PyErr>((pair, ctx, dev_id))
     })?;
     Ok((
         DeviceArrayF32Py { inner: pair.a, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
@@ -2425,7 +2427,7 @@ pub fn stochf_cuda_many_series_one_param_dev_py(
         let (k, d) = cuda
             .stochf_many_series_one_param_time_major_dev(htm, ltm, ctm, cols, rows, &params)
             .map_err(|e| PyErrValue::new_err(e.to_string()))?;
-        Ok::<_, PyErrValue>((k, d, ctx, dev_id))
+        Ok::<_, PyErr>((k, d, ctx, dev_id))
     })?;
     Ok((
         DeviceArrayF32Py { inner: k, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },

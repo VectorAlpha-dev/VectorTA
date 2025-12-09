@@ -2118,9 +2118,10 @@ impl PrimaryCtxGuard {
         unsafe {
             let mut ctx: cust::sys::CUcontext = core::ptr::null_mut();
             let dev = device_id as i32;
-            cust::sys::cuDevicePrimaryCtxRetain(&mut ctx as *mut _, dev)
-                .result()
-                .map_err(|e| cust::error::CudaError::UnknownError { msg: format!("cuDevicePrimaryCtxRetain: {:?}", e) })?;
+            let rc = cust::sys::cuDevicePrimaryCtxRetain(&mut ctx as *mut _, dev);
+            if rc != cust::sys::CUresult::CUDA_SUCCESS {
+                return Err(cust::error::CudaError::UnknownError);
+            }
             Ok(PrimaryCtxGuard { dev, ctx })
         }
     }

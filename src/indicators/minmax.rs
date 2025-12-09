@@ -558,7 +558,7 @@ pub fn minmax_cuda_batch_dev_py<'py>(
     let hs = high.as_slice()?;
     let ls = low.as_slice()?;
     let sweep = MinmaxBatchRange { order: order_range };
-    let (quad, combos, ctx, dev_id) = py.allow_threads(|| {
+    let (quad, combos, ctx, dev_id) = py.allow_threads(|| -> PyResult<_> {
         let cuda = CudaMinmax::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (quad, combos) = cuda
             .minmax_batch_dev(hs, ls, &sweep)
@@ -657,7 +657,7 @@ pub fn minmax_cuda_many_series_one_param_dev_py<'py>(
     let hflat = high_tm.as_slice()?;
     let lflat = low_tm.as_slice()?;
     let params = MinmaxParams { order: Some(order) };
-    let (quad, ctx, dev_id) = py.allow_threads(|| {
+    let (quad, ctx, dev_id) = py.allow_threads(|| -> PyResult<_> {
         let cuda = CudaMinmax::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let quad = cuda
             .minmax_many_series_one_param_time_major_dev(hflat, lflat, cols, rows, &params)
