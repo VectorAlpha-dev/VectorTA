@@ -1433,10 +1433,18 @@ fn alma_batch_inner_into(
         }
         inv_norms[row] = 1.0 / norm;
     }
-
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
+
+    // Initialize warmup prefixes (NaN) in the output buffer so that all
+    // rows/columns are fully initialized before being exposed via Python/WASM.
+    // This mirrors the Vec-returning batch API semantics without extra copies.
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+    init_matrix_prefixes(out_uninit, cols, &warm);
 
     let actual_kern = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
