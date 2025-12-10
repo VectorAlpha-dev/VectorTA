@@ -520,12 +520,14 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             options: vec![14.0],
         },
         // VIDYA (Variable Index Dynamic Average)
+        // Tulip options: [short_period, long_period, alpha]
+        // Match Rust defaults used in benchmarks: short=2, long=5, alpha=0.2
         IndicatorMapping {
             rust_name: "vidya",
             tulip_name: "vidya",
             talib_name: None,
             inputs: vec!["close"],
-            options: vec![14.0, 0.2],
+            options: vec![2.0, 5.0, 0.2],
         },
         // VOSC (Volume Oscillator)
         IndicatorMapping {

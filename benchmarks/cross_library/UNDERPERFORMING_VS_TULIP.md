@@ -1,47 +1,8 @@
 # Indicators Underperforming vs Tulip C
 This report lists indicators where **Rust Native** underperforms **Tulip C** by more than 5% (Rust/Tulip < 0.95), per data size, using `throughput_mops` from `benchmark_results.json`.\n
-## Size 4000
-| Indicator | Rust/Tulip ratio | Rust Mops | Tulip Mops | Rust slower by |
-|-----------|------------------|-----------|------------|----------------|
-| vidya | 0.026 | 472.4 | 18433.2 | 97.4% |
-| ad | 0.115 | 133.6 | 1158.7 | 88.5% |
-| aroon | 0.173 | 72.7 | 419.7 | 82.7% |
-| apo | 0.176 | 135.3 | 770.0 | 82.4% |
-| marketefi | 0.192 | 1287.4 | 6711.4 | 80.8% |
-| ema | 0.197 | 139.2 | 705.7 | 80.3% |
-| adosc | 0.210 | 138.5 | 659.4 | 79.0% |
-| bollinger_bands | 0.244 | 144.5 | 593.0 | 75.6% |
-| medprice | 0.252 | 2388.1 | 9478.7 | 74.8% |
-| minmax | 0.266 | 195.2 | 733.8 | 73.4% |
-| aroonosc | 0.315 | 139.9 | 444.0 | 68.5% |
-| stoch | 0.353 | 65.3 | 185.4 | 64.7% |
-| nvi | 0.386 | 560.8 | 1453.5 | 61.4% |
-| srsi | 0.389 | 88.3 | 227.1 | 61.1% |
-| pvi | 0.445 | 637.6 | 1431.6 | 55.5% |
-| minmax_min | 0.497 | 196.0 | 394.5 | 50.3% |
-| trix | 0.498 | 338.1 | 679.3 | 50.2% |
-| tema | 0.528 | 470.0 | 889.9 | 47.2% |
-| sar | 0.552 | 286.0 | 517.7 | 44.8% |
-| willr | 0.557 | 221.9 | 398.2 | 44.3% |
-| linearreg_slope | 0.625 | 512.2 | 820.0 | 37.5% |
-| mom | 0.644 | 6837.6 | 10610.1 | 35.6% |
-| adx | 0.662 | 355.9 | 537.5 | 33.8% |
-| roc | 0.727 | 6250.0 | 8602.2 | 27.3% |
-| fisher | 0.742 | 91.9 | 123.9 | 25.8% |
-| natr | 0.754 | 513.6 | 680.9 | 24.6% |
-| rocr | 0.768 | 6814.3 | 8869.2 | 23.2% |
-| stddev | 0.778 | 491.5 | 631.7 | 22.2% |
-| macd | 0.805 | 591.0 | 734.6 | 19.5% |
-| bop | 0.867 | 3759.4 | 4333.7 | 13.3% |
-| qstick | 0.897 | 1269.8 | 1415.9 | 10.3% |
-| vosc | 0.903 | 1189.1 | 1316.2 | 9.7% |
-| dpo | 0.910 | 1285.3 | 1412.4 | 9.0% |
-| vwma | 0.947 | 1294.9 | 1367.1 | 5.3% |
-
 ## Size 10000
 | Indicator | Rust/Tulip ratio | Rust Mops | Tulip Mops | Rust slower by |
 |-----------|------------------|-----------|------------|----------------|
-| vidya | 0.009 | 466.0 | 51546.4 | 99.1% |
 | marketefi | 0.155 | 941.7 | 6071.6 | 84.5% |
 | minmax_min | 0.216 | 164.1 | 758.2 | 78.4% |
 | minmax | 0.266 | 186.4 | 700.5 | 73.4% |
@@ -69,7 +30,6 @@ This report lists indicators where **Rust Native** underperforms **Tulip C** by 
 ## Size 100000
 | Indicator | Rust/Tulip ratio | Rust Mops | Tulip Mops | Rust slower by |
 |-----------|------------------|-----------|------------|----------------|
-| vidya | 0.001 | 451.6 | 505050.5 | 99.9% |
 | marketefi | 0.256 | 1055.2 | 4117.8 | 74.4% |
 | minmax | 0.276 | 118.3 | 428.4 | 72.4% |
 | minmax_min | 0.285 | 113.8 | 399.1 | 71.5% |
@@ -101,7 +61,6 @@ This report lists indicators where **Rust Native** underperforms **Tulip C** by 
 ## Size 1002240
 | Indicator | Rust/Tulip ratio | Rust Mops | Tulip Mops | Rust slower by |
 |-----------|------------------|-----------|------------|----------------|
-| vidya | 0.000 | 450.4 | 3782037.7 | 100.0% |
 | minmax | 0.232 | 81.1 | 349.1 | 76.8% |
 | minmax_min | 0.249 | 87.6 | 352.4 | 75.1% |
 | aroon | 0.417 | 63.1 | 151.1 | 58.3% |

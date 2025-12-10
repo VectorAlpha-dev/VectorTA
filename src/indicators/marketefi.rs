@@ -363,23 +363,14 @@ pub fn marketefi_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    let len = high.len();
-    if first_valid >= len {
-        return;
-    }
-
-    let h = &high[first_valid..];
-    let l = &low[first_valid..];
-    let v = &volume[first_valid..];
-    let dst = &mut out[first_valid..];
-
-    for (out_val, (&hi, (&lo, &vol))) in
-        dst.iter_mut().zip(h.iter().zip(l.iter().zip(v.iter())))
-    {
-        if vol == 0.0 {
-            *out_val = f64::NAN;
+    for i in first_valid..high.len() {
+        let h = high[i];
+        let l = low[i];
+        let v = volume[i];
+        if h.is_nan() || l.is_nan() || v.is_nan() || v == 0.0 {
+            out[i] = f64::NAN;
         } else {
-            *out_val = (hi - lo) / vol;
+            out[i] = (h - l) / v;
         }
     }
 }
