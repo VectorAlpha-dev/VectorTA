@@ -1981,15 +1981,24 @@ fn willr_batch_inner_into(
         });
     }
 
+    // Initialize warmup NaN prefixes once for the entire output matrix (ALMA-style).
+    // In debug builds this also poisons all cells to catch any missing writes.
+    let warmup_periods: Vec<usize> = combos
+        .iter()
+        .map(|c| first_valid + c.period.unwrap() - 1)
+        .collect();
+    let out_uninit = unsafe {
+        core::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>,
+            out.len(),
+        )
+    };
+    init_matrix_prefixes(out_uninit, cols, &warmup_periods);
+
     let ctx = SharedWillrCtx::new(high, low);
 
     let do_row = |row: usize, out_row: &mut [f64]| {
         let period = combos[row].period.unwrap();
-        // Initialize warmup period with NaN
-        let warmup_end = first_valid + period - 1;
-        for v in &mut out_row[..warmup_end] {
-            *v = f64::NAN;
-        }
         match kern {
             Kernel::Scalar => willr_row_scalar_with_ctx(close, first_valid, period, out_row, &ctx),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -3094,16 +3103,39 @@ pub fn willr_into(
         return Err(JsValue::from_str("null pointer passed to willr_into"));
     }
     unsafe {
-        let high = core::slice::from_raw_parts(high_ptr, len);
-        let low = core::slice::from_raw_parts(low_ptr, len);
-        let close = core::slice::from_raw_parts(close_ptr, len);
-        let mut out = core::slice::from_raw_parts_mut(out_ptr, len);
-        let params = WillrParams {
-            period: Some(period),
-        };
-        let input = WillrInput::from_slices(high, low, close, params);
-        willr_into_slice(&mut out, &input, detect_best_kernel())
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+        // Support exact in-place output (out_ptr == any input ptr) by computing into a
+        // temporary buffer and copying back once, avoiding partial-overwrite hazards.
+        if out_ptr == high_ptr as *mut f64
+            || out_ptr == low_ptr as *mut f64
+            || out_ptr == close_ptr as *mut f64
+        {
+            let mut tmp = vec![0.0f64; len];
+            {
+                let high = core::slice::from_raw_parts(high_ptr, len);
+                let low = core::slice::from_raw_parts(low_ptr, len);
+                let close = core::slice::from_raw_parts(close_ptr, len);
+                let params = WillrParams {
+                    period: Some(period),
+                };
+                let input = WillrInput::from_slices(high, low, close, params);
+                willr_into_slice(&mut tmp, &input, detect_best_kernel())
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            }
+            let out = core::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&tmp);
+            Ok(())
+        } else {
+            let high = core::slice::from_raw_parts(high_ptr, len);
+            let low = core::slice::from_raw_parts(low_ptr, len);
+            let close = core::slice::from_raw_parts(close_ptr, len);
+            let out = core::slice::from_raw_parts_mut(out_ptr, len);
+            let params = WillrParams {
+                period: Some(period),
+            };
+            let input = WillrInput::from_slices(high, low, close, params);
+            willr_into_slice(out, &input, detect_best_kernel())
+                .map_err(|e| JsValue::from_str(&e.to_string()))
+        }
     }
 }
 
