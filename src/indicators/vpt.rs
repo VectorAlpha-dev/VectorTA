@@ -1388,6 +1388,10 @@ pub fn vpt_batch_py<'py>(
     volume_slice = if let Ok(s) = volume.as_slice() { s } else { owned_volume = volume.to_owned_array(); owned_volume.as_slice().unwrap() };
     let kern = validate_kernel(kernel, true)?;
 
+    if price_slice.is_empty() || volume_slice.is_empty() || price_slice.len() != volume_slice.len() {
+        return Err(PyValueError::new_err(VptError::EmptyInputData.to_string()));
+    }
+
     // VPT has no parameters, so single row output
     let rows: usize = 1;
     let cols = price_slice.len();
@@ -1398,29 +1402,30 @@ pub fn vpt_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Initialize NaN prefix for VPT (indices 0..=first_valid)
-    let first_valid = vpt_first_valid(price_slice, volume_slice)
-        .ok_or_else(|| PyValueError::new_err("Not enough valid data"))?;
-
-    // set [0..=first_valid] to NaN
-    for i in 0..=first_valid {
-        slice_out[i] = f64::NAN;
-    }
-
     let _combos = py
         .allow_threads(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
-            vpt_batch_inner_into(
+            let combos = vpt_batch_inner_into(
                 price_slice,
                 volume_slice,
                 &VptBatchRange,
                 kernel,
                 true,
                 slice_out,
-            )
+            )?;
+            let first_valid = vpt_first_valid(price_slice, volume_slice).ok_or(
+                VptError::NotEnoughValidData {
+                    needed: 2,
+                    valid: 0,
+                },
+            )?;
+            for v in &mut slice_out[..=first_valid] {
+                *v = f64::NAN;
+            }
+            Ok::<_, VptError>(combos)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -1629,11 +1634,18 @@ pub fn vpt_batch_into(
     unsafe {
         let price = std::slice::from_raw_parts(price_ptr, len);
         let volume = std::slice::from_raw_parts(volume_ptr, len);
-        let out = std::slice::from_raw_parts_mut(out_ptr, len);
-
-        // VPT has no parameters, so just compute once
-        vpt_batch_inner_into(price, volume, &VptBatchRange, Kernel::Auto, false, out)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        // Check if either input aliases with output
+        if price_ptr == out_ptr || volume_ptr == out_ptr {
+            let mut temp = vec![0.0; len];
+            vpt_into_slice(&mut temp, price, volume, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            vpt_into_slice(out, price, volume, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
 
         // Return number of parameter combinations (always 1 for VPT)
         Ok(1)
