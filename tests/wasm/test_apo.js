@@ -245,7 +245,7 @@ test('APO batch empty result', () => {
             20, 30, 10,   // short: 20, 30
             10, 15, 5     // long: 10, 15
         );
-    }, /Invalid period/);
+    }, /Invalid period|invalid range/);
 });
 
 // New API tests

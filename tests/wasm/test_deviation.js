@@ -126,7 +126,7 @@ test('Deviation error handling', () => {
     const emptyData = new Float64Array([]);
     assert.throws(() => {
         wasm.deviation_js(emptyData, 2, 0);
-    }, /NotEnoughData|EmptyData/);
+    }, /NotEnoughData|EmptyData|empty input data/i);
 });
 
 test('Deviation fast API (in-place)', () => {

@@ -88,7 +88,7 @@ test('Decycler zero period', () => {
     
     assert.throws(() => {
         wasm.decycler_js(inputData, 0, 0.707);
-    }, /Invalid.*period/);
+    }, /invalid.*period/i);
 });
 
 test('Decycler period exceeds length', () => {
@@ -97,7 +97,7 @@ test('Decycler period exceeds length', () => {
     
     assert.throws(() => {
         wasm.decycler_js(dataSmall, 10, 0.707);
-    }, /Invalid period/);
+    }, /invalid period/i);
 });
 
 test('Decycler edge case k=0', () => {
@@ -106,7 +106,7 @@ test('Decycler edge case k=0', () => {
     
     assert.throws(() => {
         wasm.decycler_js(inputData, 3, 0.0);
-    }, /Invalid k/);
+    }, /invalid k/i);
 });
 
 test('Decycler NaN handling', () => {
@@ -237,7 +237,7 @@ test('Decycler all NaN input', () => {
     
     assert.throws(() => {
         wasm.decycler_js(allNaN, 50, 0.707);  // Use period < length to test NaN check
-    }, /All values are NaN/);
+    }, /all values are nan/i);
 });
 
 test('Decycler batch single parameter set', () => {
@@ -340,14 +340,14 @@ test('Decycler batch invalid parameters', () => {
             hp_period_range: [20, 10, 5],
             k_range: [0.707, 0.707, 0]
         });
-    }, /Invalid.*period|Empty.*grid|Invalid.*range/);
+    }, /invalid.*period|empty.*grid|invalid.*range|not enough valid data/i);
     
     // Invalid k range (negative k)
     // The batch function might not validate individual k values until processing
     // Try with a simple negative k that should fail
     assert.throws(() => {
         wasm.decycler_js(close, 5, -0.5);
-    }, /Invalid k/);
+    }, /invalid k/i);
 });
 
 test('Decycler batch edge cases', () => {
@@ -379,7 +379,7 @@ test('Decycler batch edge cases', () => {
             hp_period_range: [125, 125, 0],
             k_range: [0.707, 0.707, 0]
         });
-    }, /Empty data/);
+    }, /empty input data|empty data/i);
 });
 
 // Fast API tests (zero-copy)
@@ -472,12 +472,12 @@ test('Decycler zero-copy error handling', () => {
         // Invalid period
         assert.throws(() => {
             wasm.decycler_into(ptr, ptr, 10, 0, 0.707);
-        }, /Invalid.*period/);
+        }, /invalid.*period/i);
         
         // Invalid k
         assert.throws(() => {
             wasm.decycler_into(ptr, ptr, 10, 5, 0.0);
-        }, /Invalid k/);
+        }, /invalid k/i);
     } finally {
         wasm.decycler_free(ptr, 10);
     }

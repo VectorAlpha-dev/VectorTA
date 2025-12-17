@@ -133,7 +133,7 @@ test('BandPass period exceeds length', () => {
     
     assert.throws(() => {
         wasm.bandpass_js(data, 10, 0.3);
-    }, /Not enough data/);
+    }, /Invalid period|Not enough data/);
 });
 
 test('BandPass very small dataset', () => {
@@ -142,7 +142,7 @@ test('BandPass very small dataset', () => {
     
     assert.throws(() => {
         wasm.bandpass_js(single_point, 20, 0.3);
-    }, /Not enough data/);
+    }, /Invalid period|Not enough data/);
 });
 
 test('BandPass reinput', () => {
@@ -280,11 +280,11 @@ test('BandPass invalid bandwidth', () => {
     // Bandwidth must be in [0, 1]
     assert.throws(() => {
         wasm.bandpass_js(data, 5, -0.1);
-    }, /invalid bandwidth/);
+    }, /invalid bandwidth/i);
     
     assert.throws(() => {
         wasm.bandpass_js(data, 5, 1.5);
-    }, /invalid bandwidth/);
+    }, /invalid bandwidth/i);
 });
 
 // Batch API error handling

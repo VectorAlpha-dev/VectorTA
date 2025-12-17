@@ -126,7 +126,7 @@ test('ADXR empty input', () => {
     
     assert.throws(() => {
         wasm.adxr_js(empty, empty, empty, 14);
-    }, /Invalid period|Not enough data|All values are NaN/);
+    }, /Empty input data|Invalid period|Not enough data|All values are NaN/);
 });
 
 test('ADXR mismatched lengths', () => {

@@ -244,7 +244,7 @@ test('ACOSC edge cases', () => {
     // Empty data should throw
     assert.throws(() => {
         wasm.acosc_js(new Float64Array([]), new Float64Array([]));
-    }, /Not enough data/);
+    }, /Empty input data|Not enough data/);
 });
 
 test('ACOSC batch returns same as single', () => {

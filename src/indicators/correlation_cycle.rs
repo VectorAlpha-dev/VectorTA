@@ -1563,21 +1563,21 @@ fn expand_grid(r: &CorrelationCycleBatchRange) -> Result<Vec<CorrelationCyclePar
         let mut vals = Vec::new();
         if start < end {
             let mut v = start;
-            loop {
+            while v <= end {
                 vals.push(v);
-                if v >= end { break; }
-                let next = match v.checked_add(step) { Some(n) => n, None => break };
-                if next == v { break; }
-                v = next;
+                v = match v.checked_add(step) {
+                    Some(n) => n,
+                    None => break,
+                };
             }
         } else {
             let mut v = start;
-            loop {
+            while v >= end {
                 vals.push(v);
-                if v <= end { break; }
-                let next = v.saturating_sub(step);
-                if next == v { break; }
-                v = next;
+                v = match v.checked_sub(step) {
+                    Some(n) => n,
+                    None => break,
+                };
             }
         }
         if vals.is_empty() {

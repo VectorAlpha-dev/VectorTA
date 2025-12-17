@@ -80,7 +80,7 @@ test('ATR with empty input', () => {
     
     assert.throws(
         () => wasm.atr(empty, empty, empty, 14),
-        /No candles|no data/
+        /Input data slice is empty|Empty input data|No candles|no data/
     );
 });
 
@@ -103,7 +103,7 @@ test('ATR with invalid length', () => {
     // Zero length
     assert.throws(
         () => wasm.atr(high, low, close, 0),
-        /Invalid length/
+        /Invalid length|Invalid period/
     );
 });
 
@@ -114,7 +114,7 @@ test('ATR when length exceeds data length', () => {
     
     assert.throws(
         () => wasm.atr(high, low, close, 10),
-        /Not enough data|too short/
+        /Invalid period|Not enough data|too short/
     );
 });
 
@@ -239,7 +239,7 @@ test('ATR error handling coverage', () => {
     // InvalidLength
     assert.throws(
         () => wasm.atr(high.slice(0, 50), low.slice(0, 50), close.slice(0, 50), 0),
-        /Invalid length/
+        /Invalid length|Invalid period/
     );
     
     // InconsistentSliceLengths
@@ -251,13 +251,13 @@ test('ATR error handling coverage', () => {
     // NoCandlesAvailable
     assert.throws(
         () => wasm.atr(new Float64Array([]), new Float64Array([]), new Float64Array([]), 14),
-        /No candles|no data/
+        /Input data slice is empty|Empty input data|No candles|no data/
     );
     
     // NotEnoughData
     assert.throws(
         () => wasm.atr(high.slice(0, 10), low.slice(0, 10), close.slice(0, 10), 20),
-        /Not enough data/
+        /Invalid period|Not enough data/
     );
 });
 
@@ -406,7 +406,7 @@ test('ATR zero-copy error handling', () => {
         // Invalid length
         assert.throws(() => {
             wasm.atr_into(ptr, ptr, ptr, ptr, 10, 0);
-        }, /Invalid length/);
+        }, /Invalid length|Invalid period/);
     } finally {
         wasm.atr_free(ptr, 10);
     }
@@ -547,7 +547,7 @@ test('ATR streaming context error handling', () => {
     // Invalid length
     assert.throws(() => {
         new wasm.AtrContext(0);
-    }, /Invalid length/);
+    }, /Invalid length|Invalid period/);
 });
 
 test('ATR memory management stress test', () => {

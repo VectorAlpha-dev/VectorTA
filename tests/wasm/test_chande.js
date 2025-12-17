@@ -95,7 +95,7 @@ test('Chande zero period', () => {
     
     assert.throws(() => {
         wasm.chande_js(high, low, close, 0, 3.0, 'long');
-    }, /Invalid period/);
+    }, /invalid period/i);
 });
 
 test('Chande period exceeds length', () => {
@@ -106,7 +106,7 @@ test('Chande period exceeds length', () => {
     
     assert.throws(() => {
         wasm.chande_js(high, low, close, 10, 3.0, 'long');
-    }, /Invalid period/);
+    }, /invalid period/i);
 });
 
 test('Chande bad direction', () => {
@@ -117,7 +117,7 @@ test('Chande bad direction', () => {
     
     assert.throws(() => {
         wasm.chande_js(high, low, close, 2, 3.0, 'bad');
-    }, /Invalid direction/);
+    }, /invalid direction/i);
 });
 
 test('Chande empty input', () => {
@@ -126,7 +126,7 @@ test('Chande empty input', () => {
     
     assert.throws(() => {
         wasm.chande_js(empty, empty, empty, 22, 3.0, 'long');
-    }, /Input series are empty/);
+    }, /input series are empty/i);
 });
 
 test('Chande mismatched lengths', () => {
@@ -532,12 +532,12 @@ test('Chande zero-copy error handling', () => {
         // Invalid period
         assert.throws(() => {
             wasm.chande_into(highPtr, lowPtr, closePtr, outPtr, 10, 0, 3.0, 'long');
-        }, /Invalid period/);
+        }, /invalid period/i);
         
         // Invalid direction
         assert.throws(() => {
             wasm.chande_into(highPtr, lowPtr, closePtr, outPtr, 10, 5, 3.0, 'invalid');
-        }, /Invalid direction/);
+        }, /invalid direction/i);
     } finally {
         wasm.chande_free(highPtr, 10);
         wasm.chande_free(lowPtr, 10);

@@ -166,7 +166,7 @@ test('CORRELATION_CYCLE error handling', () => {
     // Test empty data
     assert.throws(() => {
         wasm.correlation_cycle_js([], 20, 9.0);
-    }, /Empty data/, 'Should throw on empty data');
+    }, /Empty data|input data slice is empty/i, 'Should throw on empty data');
     
     // Test all NaN values
     const nanData = new Array(100).fill(NaN);
@@ -385,7 +385,7 @@ test('CORRELATION_CYCLE batch edge cases', () => {
             10, 10, 0,
             5.0, 5.0, 0.0
         );
-    }, /Empty data|All values are NaN/);
+    }, /Empty data|input data slice is empty|All values are NaN/i);
 });
 
 // Zero-copy API tests

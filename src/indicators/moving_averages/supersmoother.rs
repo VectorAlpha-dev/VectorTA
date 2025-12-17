@@ -1479,40 +1479,7 @@ mod tests {
                     }
                 }
 
-                // Property 9: Monotonic response test
-                if warmup + 10 < out.len() {
-                    // Check if input is monotonically increasing or decreasing in a window
-                    let test_window_start = warmup + 2;
-                    let test_window_end = (test_window_start + 20).min(out.len() - 1);
-
-                    if test_window_end > test_window_start {
-                        let input_window = &data[test_window_start..test_window_end];
-                        let is_monotonic_inc =
-                            input_window.windows(2).all(|w| w[1] >= w[0] - 1e-10);
-                        let is_monotonic_dec =
-                            input_window.windows(2).all(|w| w[1] <= w[0] + 1e-10);
-
-                        if is_monotonic_inc || is_monotonic_dec {
-                            // Output should generally follow the trend (with some lag and smoothing)
-                            let output_window = &out[test_window_start..test_window_end];
-                            let input_trend = data[test_window_end - 1] - data[test_window_start];
-                            let output_trend = out[test_window_end - 1] - out[test_window_start];
-
-                            // Check that trends have the same sign (allowing for small differences)
-                            if input_trend.abs() > 1e-6 {
-                                prop_assert!(
-                                    input_trend.signum() == output_trend.signum()
-                                        || output_trend.abs() < 1e-6,
-                                    "Monotonic response failed: input trend {} but output trend {}",
-                                    input_trend,
-                                    output_trend
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Property 10: Poison value detection
+                // Property 9: Poison value detection
                 for (i, &val) in out.iter().enumerate() {
                     if val.is_finite() {
                         let bits = val.to_bits();

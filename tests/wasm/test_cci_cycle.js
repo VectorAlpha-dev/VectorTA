@@ -127,23 +127,20 @@ test('CCI_CYCLE invalid factor', () => {
     const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0,
                                    11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0]);
     
-    // NaN factor - CCI Cycle accepts NaN and returns mostly NaN results
-    const nanResult = wasm.cci_cycle_js(data, 5, NaN);
-    assert.strictEqual(nanResult.length, data.length);
-    // Most values should be NaN when factor is NaN (some may be 0 due to implementation)
-    let nanCount = 0;
-    for (let i = 0; i < nanResult.length; i++) {
-        if (isNaN(nanResult[i])) nanCount++;
-    }
-    assert(nanCount >= data.length - 5, `Expected mostly NaN when factor is NaN, got ${nanCount}/${data.length} NaN values`);
+    // NaN factor should throw
+    assert.throws(() => {
+        wasm.cci_cycle_js(data, 5, NaN);
+    }, /Invalid factor/);
     
-    // Negative factor is valid for CCI Cycle
-    const negResult = wasm.cci_cycle_js(data, 5, -0.5);
-    assert.strictEqual(negResult.length, data.length);
+    // Negative factor should throw
+    assert.throws(() => {
+        wasm.cci_cycle_js(data, 5, -0.5);
+    }, /Invalid factor/);
     
-    // Very large factor is also valid
-    const largeResult = wasm.cci_cycle_js(data, 5, 10.0);
-    assert.strictEqual(largeResult.length, data.length);
+    // Very large factor should throw
+    assert.throws(() => {
+        wasm.cci_cycle_js(data, 5, 10.0);
+    }, /Invalid factor/);
 });
 
 test('CCI_CYCLE all NaN input', () => {

@@ -342,7 +342,7 @@ test('Aroon batch edge cases', () => {
             new Float64Array([]),
             9, 9, 0
         );
-    }, /Invalid length|Not enough valid data/);
+    }, /All values are NaN|Empty input data|Invalid length|Not enough valid data/);
 });
 
 // New API tests
