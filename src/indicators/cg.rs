@@ -1787,7 +1787,9 @@ mod tests {
 
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
                     let tol = match kernel {
-                        Kernel::Avx2 | Kernel::Avx512 => 1e-6,
+                        // Allow slightly looser tolerance for SIMD kernels due to different
+                        // reduction order / fused mul-add behavior.
+                        Kernel::Avx2 | Kernel::Avx512 => 1e-5,
                         _ => 1e-9,
                     };
                     prop_assert!(

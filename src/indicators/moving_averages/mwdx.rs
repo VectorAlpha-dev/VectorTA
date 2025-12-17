@@ -1256,29 +1256,33 @@ mod tests {
                     );
                 }
 
-                // Property 5: Monotonicity preservation
-                let is_increasing = data.windows(2).all(|w| w[1] >= w[0] - 1e-12);
-                let is_decreasing = data.windows(2).all(|w| w[1] <= w[0] + 1e-12);
-                if is_increasing {
-                    for i in 1..out.len() {
-                        prop_assert!(
-                            out[i] >= out[i - 1] - 1e-9,
-                            "Monotonic increasing violated at index {}: {} < {}",
-                            i,
-                            out[i],
-                            out[i - 1]
-                        );
+                // Property 5: Monotonicity preservation (only when 0 < fac <= 1.0)
+                // For fac > 1.0, the recurrence has a negative coefficient on `out[i-1]`
+                // and can oscillate even with monotonic input.
+                if fac <= 1.0 {
+                    let is_increasing = data.windows(2).all(|w| w[1] >= w[0] - 1e-12);
+                    let is_decreasing = data.windows(2).all(|w| w[1] <= w[0] + 1e-12);
+                    if is_increasing {
+                        for i in 1..out.len() {
+                            prop_assert!(
+                                out[i] >= out[i - 1] - 1e-9,
+                                "Monotonic increasing violated at index {}: {} < {}",
+                                i,
+                                out[i],
+                                out[i - 1]
+                            );
+                        }
                     }
-                }
-                if is_decreasing {
-                    for i in 1..out.len() {
-                        prop_assert!(
-                            out[i] <= out[i - 1] + 1e-9,
-                            "Monotonic decreasing violated at index {}: {} > {}",
-                            i,
-                            out[i],
-                            out[i - 1]
-                        );
+                    if is_decreasing {
+                        for i in 1..out.len() {
+                            prop_assert!(
+                                out[i] <= out[i - 1] + 1e-9,
+                                "Monotonic decreasing violated at index {}: {} > {}",
+                                i,
+                                out[i],
+                                out[i - 1]
+                            );
+                        }
                     }
                 }
 

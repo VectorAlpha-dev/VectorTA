@@ -3273,17 +3273,34 @@ mod tests {
                 // Property 7: Small multiplier test
                 // With very small multiplier, stops should be very close to price
                 let test_start = first_valid_idx + period;
-                if mult < 0.2 && out.len() > test_start + 5 {
-                    for i in (test_start + 2)..(test_start + 5).min(out.len()) {
-                        if out[i].is_nan() || high[i].is_nan() || low[i].is_nan() {
-                            continue;
-                        }
+	                if mult < 0.2 && out.len() > test_start + 5 {
+	                    for i in (test_start + 2)..(test_start + 5).min(out.len()) {
+	                        if out[i].is_nan() || high[i].is_nan() || low[i].is_nan() {
+	                            continue;
+	                        }
 
-                        let max_distance = (high[i] - low[i]) * 2.0; // Generous bound
-                        if direction == "long" {
-                            let distance = low[i] - out[i];
-                            prop_assert!(
-                                distance <= max_distance,
+	                        // The stop distance is `mult * MA(range)`. Using the instantaneous
+	                        // range here is too strict for small-range candles because the MA
+	                        // window can include larger prior ranges.
+	                        let window_start = i.saturating_sub(period - 1);
+	                        let mut sum_range = 0.0f64;
+	                        let mut count = 0usize;
+	                        for j in window_start..=i {
+	                            if high[j].is_nan() || low[j].is_nan() {
+	                                continue;
+	                            }
+	                            sum_range += high[j] - low[j];
+	                            count += 1;
+	                        }
+	                        if count == 0 {
+	                            continue;
+	                        }
+	                        let avg_window_range = sum_range / (count as f64);
+	                        let max_distance = avg_window_range * mult * 2.0; // Allow 2x for MA smoothing
+	                        if direction == "long" {
+	                            let distance = low[i] - out[i];
+	                            prop_assert!(
+	                                distance <= max_distance,
                                 "Small mult long stop too far at {}: distance {}",
                                 i,
                                 distance

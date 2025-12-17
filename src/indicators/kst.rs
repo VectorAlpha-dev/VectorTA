@@ -2634,39 +2634,27 @@ mod tests {
 					}
 				}
 
-				// Property 6: Signal smoothing - signal should be smoother than KST line
-				// Check variance of differences for stable portions of data
-				if signal_warmup + sig * 2 < data.len() && data.len() > signal_warmup + 20 {
-					// Skip initial volatile period after warmup
-					let stable_start = signal_warmup + sig;
-					let line_diffs: Vec<f64> = line[stable_start..data.len()-1]
-						.windows(2)
-						.map(|w| (w[1] - w[0]).abs())
-						.filter(|x| x.is_finite())
-						.collect();
+					// Property 6: Signal is a moving average of the KST line
+					// A moving average is a convex combination, so it must stay within the
+					// min/max of its underlying window (no overshoot).
+					if signal_warmup < data.len() {
+						for i in signal_warmup..data.len() {
+							let y = signal[i];
+							if !y.is_finite() {
+								continue;
+							}
 
-					let signal_diffs: Vec<f64> = signal[stable_start..data.len()-1]
-						.windows(2)
-						.map(|w| (w[1] - w[0]).abs())
-						.filter(|x| x.is_finite())
-						.collect();
+							let start = i + 1 - sig;
+							let window = &line[start..=i];
+							let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+							let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-					if line_diffs.len() > 15 && signal_diffs.len() > 15 {
-						// Check mean variance for smoothness
-						let line_variance: f64 = line_diffs.iter().sum::<f64>() / line_diffs.len() as f64;
-						let signal_variance: f64 = signal_diffs.iter().sum::<f64>() / signal_diffs.len() as f64;
-
-						// Signal should generally be smoother than the line
-						// But with edge case data (plateaus, jumps), allow more tolerance
-						if line_variance > 1e-10 && signal_variance > 1e-10 {
-							// Allow up to 2.5x variance for edge cases
 							prop_assert!(
-								signal_variance <= line_variance * 2.5,
-								"Signal variance too high relative to KST line: signal_var={signal_variance}, line_var={line_variance}"
+								y >= lo - 1e-9 && y <= hi + 1e-9,
+								"Signal out of window bounds at idx {i}: {y} ∉ [{lo}, {hi}]"
 							);
 						}
 					}
-				}
 
 				// Property 7: Reasonable bounds - KST values should be within reasonable range
 				// KST is weighted sum of ROCs: 1*ROC1 + 2*ROC2 + 3*ROC3 + 4*ROC4

@@ -2397,30 +2397,9 @@ mod tests {
                             }
                         }
 
-                        // Property 5: Realistic correlation expectations
-                        // Since we generate OHLC data with high/low derived from same close,
-                        // correlations should be positive and strong
-
-                        // Property 6: Monotonic relationship preservation
-                        // If high and low have perfect linear relationship in a window,
-                        // correlation should be very close to ±1
-                        if period > 1 && period <= 10 {
-                            // Check first valid window for strong correlation
-                            // (our generated data has high/low derived from same close price)
-                            let first_valid = warmup_len;
-                            if first_valid < out.len() {
-                                let corr = out[first_valid];
-                                if !corr.is_nan() {
-                                    // Since high/low are derived from same close with small spreads,
-                                    // they should be highly correlated (> 0.9)
-                                    prop_assert!(
-										corr > 0.9,
-										"Expected strong positive correlation for OHLC data, got {} at index {}",
-										corr, first_valid
-									);
-                                }
-                            }
-                        }
+                        // Property 5: No additional shape assumptions.
+                        // Even for OHLC-derived series, short windows can legitimately yield
+                        // negative correlation (e.g., if close moves opposite to the spread).
                     }
                     (Err(_), Err(_)) => {
                         // Both kernels failed - this is acceptable

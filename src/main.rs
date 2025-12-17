@@ -8,14 +8,7 @@
 #![allow(warnings)]
 #![allow(non_snake_case)]
 
-#[cfg(feature = "cuda")]
-mod cuda;
-mod indicators;
-mod utilities;
-use csv::ReaderBuilder;
-use serde::Deserialize;
 use std::error::Error;
-use std::fs::File;
 
 fn main() -> Result<(), Box<dyn Error>> {
     Ok(())

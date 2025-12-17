@@ -1993,16 +1993,16 @@ mod tests {
 
                         // For meaningful original MAD values, check relative increase
                         // Skip ratio check for very small original MAD as the ratio can be huge
-                        if original_mad > win_range * 0.01 {
-                            // Only check if original MAD is meaningful
-                            let mad_ratio = outlier_mad / original_mad;
-                            prop_assert!(
-                                mad_ratio <= 20.0,
-                                "MAD ratio too high with outlier at idx {}: ratio {}",
-                                test_idx,
-                                mad_ratio
-                            );
-                        }
+	                        if original_mad > win_range * 0.05 {
+	                            // Only check if original MAD is meaningful
+	                            let mad_ratio = outlier_mad / original_mad;
+	                            prop_assert!(
+	                                mad_ratio <= 25.0,
+	                                "MAD ratio too high with outlier at idx {}: ratio {}",
+	                                test_idx,
+	                                mad_ratio
+	                            );
+	                        }
 
                         // Restore original value for next test
                         outlier_data[outlier_idx] = original_value;

@@ -1404,32 +1404,32 @@ mod tests {
                 let alpha = 2.0 / (period as f64 + 1.0);
 
                 // Property 4: Values should be within reasonable bounds
-                // After warmup, check that values are bounded
-                for i in warmup..data.len() {
-                    // For ZLEMA, we need to consider a wider window because of de-lagging
-                    // The de-lagging looks back by 'lag' positions
-                    let window_start = i.saturating_sub(period + lag);
-                    let window_end = i.min(data.len() - 1);
-                    let window = &data[window_start..=window_end];
+                //
+                // ZLEMA is an EMA of a de-lagged input series. EMA is a convex combination of
+                // all previous inputs, so it must stay within the running min/max of that
+                // de-lagged series (up to floating-point rounding).
+                let mut min_delag = f64::INFINITY;
+                let mut max_delag = f64::NEG_INFINITY;
+                for i in first_non_nan..data.len() {
+                    let delag_x = if i < first_non_nan + lag {
+                        data[i]
+                    } else {
+                        2.0 * data[i] - data[i - lag]
+                    };
+                    min_delag = min_delag.min(delag_x);
+                    max_delag = max_delag.max(delag_x);
 
-                    // Get min/max of the extended window for bounds checking
-                    let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
-                    let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let y = out[i];
-
-                    // ZLEMA can overshoot due to de-lagging formula: 2*current - lagged
-                    // This can theoretically push values to 2*hi - lo or 2*lo - hi
-                    let extended_lo = 2.0 * lo - hi;
-                    let extended_hi = 2.0 * hi - lo;
-
-                    prop_assert!(
-                        y.is_nan() || (y >= extended_lo - 1e-9 && y <= extended_hi + 1e-9),
-                        "idx {}: {} ∉ [{}, {}] (extended bounds for de-lagging)",
-                        i,
-                        y,
-                        extended_lo,
-                        extended_hi
-                    );
+                    if i >= warmup {
+                        let y = out[i];
+                        prop_assert!(
+                            y >= min_delag - 1e-9 && y <= max_delag + 1e-9,
+                            "idx {}: {} ∉ [{}, {}] (bounds for de-lagged input history)",
+                            i,
+                            y,
+                            min_delag,
+                            max_delag
+                        );
+                    }
                 }
 
                 // Property 5: Period=1 edge case
