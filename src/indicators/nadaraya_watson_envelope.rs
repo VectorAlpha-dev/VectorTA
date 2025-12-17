@@ -568,6 +568,9 @@ pub fn nadaraya_watson_envelope_into_slices(
         if !y.is_nan() && !mae.is_nan() {
             upper_out[t] = y + mae;
             lower_out[t] = y - mae;
+        } else {
+            upper_out[t] = f64::NAN;
+            lower_out[t] = f64::NAN;
         }
 
         // slide: remove resid[s]

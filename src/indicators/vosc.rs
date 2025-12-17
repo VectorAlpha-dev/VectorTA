@@ -1122,6 +1122,10 @@ fn vosc_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<VoscBatchOutput, VoscError> {
+    if data.is_empty() {
+        return Err(VoscError::EmptyInputData);
+    }
+
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(VoscError::InvalidRange {
@@ -1131,11 +1135,32 @@ fn vosc_batch_inner(
         });
     }
 
+    let data_len = data.len();
+    let mut max_long = 0usize;
+    for c in &combos {
+        let sp = c.short_period.unwrap();
+        let lp = c.long_period.unwrap();
+        if sp == 0 || sp > data_len {
+            return Err(VoscError::InvalidPeriod {
+                period: sp,
+                data_len,
+            });
+        }
+        if lp == 0 || lp > data_len {
+            return Err(VoscError::InvalidPeriod {
+                period: lp,
+                data_len,
+            });
+        }
+        if lp > max_long {
+            max_long = lp;
+        }
+    }
+
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(VoscError::AllValuesNaN)?;
-    let max_long = combos.iter().map(|c| c.long_period.unwrap()).max().unwrap();
     if data.len() - first < max_long {
         return Err(VoscError::NotEnoughValidData {
             needed: max_long,
@@ -1245,6 +1270,10 @@ fn vosc_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<VoscParams>, VoscError> {
+    if data.is_empty() {
+        return Err(VoscError::EmptyInputData);
+    }
+
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(VoscError::InvalidRange {
@@ -1254,11 +1283,32 @@ fn vosc_batch_inner_into(
         });
     }
 
+    let data_len = data.len();
+    let mut max_long = 0usize;
+    for c in &combos {
+        let sp = c.short_period.unwrap();
+        let lp = c.long_period.unwrap();
+        if sp == 0 || sp > data_len {
+            return Err(VoscError::InvalidPeriod {
+                period: sp,
+                data_len,
+            });
+        }
+        if lp == 0 || lp > data_len {
+            return Err(VoscError::InvalidPeriod {
+                period: lp,
+                data_len,
+            });
+        }
+        if lp > max_long {
+            max_long = lp;
+        }
+    }
+
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(VoscError::AllValuesNaN)?;
-    let max_long = combos.iter().map(|c| c.long_period.unwrap()).max().unwrap();
     if data.len() - first < max_long {
         return Err(VoscError::NotEnoughValidData {
             needed: max_long,

@@ -668,6 +668,42 @@ fn expand_grid(r: &RocrBatchRange) -> Result<Vec<RocrParams>, RocrError> {
 }
 
 #[inline(always)]
+fn rocr_batch_prepare(data: &[f64], combos: &[RocrParams]) -> Result<(usize, usize), RocrError> {
+    let cols = data.len();
+    if cols == 0 {
+        return Err(RocrError::EmptyInputData);
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(RocrError::AllValuesNaN)?;
+
+    let mut max_p = 0usize;
+    for c in combos {
+        let p = c.period.unwrap();
+        if p == 0 || p > cols {
+            return Err(RocrError::InvalidPeriod {
+                period: p,
+                data_len: cols,
+            });
+        }
+        if p > max_p {
+            max_p = p;
+        }
+    }
+
+    if cols - first < max_p {
+        return Err(RocrError::NotEnoughValidData {
+            needed: max_p,
+            valid: cols - first,
+        });
+    }
+
+    Ok((first, max_p))
+}
+
+#[inline(always)]
 pub fn rocr_batch_slice(
     data: &[f64],
     sweep: &RocrBatchRange,
@@ -693,19 +729,7 @@ fn rocr_batch_inner(
     parallel: bool,
 ) -> Result<RocrBatchOutput, RocrError> {
     let combos = expand_grid(sweep)?;
-
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(RocrError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    if data.len() - first < max_p {
-        return Err(RocrError::NotEnoughValidData {
-            needed: max_p,
-            valid: data.len() - first,
-        });
-    }
-
+    let (first, _max_p) = rocr_batch_prepare(data, &combos)?;
     let rows = combos.len();
     let cols = data.len();
 
@@ -819,26 +843,26 @@ fn rocr_batch_inner(
 #[inline(always)]
 fn rocr_batch_inner_into(
     data: &[f64],
-    sweep: &RocrBatchRange,
+    combos: &[RocrParams],
+    first: usize,
     kern: Kernel,
     parallel: bool,
     out: &mut [f64],
-) -> Result<Vec<RocrParams>, RocrError> {
-    let combos = expand_grid(sweep)?;
-
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(RocrError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    if data.len() - first < max_p {
-        return Err(RocrError::NotEnoughValidData {
-            needed: max_p,
-            valid: data.len() - first,
+) -> Result<(), RocrError> {
+    if combos.is_empty() {
+        return Err(RocrError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
         });
     }
-
     let cols = data.len();
+    if cols == 0 {
+        return Err(RocrError::EmptyInputData);
+    }
+    if first >= cols {
+        return Err(RocrError::AllValuesNaN);
+    }
 
     // Ensure caller-provided buffer matches expected size.
     let expected = combos
@@ -889,7 +913,7 @@ fn rocr_batch_inner_into(
         }
     }
 
-    Ok(combos)
+    Ok(())
 }
 
 #[inline(always)]
@@ -1241,6 +1265,8 @@ pub fn rocr_batch_py<'py>(
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let (first, _max_p) =
+        rocr_batch_prepare(slice_in, &combos).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let kern = validate_kernel(kernel, true)?;
     let simd = match match kern {
@@ -1258,7 +1284,7 @@ pub fn rocr_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rocr_batch_py: rows*cols overflow"))?;
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
-    let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(cols);
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
     let warms: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1271,22 +1297,23 @@ pub fn rocr_batch_py<'py>(
 
     // Cast to MaybeUninit and initialize only warm prefixes with NaN (zero extra copies)
     unsafe {
-        let mu: &mut [MaybeUninit<f64>] =
-            std::slice::from_raw_parts_mut(out_arr.as_ptr() as *mut MaybeUninit<f64>, total);
+        let mu: &mut [MaybeUninit<f64>] = std::slice::from_raw_parts_mut(
+            slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            slice_out.len(),
+        );
         init_matrix_prefixes(mu, cols, &warms);
     }
 
     // Now compute rows directly into the same buffer
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    let combos_result = py
-        .allow_threads(|| rocr_batch_inner_into(slice_in, &sweep, simd, true, slice_out))
+    py
+        .allow_threads(|| rocr_batch_inner_into(slice_in, &combos, first, simd, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
         "periods",
-        combos_result
+        combos
             .iter()
             .map(|p| p.period.unwrap() as u64)
             .collect::<Vec<_>>()
@@ -1490,8 +1517,6 @@ pub fn rocr_batch_into(
     }
 
     unsafe {
-        let data = std::slice::from_raw_parts(in_ptr, len);
-
         let sweep = RocrBatchRange {
             period: (period_start, period_end, period_step),
         };
@@ -1500,9 +1525,74 @@ pub fn rocr_batch_into(
         let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let period_count = combos.len();
 
+        if in_ptr == out_ptr {
+            // In-place is only sensible when period_count == 1; still guard for correctness.
+            let total_elements = period_count
+                .checked_mul(len)
+                .ok_or_else(|| JsValue::from_str("rocr_batch_into: rows*cols overflow"))?;
+            let mut temp = vec![0.0; total_elements];
+            let (first, _max_p) = {
+                let data = std::slice::from_raw_parts(in_ptr, len);
+                rocr_batch_prepare(data, &combos).map_err(|e| JsValue::from_str(&e.to_string()))?
+            };
+
+            use std::mem::MaybeUninit;
+            let warms: Vec<usize> = combos
+                .iter()
+                .map(|c| {
+                    let p = c.period.unwrap();
+                    first
+                        .checked_add(p)
+                        .ok_or_else(|| JsValue::from_str("rocr_batch_into: warmup overflow"))
+                })
+                .collect::<Result<_, _>>()?;
+
+            {
+                let mu: &mut [MaybeUninit<f64>] = std::slice::from_raw_parts_mut(
+                    temp.as_mut_ptr() as *mut MaybeUninit<f64>,
+                    total_elements,
+                );
+                init_matrix_prefixes(mu, len, &warms);
+            }
+
+            // Compute batch directly into temp buffer
+            let simd = match detect_best_batch_kernel() {
+                Kernel::Avx512Batch => Kernel::Avx512,
+                Kernel::Avx2Batch => Kernel::Avx2,
+                _ => Kernel::Scalar,
+            };
+            {
+                let data = std::slice::from_raw_parts(in_ptr, len);
+                rocr_batch_inner_into(data, &combos, first, simd, false, &mut temp)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            }
+
+            let out = std::slice::from_raw_parts_mut(out_ptr, total_elements);
+            out.copy_from_slice(&temp);
+            return Ok(period_count);
+        }
+
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        let (first, _max_p) =
+            rocr_batch_prepare(data, &combos).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
         let total_elements = period_count
             .checked_mul(len)
             .ok_or_else(|| JsValue::from_str("rocr_batch_into: rows*cols overflow"))?;
+
+        use std::mem::MaybeUninit;
+        let warms: Vec<usize> = combos
+            .iter()
+            .map(|c| {
+                let p = c.period.unwrap();
+                first
+                    .checked_add(p)
+                    .ok_or_else(|| JsValue::from_str("rocr_batch_into: warmup overflow"))
+            })
+            .collect::<Result<_, _>>()?;
+        let mu: &mut [MaybeUninit<f64>] =
+            std::slice::from_raw_parts_mut(out_ptr as *mut MaybeUninit<f64>, total_elements);
+        init_matrix_prefixes(mu, len, &warms);
         let out = std::slice::from_raw_parts_mut(out_ptr, total_elements);
 
         // Compute batch directly into output buffer
@@ -1511,10 +1601,10 @@ pub fn rocr_batch_into(
             Kernel::Avx2Batch => Kernel::Avx2,
             _ => Kernel::Scalar,
         };
-        let combos = rocr_batch_inner_into(data, &sweep, simd, false, out)
+        rocr_batch_inner_into(data, &combos, first, simd, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        Ok(combos.len())
+        Ok(period_count)
     }
 }
 

@@ -836,8 +836,19 @@ fn emv_batch_inner_into(
     kern: Kernel,
     _parallel: bool,
     out: &mut [f64],
-) -> Vec<EmvParams> {
+) -> Result<Vec<EmvParams>, EmvError> {
     let len = high.len().min(low.len()).min(volume.len());
+    if len == 0 {
+        return Err(EmvError::EmptyInputData);
+    }
+
+    if out.len() != len {
+        return Err(EmvError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
+    }
+
     // Treat NumPy-owned memory as MaybeUninit to set only warm prefixes
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
@@ -845,7 +856,18 @@ fn emv_batch_inner_into(
 
     let first = (0..len)
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
-        .unwrap_or(0);
+        .ok_or(EmvError::AllValuesNaN)?;
+
+    // Validate we have at least two valid points, matching emv_batch_inner
+    let valid = (first..len)
+        .filter(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
+        .count();
+    if valid < 2 {
+        return Err(EmvError::NotEnoughValidData {
+            needed: 2,
+            valid,
+        });
+    }
 
     // Warm prefix NaNs without extra passes
     init_matrix_prefixes(out_mu, len, &[first + 1]);
@@ -865,7 +887,7 @@ fn emv_batch_inner_into(
         }
     }
 
-    vec![EmvParams]
+    Ok(vec![EmvParams])
 }
 
 #[cfg(feature = "python")]
@@ -890,28 +912,33 @@ pub fn emv_batch_py<'py>(
     let sweep = EmvBatchRange {};
     let combos = expand_grid(&sweep);
     let rows = combos.len(); // Always 1 for EMV
-    let cols = high_slice.len();
+    let cols = high_slice
+        .len()
+        .min(low_slice.len())
+        .min(volume_slice.len());
 
     // Pre-allocate output array
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| {
-        let kernel = match kern {
-            Kernel::Auto => detect_best_batch_kernel(),
-            k => k,
-        };
-        emv_batch_inner_into(
-            high_slice,
-            low_slice,
-            close_slice,
-            volume_slice,
-            &sweep,
-            kernel,
-            true,
-            slice_out,
-        );
-    });
+    let _params = py
+        .allow_threads(|| {
+            let kernel = match kern {
+                Kernel::Auto => detect_best_batch_kernel(),
+                k => k,
+            };
+            emv_batch_inner_into(
+                high_slice,
+                low_slice,
+                close_slice,
+                volume_slice,
+                &sweep,
+                kernel,
+                true,
+                slice_out,
+            )
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;

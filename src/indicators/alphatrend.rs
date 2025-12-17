@@ -1996,6 +1996,10 @@ pub fn alphatrend_batch_inner_into_slices(
     let cols = close.len();
     let rows = combos.len();
 
+    if open.len() != cols || high.len() != cols || low.len() != cols || volume.len() != cols {
+        return Err(AlphaTrendError::InconsistentDataLengths);
+    }
+
     if cols == 0 {
         return Err(AlphaTrendError::EmptyInputData);
     }
@@ -2022,12 +2026,36 @@ pub fn alphatrend_batch_inner_into_slices(
         _ => detect_best_kernel(),
     };
 
-    // Find first valid index
+    // Find first valid index and initialize warmup NaN prefixes so that all
+    // batch entrypoints (Rust, Python, WASM) share the same warmup semantics
+    // and never expose debug poison values in user-visible outputs.
     let first = close
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(AlphaTrendError::AllValuesNaN)?;
 
+    let warm_k1: Vec<usize> = combos
+        .iter()
+        .map(|p| first + p.period.unwrap_or(14) - 1)
+        .collect();
+    let warm_k2: Vec<usize> = warm_k1.iter().map(|&w| w.saturating_add(2)).collect();
+
+    let k1_uninit: &mut [MaybeUninit<f64>] = unsafe {
+        core::slice::from_raw_parts_mut(
+            k1_slice.as_mut_ptr() as *mut MaybeUninit<f64>,
+            k1_slice.len(),
+        )
+    };
+    let k2_uninit: &mut [MaybeUninit<f64>] = unsafe {
+        core::slice::from_raw_parts_mut(
+            k2_slice.as_mut_ptr() as *mut MaybeUninit<f64>,
+            k2_slice.len(),
+        )
+    };
+    init_matrix_prefixes(k1_uninit, cols, &warm_k1);
+    init_matrix_prefixes(k2_uninit, cols, &warm_k2);
+
+    // Find first valid index
     // Precompute TR once for the whole dataset
     let mut tr_mu = make_uninit_matrix(1, cols);
     let tr: &mut [f64] =

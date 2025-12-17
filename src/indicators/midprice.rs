@@ -655,6 +655,54 @@ fn expand_grid(r: &MidpriceBatchRange) -> Result<Vec<MidpriceParams>, MidpriceEr
 }
 
 #[inline(always)]
+fn validate_batch_periods(combos: &[MidpriceParams], cols: usize) -> Result<usize, MidpriceError> {
+    let mut max_p = 0usize;
+    for c in combos {
+        let p = c.period.unwrap_or(14);
+        if p == 0 || p > cols {
+            return Err(MidpriceError::InvalidPeriod {
+                period: p,
+                data_len: cols,
+            });
+        }
+        if p > max_p {
+            max_p = p;
+        }
+    }
+    Ok(max_p)
+}
+
+#[inline(always)]
+fn batch_warm_prefixes(
+    combos: &[MidpriceParams],
+    first: usize,
+    cols: usize,
+) -> Result<(Vec<usize>, usize), MidpriceError> {
+    let mut max_p = 0usize;
+    let mut warm = Vec::with_capacity(combos.len());
+    for c in combos {
+        let p = c.period.unwrap_or(14);
+        if p == 0 || p > cols {
+            return Err(MidpriceError::InvalidPeriod {
+                period: p,
+                data_len: cols,
+            });
+        }
+        if p > max_p {
+            max_p = p;
+        }
+        warm.push(first + p - 1);
+    }
+    if cols - first < max_p {
+        return Err(MidpriceError::NotEnoughValidData {
+            needed: max_p,
+            valid: cols - first,
+        });
+    }
+    Ok((warm, max_p))
+}
+
+#[inline(always)]
 pub fn midprice_batch_slice(
     high: &[f64],
     low: &[f64],
@@ -696,15 +744,15 @@ fn midprice_batch_inner_into(
     let first = (0..high.len())
         .find(|&i| !high[i].is_nan() && !low[i].is_nan())
         .ok_or(MidpriceError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    if high.len() - first < max_p {
+    let cols = high.len();
+    let max_p = validate_batch_periods(&combos, cols)?;
+    if cols - first < max_p {
         return Err(MidpriceError::NotEnoughValidData {
             needed: max_p,
-            valid: high.len() - first,
+            valid: cols - first,
         });
     }
     let rows = combos.len();
-    let cols = high.len();
     let expected = rows
         .checked_mul(cols)
         .ok_or(MidpriceError::InvalidInput("rows*cols overflow"))?;
@@ -784,16 +832,10 @@ fn midprice_batch_inner(
     let first = (0..high.len())
         .find(|&i| !high[i].is_nan() && !low[i].is_nan())
         .ok_or(MidpriceError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    if high.len() - first < max_p {
-        return Err(MidpriceError::NotEnoughValidData {
-            needed: max_p,
-            valid: high.len() - first,
-        });
-    }
+    let cols = high.len();
+    let (warm, _max_p) = batch_warm_prefixes(&combos, first, cols)?;
 
     let rows = combos.len();
-    let cols = high.len();
     let total_cells = rows
         .checked_mul(cols)
         .ok_or(MidpriceError::InvalidInput("rows*cols overflow"))?;
@@ -801,10 +843,6 @@ fn midprice_batch_inner(
     // 1) allocate uninit
     let mut buf_mu = make_uninit_matrix(rows, cols);
     // 2) set only warm prefixes to NaN
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first + c.period.unwrap() - 1)
-        .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
     // 3) compute directly into the same allocation
@@ -974,10 +1012,8 @@ pub fn midprice_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // warm NaN prefixes in-place (no extra buffer)
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|p| first + p.period.unwrap() - 1)
-        .collect();
+    let (warm, _max_p) = batch_warm_prefixes(&combos, first, cols)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(
             slice_out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -1248,6 +1284,12 @@ pub fn midprice_batch_into(
     period_end: usize,
     period_step: usize,
 ) -> Result<usize, JsValue> {
+    if len == 0 {
+        return Err(JsValue::from_str("midprice: Empty data provided."));
+    }
+    if in_high_ptr.is_null() || in_low_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("Null pointer provided"));
+    }
     unsafe {
         let high = std::slice::from_raw_parts(in_high_ptr, len);
         let low = std::slice::from_raw_parts(in_low_ptr, len);
@@ -1265,10 +1307,8 @@ pub fn midprice_batch_into(
         let first = (0..len)
             .find(|&i| !high[i].is_nan() && !low[i].is_nan())
             .ok_or_else(|| JsValue::from_str("All values are NaN"))?;
-        let warm: Vec<usize> = combos
-            .iter()
-            .map(|p| first + p.period.unwrap() - 1)
-            .collect();
+        let (warm, _max_p) = batch_warm_prefixes(&combos, first, len)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         if in_high_ptr == out_ptr || in_low_ptr == out_ptr {
             let mut temp: Vec<f64> = Vec::with_capacity(total);

@@ -865,6 +865,10 @@ fn cvi_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<CviBatchOutput, CviError> {
+    if high.is_empty() || low.is_empty() || high.len() != low.len() {
+        return Err(CviError::EmptyData);
+    }
+
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         let (s, e, st) = sweep.period;
@@ -874,6 +878,14 @@ fn cvi_batch_inner(
     let first_valid_idx = (0..high.len())
         .find(|&i| !high[i].is_nan() && !low[i].is_nan())
         .ok_or(CviError::AllValuesNaN)?;
+
+    if combos.iter().any(|c| c.period.unwrap_or(0) == 0) {
+        return Err(CviError::InvalidPeriod {
+            period: 0,
+            data_len: high.len(),
+        });
+    }
+
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     let needed = 2 * max_p - 1;
     if high.len() - first_valid_idx < needed {
@@ -988,6 +1000,10 @@ fn cvi_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<CviParams>, CviError> {
+    if high.is_empty() || low.is_empty() || high.len() != low.len() {
+        return Err(CviError::EmptyData);
+    }
+
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         let (s, e, st) = sweep.period;
@@ -997,6 +1013,14 @@ fn cvi_batch_inner_into(
     let first = (0..high.len())
         .find(|&i| !high[i].is_nan() && !low[i].is_nan())
         .ok_or(CviError::AllValuesNaN)?;
+
+    if combos.iter().any(|c| c.period.unwrap_or(0) == 0) {
+        return Err(CviError::InvalidPeriod {
+            period: 0,
+            data_len: high.len(),
+        });
+    }
+
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     let needed = 2 * max_p - 1;
     if high.len() - first < needed {
@@ -1008,6 +1032,15 @@ fn cvi_batch_inner_into(
 
     let rows = combos.len();
     let cols = high.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| CviError::InvalidRange { start: rows, end: cols, step: 0 })?;
+    if out.len() != expected {
+        return Err(CviError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // 1) Pre-seed warm prefixes with NaN, zero-copy
     let out_mu = unsafe {

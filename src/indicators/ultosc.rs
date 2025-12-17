@@ -336,6 +336,8 @@ pub enum UltOscError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("ultosc: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
+    #[error("ultosc: Inconsistent input lengths")]
+    InconsistentLengths,
     #[error("ultosc: Invalid range: start={start}, end={end}, step={step}")]
     InvalidRange { start: String, end: String, step: String },
     #[error("ultosc: Invalid kernel for batch: {0:?}")]
@@ -377,6 +379,9 @@ fn ultosc_prepare<'a>(
     let len = high.len();
     if len == 0 || low.len() == 0 || close.len() == 0 {
         return Err(UltOscError::EmptyInputData);
+    }
+    if low.len() != len || close.len() != len {
+        return Err(UltOscError::InconsistentLengths);
     }
 
     let p1 = input.get_timeperiod1();
@@ -1078,29 +1083,9 @@ fn ultosc_batch_inner(
     if cols == 0 {
         return Err(UltOscError::EmptyInputData);
     }
-
-    // Find first valid index (both i-1 and i must be valid)
-    let first_valid_idx = (1..cols)
-        .find(|&i| {
-            !high[i - 1].is_nan()
-                && !low[i - 1].is_nan()
-                && !close[i - 1].is_nan()
-                && !high[i].is_nan()
-                && !low[i].is_nan()
-                && !close[i].is_nan()
-        })
-        .ok_or(UltOscError::AllValuesNaN)?;
-
-    // Calculate warmup periods for each combo
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| {
-            let p1 = c.timeperiod1.unwrap_or(7);
-            let p2 = c.timeperiod2.unwrap_or(14);
-            let p3 = c.timeperiod3.unwrap_or(28);
-            first_valid_idx + p1.max(p2).max(p3) - 1
-        })
-        .collect();
+    if low.len() != cols || close.len() != cols {
+        return Err(UltOscError::InconsistentLengths);
+    }
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
     if buf_mu.len() != expected {
@@ -1109,7 +1094,6 @@ fn ultosc_batch_inner(
             got: buf_mu.len(),
         });
     }
-    init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
@@ -1146,7 +1130,16 @@ pub fn ultosc_batch_inner_into(
 ) -> Result<Vec<UltOscParams>, UltOscError> {
     let combos = expand_grid(sweep)?;
 
+    let _ = simd;
+
     let len = high.len();
+    if len == 0 || low.is_empty() || close.is_empty() {
+        return Err(UltOscError::EmptyInputData);
+    }
+    if low.len() != len || close.len() != len {
+        return Err(UltOscError::InconsistentLengths);
+    }
+
     // Find first valid index (both i-1 and i must be valid)
     let first_valid_idx = (1..len)
         .find(|&i| {
@@ -1159,16 +1152,34 @@ pub fn ultosc_batch_inner_into(
         })
         .ok_or(UltOscError::AllValuesNaN)?;
 
-    let max_p = combos
-        .iter()
-        .map(|c| {
-            let p1 = c.timeperiod1.unwrap_or(7);
-            let p2 = c.timeperiod2.unwrap_or(14);
-            let p3 = c.timeperiod3.unwrap_or(28);
-            p1.max(p2).max(p3)
-        })
-        .max()
-        .unwrap();
+    let rows = combos.len();
+    let cols = len;
+
+    let mut warm = Vec::with_capacity(rows);
+    let mut max_p = 0usize;
+    for c in &combos {
+        let p1 = c.timeperiod1.unwrap_or(7);
+        let p2 = c.timeperiod2.unwrap_or(14);
+        let p3 = c.timeperiod3.unwrap_or(28);
+        if p1 == 0 || p2 == 0 || p3 == 0 || p1 > len || p2 > len || p3 > len {
+            let bad = if p1 == 0 || p1 > len {
+                p1
+            } else if p2 == 0 || p2 > len {
+                p2
+            } else {
+                p3
+            };
+            return Err(UltOscError::InvalidPeriod {
+                period: bad,
+                data_len: len,
+            });
+        }
+        let pmax = p1.max(p2).max(p3);
+        if pmax > max_p {
+            max_p = pmax;
+        }
+        warm.push(first_valid_idx + pmax - 1);
+    }
 
     if len - first_valid_idx < max_p {
         return Err(UltOscError::NotEnoughValidData {
@@ -1176,9 +1187,6 @@ pub fn ultosc_batch_inner_into(
             valid: len - first_valid_idx,
         });
     }
-
-    let rows = combos.len();
-    let cols = len;
 
     let expected = rows
         .checked_mul(cols)
@@ -1193,6 +1201,15 @@ pub fn ultosc_batch_inner_into(
             got: out.len(),
         });
     }
+
+    // Initialize NaN warmup prefixes so no uninitialized/poison values can leak to bindings.
+    let out_uninit = unsafe {
+        core::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>,
+            out.len(),
+        )
+    };
+    init_matrix_prefixes(out_uninit, cols, &warm);
 
     // Row-specific batch optimization: precompute prefix sums of CMTL and TR once
     // pcmtl[i+1] = sum of valid CMTL up to i, ptr[i+1] = sum of valid TR up to i
@@ -1259,20 +1276,44 @@ pub fn ultosc_batch_inner_into(
         #[cfg(not(target_arch = "wasm32"))]
         {
             use rayon::prelude::*;
-            out.par_chunks_mut(cols)
+            out_uninit
+                .par_chunks_mut(cols)
                 .enumerate()
-                .for_each(|(row, row_out)| do_row(row, row_out));
+                .for_each(|(row, row_mu)| {
+                    let row_out = unsafe {
+                        core::slice::from_raw_parts_mut(
+                            row_mu.as_mut_ptr() as *mut f64,
+                            row_mu.len(),
+                        )
+                    };
+                    do_row(row, row_out)
+                });
         }
         #[cfg(target_arch = "wasm32")]
         {
-            out.chunks_mut(cols)
+            out_uninit
+                .chunks_mut(cols)
                 .enumerate()
-                .for_each(|(row, row_out)| do_row(row, row_out));
+                .for_each(|(row, row_mu)| {
+                    let row_out = unsafe {
+                        core::slice::from_raw_parts_mut(
+                            row_mu.as_mut_ptr() as *mut f64,
+                            row_mu.len(),
+                        )
+                    };
+                    do_row(row, row_out)
+                });
         }
     } else {
-        out.chunks_mut(cols)
+        out_uninit
+            .chunks_mut(cols)
             .enumerate()
-            .for_each(|(row, row_out)| do_row(row, row_out));
+            .for_each(|(row, row_mu)| {
+                let row_out = unsafe {
+                    core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len())
+                };
+                do_row(row, row_out)
+            });
     }
 
     Ok(combos)
@@ -2092,9 +2133,8 @@ pub fn ultosc_into_slice(
     ultosc_compute_into(high, low, close, p1, p2, p3, first_valid, chosen, dst);
 
     // Fill warmup period with NaN
-    for v in &mut dst[..start_idx] {
-        *v = f64::NAN;
-    }
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    dst[..start_idx].fill(qnan);
 
     Ok(())
 }
@@ -2386,34 +2426,6 @@ pub fn ultosc_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total_elems], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Find first valid index (both i-1 and i must be valid)
-    let first_valid_idx = (1..cols)
-        .find(|&i| {
-            !high_slice[i - 1].is_nan()
-                && !low_slice[i - 1].is_nan()
-                && !close_slice[i - 1].is_nan()
-                && !high_slice[i].is_nan()
-                && !low_slice[i].is_nan()
-                && !close_slice[i].is_nan()
-        })
-        .unwrap_or(0);
-
-    // Calculate warmup periods for each combo and initialize NaN prefixes
-    for (row, combo) in combos.iter().enumerate() {
-        let p1 = combo.timeperiod1.unwrap_or(7);
-        let p2 = combo.timeperiod2.unwrap_or(14);
-        let p3 = combo.timeperiod3.unwrap_or(28);
-        let warmup = first_valid_idx + p1.max(p2).max(p3) - 1;
-
-        // Fill the warmup period with NaN for this row
-        let row_start = row
-            .checked_mul(cols)
-            .ok_or_else(|| PyValueError::new_err("row index overflow in ultosc_batch_py"))?;
-        for i in 0..warmup.min(cols) {
-            slice_out[row_start + i] = f64::NAN;
-        }
-    }
-
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
@@ -2616,6 +2628,17 @@ pub fn ultosc_js(
     timeperiod2: usize,
     timeperiod3: usize,
 ) -> Result<Vec<f64>, JsValue> {
+    if high.is_empty() || low.is_empty() || close.is_empty() {
+        return Err(JsValue::from_str("Empty data"));
+    }
+    if timeperiod1 == 0 || timeperiod2 == 0 || timeperiod3 == 0 {
+        return Err(JsValue::from_str("Invalid period"));
+    }
+    let len = high.len();
+    if timeperiod1 > len || timeperiod2 > len || timeperiod3 > len {
+        return Err(JsValue::from_str("Period exceeds data length"));
+    }
+
     let params = UltOscParams {
         timeperiod1: Some(timeperiod1),
         timeperiod2: Some(timeperiod2),
@@ -2624,7 +2647,7 @@ pub fn ultosc_js(
     let input = UltOscInput::from_slices(high, low, close, params);
 
     // Single allocation
-    let mut output = vec![0.0; high.len()];
+    let mut output = vec![0.0; len];
     ultosc_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2651,15 +2674,6 @@ pub fn ultosc_into(
         let high = std::slice::from_raw_parts(high_ptr, len);
         let low = std::slice::from_raw_parts(low_ptr, len);
         let close = std::slice::from_raw_parts(close_ptr, len);
-
-        if timeperiod1 == 0 || timeperiod2 == 0 || timeperiod3 == 0 {
-            return Err(JsValue::from_str("Invalid period: cannot be zero"));
-        }
-
-        let max_period = timeperiod1.max(timeperiod2).max(timeperiod3);
-        if max_period > len {
-            return Err(JsValue::from_str("Period exceeds data length"));
-        }
 
         let params = UltOscParams {
             timeperiod1: Some(timeperiod1),

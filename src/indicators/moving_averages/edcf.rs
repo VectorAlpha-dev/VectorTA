@@ -247,7 +247,7 @@ fn edcf_prepare<'a>(
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
-        return Err(EdcfError::EmptyInputData);
+        return Err(EdcfError::NoData);
     }
     let first = data
         .iter()
@@ -918,7 +918,7 @@ pub fn edcf_batch_with_kernel(
     k: Kernel,
 ) -> Result<EdcfBatchOutput, EdcfError> {
     if data.is_empty() {
-        return Err(EdcfError::EmptyInputData);
+        return Err(EdcfError::NoData);
     }
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
@@ -1008,7 +1008,7 @@ fn edcf_batch_inner(
     parallel: bool,
 ) -> Result<EdcfBatchOutput, EdcfError> {
     if data.is_empty() {
-        return Err(EdcfError::EmptyInputData);
+        return Err(EdcfError::NoData);
     }
 
     let combos = expand_grid(sweep);
@@ -1075,7 +1075,7 @@ fn edcf_batch_inner_into(
 ) -> Result<Vec<EdcfParams>, EdcfError> {
     // ─────────────────── guards unchanged ───────────────────
     if data.is_empty() {
-        return Err(EdcfError::EmptyInputData);
+        return Err(EdcfError::NoData);
     }
     let combos = expand_grid(sweep);
     if combos.is_empty() {
@@ -1895,8 +1895,34 @@ pub fn edcf_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("edcf_batch: rows*cols overflow"))?;
+
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Initialize warmup NaN prefixes to match Rust batch semantics when data is non-empty.
+    if !slice_in.is_empty() && rows > 0 {
+        if let Some(first) = slice_in.iter().position(|x| !x.is_nan()) {
+            let warm: Vec<usize> = combos
+                .iter()
+                .map(|c| {
+                    let period = c.period.unwrap_or(15);
+                    let w = first + 2 * period;
+                    if w > cols { cols } else { w }
+                })
+                .collect();
+
+            let buf_mu: &mut [MaybeUninit<f64>] = unsafe {
+                core::slice::from_raw_parts_mut(
+                    slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
+                    slice_out.len(),
+                )
+            };
+            init_matrix_prefixes(buf_mu, cols, &warm);
+        }
+    }
 
     let kern = validate_kernel(kernel, true)?;
 
@@ -2195,7 +2221,31 @@ pub fn edcf_batch_into(
         let rows = combos.len();
         let cols = len;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("edcf_batch_into: rows*cols overflow"))?;
+
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
+
+        // Initialize warmup NaN prefixes so zero-copy API matches scalar/batch semantics.
+        if !data.is_empty() && rows > 0 {
+            if let Some(first) = data.iter().position(|x| !x.is_nan()) {
+                let warm: Vec<usize> = combos
+                    .iter()
+                    .map(|c| {
+                        let period = c.period.unwrap_or(15);
+                        let w = first + 2 * period;
+                        if w > cols { cols } else { w }
+                    })
+                    .collect();
+
+                let buf_mu: &mut [MaybeUninit<f64>] = core::slice::from_raw_parts_mut(
+                    out.as_mut_ptr() as *mut MaybeUninit<f64>,
+                    out.len(),
+                );
+                init_matrix_prefixes(buf_mu, cols, &warm);
+            }
+        }
 
         // Use optimized batch processing
         edcf_batch_inner_into(data, &sweep, Kernel::Auto, false, out)

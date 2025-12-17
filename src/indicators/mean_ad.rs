@@ -571,12 +571,40 @@ fn mean_ad_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<MeanAdParams>, MeanAdError> {
+    if data.is_empty() {
+        return Err(MeanAdError::EmptyInputData);
+    }
     let combos = expand_grid(sweep)?;
+    if combos.iter().any(|c| c.period.unwrap_or(0) == 0) {
+        return Err(MeanAdError::InvalidPeriod {
+            period: 0,
+            data_len: data.len(),
+        });
+    }
+    let expected = combos
+        .len()
+        .checked_mul(data.len())
+        .ok_or_else(|| MeanAdError::OutputLengthMismatch {
+            expected: usize::MAX,
+            got: out.len(),
+        })?;
+    if out.len() != expected {
+        return Err(MeanAdError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(MeanAdError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if max_p > data.len() {
+        return Err(MeanAdError::InvalidPeriod {
+            period: max_p,
+            data_len: data.len(),
+        });
+    }
     if data.len() - first < max_p {
         return Err(MeanAdError::NotEnoughValidData {
             needed: max_p,
@@ -639,12 +667,27 @@ fn mean_ad_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<MeanAdBatchOutput, MeanAdError> {
+    if data.is_empty() {
+        return Err(MeanAdError::EmptyInputData);
+    }
     let combos = expand_grid(sweep)?;
+    if combos.iter().any(|c| c.period.unwrap_or(0) == 0) {
+        return Err(MeanAdError::InvalidPeriod {
+            period: 0,
+            data_len: data.len(),
+        });
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(MeanAdError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if max_p > data.len() {
+        return Err(MeanAdError::InvalidPeriod {
+            period: max_p,
+            data_len: data.len(),
+        });
+    }
     if data.len() - first < max_p {
         return Err(MeanAdError::NotEnoughValidData {
             needed: max_p,
@@ -1874,79 +1917,19 @@ pub fn mean_ad_into_slice(
         other => other,
     };
 
-    // Fill entire output with NaN first
-    for v in dst.iter_mut() {
-        *v = f64::NAN;
+    let warmup_end = first + (period << 1) - 2;
+    let warmup_end = warmup_end.min(dst.len());
+    if warmup_end > 0 {
+        dst[..warmup_end].fill(f64::NAN);
     }
 
     // Process data using the appropriate kernel
     match chosen {
-        Kernel::Scalar | Kernel::ScalarBatch => {
-            // Use the same correct algorithm as mean_ad_scalar
-            let n = data.len();
-
-            if first + period > n {
-                return Ok(());
-            }
-
-            // Compute rolling SMA of prices
-            let mut sum = 0.0;
-            for i in first..(first + period) {
-                sum += data[i];
-            }
-            let mut sma = sum / (period as f64);
-
-            // Circular buffer for residuals (pointwise absolute deviations)
-            let mut residual_buffer = vec![0.0; period];
-            let mut buffer_index = 0;
-            let mut residual_sum = 0.0;
-
-            // Fill residual buffer for first period of SMAs
-            // Each residual is |x_t - SMA_t| where SMA_t is the SMA ending at time t
-            for t in (first + period - 1)..(first + 2 * period - 1).min(n) {
-                let residual = (data[t] - sma).abs();
-                residual_buffer[buffer_index] = residual;
-                buffer_index = (buffer_index + 1) % period;
-                residual_sum += residual;
-
-                // Advance SMA for next time point if there's more data
-                if t + 1 < n && t + 1 >= first + period {
-                    sum += data[t + 1] - data[t + 1 - period];
-                    sma = sum / (period as f64);
-                }
-            }
-
-            // First output after warmup period
-            let first_output = first + 2 * period - 2;
-            if first_output < n {
-                dst[first_output] = residual_sum / (period as f64);
-            }
-
-            // Continue streaming for remaining data
-            for t in (first + 2 * period - 1)..n {
-                // Current residual against current SMA
-                let residual = (data[t] - sma).abs();
-
-                // Update residual buffer and sum
-                residual_sum += residual - residual_buffer[buffer_index];
-                residual_buffer[buffer_index] = residual;
-                buffer_index = (buffer_index + 1) % period;
-
-                // Output MA of residuals
-                dst[t] = residual_sum / (period as f64);
-
-                // Advance SMA for next step
-                if t + 1 < n {
-                    sum += data[t + 1] - data[t + 1 - period];
-                    sma = sum / (period as f64);
-                }
-            }
-        }
+        Kernel::Scalar | Kernel::ScalarBatch => mean_ad_row_scalar(data, first, period, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-            // AVX kernels are stubs, use scalar
-            return mean_ad_into_slice(dst, input, Kernel::Scalar);
-        }
+        Kernel::Avx2 | Kernel::Avx2Batch => mean_ad_row_avx2(data, first, period, dst),
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 | Kernel::Avx512Batch => mean_ad_row_avx512(data, first, period, dst),
         _ => unreachable!(),
     }
 

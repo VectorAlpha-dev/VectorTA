@@ -145,7 +145,7 @@ impl WadBuilder {
 
 #[derive(Debug, Error)]
 pub enum WadError {
-    #[error("wad: Input data slice is empty.")]
+    #[error("wad: Empty input data.")]
     EmptyInputData,
     #[error("wad: All values are NaN.")]
     AllValuesNaN,
@@ -153,7 +153,7 @@ pub enum WadError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("wad: Not enough valid data: needed = {needed}, valid = {valid}.")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("wad: Output length mismatch: expected = {expected}, got = {got}.")]
+    #[error("wad: Empty or mismatched lengths: expected = {expected}, got = {got}.")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("wad: Invalid range: start={start}, end={end}, step={step}.")]
     InvalidRange { start: usize, end: usize, step: usize },
@@ -182,7 +182,8 @@ pub fn wad_with_kernel(input: &WadInput, kernel: Kernel) -> Result<WadOutput, Wa
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        return Err(WadError::OutputLengthMismatch { expected: len, got: low.len().max(close.len()) });
+        let got = if low.len() != len { low.len() } else { close.len() };
+        return Err(WadError::OutputLengthMismatch { expected: len, got });
     }
     if high.iter().all(|x| x.is_nan())
         || low.iter().all(|x| x.is_nan())
@@ -799,7 +800,8 @@ fn wad_batch_inner(
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        return Err(WadError::OutputLengthMismatch { expected: len, got: low.len().max(close.len()) });
+        let got = if low.len() != len { low.len() } else { close.len() };
+        return Err(WadError::OutputLengthMismatch { expected: len, got });
     }
     if high.iter().all(|x| x.is_nan())
         || low.iter().all(|x| x.is_nan())
@@ -849,7 +851,8 @@ fn wad_batch_inner_into(
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        return Err(WadError::OutputLengthMismatch { expected: len, got: low.len().max(close.len()) });
+        let got = if low.len() != len { low.len() } else { close.len() };
+        return Err(WadError::OutputLengthMismatch { expected: len, got });
     }
     if high.iter().all(|x| x.is_nan())
         || low.iter().all(|x| x.is_nan())
@@ -1473,7 +1476,8 @@ fn wad_prepare<'a>(
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        return Err(WadError::OutputLengthMismatch { expected: len, got: low.len().max(close.len()) });
+        let got = if low.len() != len { low.len() } else { close.len() };
+        return Err(WadError::OutputLengthMismatch { expected: len, got });
     }
     if high.iter().all(|x| x.is_nan())
         || low.iter().all(|x| x.is_nan())

@@ -1011,8 +1011,18 @@ pub fn fvg_ts_batch_inner_into(
         return Err(FvgTrailingStopError::InvalidKernelForBatch(kern));
     }
 
-    let combos = expand_grid_ts(sweep)?;
+    if h.is_empty() || l.is_empty() || c.is_empty() {
+        return Err(FvgTrailingStopError::EmptyInputData);
+    }
     let len = h.len();
+    if len != l.len() || len != c.len() {
+        return Err(FvgTrailingStopError::InvalidPeriod {
+            period: len,
+            data_len: len,
+        });
+    }
+
+    let combos = expand_grid_ts(sweep)?;
     let rows = combos.len();
     let cols = len;
     let expected = rows
@@ -1028,6 +1038,29 @@ pub fn fvg_ts_batch_inner_into(
         return Err(FvgTrailingStopError::AllValuesNaN);
     }
 
+    // Validate parameter grid (no zero lookback/smoothing) and ensure enough data for max smoothing.
+    let mut max_sm = 0usize;
+    for prm in &combos {
+        let look = prm.unmitigated_fvg_lookback.unwrap_or(5);
+        if look == 0 {
+            return Err(FvgTrailingStopError::InvalidLookback { lookback: look });
+        }
+        let sm = prm.smoothing_length.unwrap_or(9);
+        if sm == 0 {
+            return Err(FvgTrailingStopError::InvalidSmoothingLength { smoothing: sm });
+        }
+        if sm > max_sm {
+            max_sm = sm;
+        }
+    }
+    let need = 2 + max_sm.saturating_sub(1);
+    if len - first < need {
+        return Err(FvgTrailingStopError::NotEnoughValidData {
+            needed: need,
+            valid: len - first,
+        });
+    }
+
     let _chosen = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -1035,7 +1068,6 @@ pub fn fvg_ts_batch_inner_into(
 
     // --------- Row-shared precompute (independent of parameters) ---------
     // 1) Precompute FVG candidates per bar (bull: high[i-2], bear: low[i-2])
-    let len = h.len();
     let mut bull_cand = vec![f64::NAN; len];
     let mut bear_cand = vec![f64::NAN; len];
     if len >= 3 {
@@ -1431,11 +1463,29 @@ pub fn fvg_trailing_stop_batch_with_kernel(
     if first == usize::MAX {
         return Err(FvgTrailingStopError::AllValuesNaN);
     }
+    let mut max_sm = 0usize;
     let mut warms = Vec::with_capacity(4 * rows);
     for prm in &combos {
+        let look = prm.unmitigated_fvg_lookback.unwrap_or(5);
+        if look == 0 {
+            return Err(FvgTrailingStopError::InvalidLookback { lookback: look });
+        }
         let sm = prm.smoothing_length.unwrap_or(9);
+        if sm == 0 {
+            return Err(FvgTrailingStopError::InvalidSmoothingLength { smoothing: sm });
+        }
+        if sm > max_sm {
+            max_sm = sm;
+        }
         let w = (first + 2 + sm.saturating_sub(1)).min(cols);
         warms.extend_from_slice(&[w, w, w, w]);
+    }
+    let need = 2 + max_sm.saturating_sub(1);
+    if cols - first < need {
+        return Err(FvgTrailingStopError::NotEnoughValidData {
+            needed: need,
+            valid: cols - first,
+        });
     }
 
     let rows4 = rows.checked_mul(4).ok_or_else(|| FvgTrailingStopError::InvalidRange { start: rows, end: 4, step: 1 })?;
@@ -1443,19 +1493,19 @@ pub fn fvg_trailing_stop_batch_with_kernel(
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
     // one pass fill
-    let mut guard = core::mem::ManuallyDrop::new(buf_mu);
-    let flat: &mut [f64] =
-        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+    let flat: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len())
+    };
     let used = fvg_ts_batch_inner_into(high, low, close, sweep, kernel, true, flat)?;
 
     let values = unsafe {
         Vec::from_raw_parts(
-            guard.as_mut_ptr() as *mut f64,
-            guard.len(),
-            guard.capacity(),
+            buf_mu.as_mut_ptr() as *mut f64,
+            buf_mu.len(),
+            buf_mu.capacity(),
         )
     };
-    core::mem::forget(guard);
+    core::mem::forget(buf_mu);
 
     Ok(FvgTsBatchOutput {
         values,
@@ -2478,23 +2528,35 @@ pub fn fvg_trailing_stop_js(
         reset_on_cross: Some(reset_on_cross),
     };
     let input = FvgTrailingStopInput::from_slices(high, low, close, params);
-    let len = high.len();
+
+    let (h, low_in, c, lookback, smoothing_len, reset, first) =
+        fvg_ts_prepare(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let len = h.len();
+    let warm = (first + 2 + smoothing_len.saturating_sub(1)).min(len);
+
     let mut buf_mu = make_uninit_matrix(4, len);
-    let first = first_valid_ohlc(high, low, close);
-    let warm = if first != usize::MAX {
-        (first + 2 + smoothing_length.saturating_sub(1)).min(len)
-    } else {
-        0
-    };
     init_matrix_prefixes(&mut buf_mu, len, &[warm, warm, warm, warm]);
-    let mut guard = core::mem::ManuallyDrop::new(buf_mu);
-    let out: &mut [f64] =
-        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len())
+    };
     let (first_half, second_half) = out.split_at_mut(2 * len);
     let (u, l) = first_half.split_at_mut(len);
     let (uts, lts) = second_half.split_at_mut(len);
-    fvg_trailing_stop_into_slices(u, l, uts, lts, &input, detect_best_kernel())
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let chosen = detect_best_kernel();
+    fvg_ts_compute_into(h, low_in, c, lookback, smoothing_len, reset, u, l, uts, lts, chosen);
+    for v in &mut u[..warm] {
+        *v = f64::NAN;
+    }
+    for v in &mut l[..warm] {
+        *v = f64::NAN;
+    }
+    for v in &mut uts[..warm] {
+        *v = f64::NAN;
+    }
+    for v in &mut lts[..warm] {
+        *v = f64::NAN;
+    }
 
     // Create JS object with named properties
     let obj = js_sys::Object::new();
@@ -2507,16 +2569,6 @@ pub fn fvg_trailing_stop_js(
     js_sys::Reflect::set(&obj, &JsValue::from_str("lower"), &lower_arr)?;
     js_sys::Reflect::set(&obj, &JsValue::from_str("upperTs"), &upper_ts_arr)?;
     js_sys::Reflect::set(&obj, &JsValue::from_str("lowerTs"), &lower_ts_arr)?;
-
-    // Don't forget memory cleanup
-    let _ = unsafe {
-        Vec::from_raw_parts(
-            guard.as_mut_ptr() as *mut f64,
-            guard.len(),
-            guard.capacity(),
-        )
-    };
-    core::mem::forget(guard);
 
     Ok(obj.into())
 }
@@ -2579,35 +2631,68 @@ pub fn fvg_trailing_stop_batch_js(
     reset_include_false: bool,
     reset_include_true: bool,
 ) -> Result<JsValue, JsValue> {
+    if high.is_empty() || low.is_empty() || close.is_empty() {
+        return Err(JsValue::from_str(
+            "fvg_trailing_stop: Input data slice is empty.",
+        ));
+    }
+    let cols = high.len();
+    if cols != low.len() || cols != close.len() {
+        let e = FvgTrailingStopError::InvalidPeriod {
+            period: cols,
+            data_len: cols,
+        };
+        return Err(JsValue::from_str(&e.to_string()));
+    }
     let sweep = FvgTsBatchRange {
         lookback: (lookback_start, lookback_end, lookback_step),
         smoothing: (smoothing_start, smoothing_end, smoothing_step),
         reset_on_cross: (reset_include_false, reset_include_true),
     };
     let combos = expand_grid_ts(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let cols = high.len();
     let rows = combos.len();
 
+    let first = first_valid_ohlc(high, low, close);
+    if first == usize::MAX {
+        let e = FvgTrailingStopError::AllValuesNaN;
+        return Err(JsValue::from_str(&e.to_string()));
+    }
+    let mut max_sm = 0usize;
     let rows4 = rows
         .checked_mul(4)
         .ok_or_else(|| JsValue::from_str("rows*4 overflow"))?;
     let mut buf_mu = make_uninit_matrix(rows4, cols);
-    let first = first_valid_ohlc(high, low, close);
     let mut warms = Vec::with_capacity(rows4);
     for prm in &combos {
+        let look = prm.unmitigated_fvg_lookback.unwrap_or(5);
+        if look == 0 {
+            let e = FvgTrailingStopError::InvalidLookback { lookback: look };
+            return Err(JsValue::from_str(&e.to_string()));
+        }
         let sm = prm.smoothing_length.unwrap_or(9);
-        let w = if first == usize::MAX {
-            0
-        } else {
-            (first + 2 + sm.saturating_sub(1)).min(cols)
-        };
+        if sm == 0 {
+            let e = FvgTrailingStopError::InvalidSmoothingLength { smoothing: sm };
+            return Err(JsValue::from_str(&e.to_string()));
+        }
+        if sm > max_sm {
+            max_sm = sm;
+        }
+        let w = (first + 2 + sm.saturating_sub(1)).min(cols);
         warms.extend_from_slice(&[w, w, w, w]);
+    }
+    let need = 2 + max_sm.saturating_sub(1);
+    if cols - first < need {
+        let e = FvgTrailingStopError::NotEnoughValidData {
+            needed: need,
+            valid: cols - first,
+        };
+        return Err(JsValue::from_str(&e.to_string()));
     }
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    let mut guard = core::mem::ManuallyDrop::new(buf_mu);
-    let flat: &mut [f64] =
-        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+    let flat: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len())
+    };
     fvg_ts_batch_inner_into(
         high,
         low,
@@ -2621,12 +2706,12 @@ pub fn fvg_trailing_stop_batch_js(
 
     let values = unsafe {
         Vec::from_raw_parts(
-            guard.as_mut_ptr() as *mut f64,
-            guard.len(),
-            guard.capacity(),
+            buf_mu.as_mut_ptr() as *mut f64,
+            buf_mu.len(),
+            buf_mu.capacity(),
         )
     };
-    core::mem::forget(guard);
+    core::mem::forget(buf_mu);
 
     let out = FvgTsBatchJsOutput {
         values,
@@ -2666,6 +2751,9 @@ pub fn fvg_trailing_stop_zero_copy_js(
     reset_on_cross: bool,
     ptr: *mut f64,
 ) -> Result<JsValue, JsValue> {
+    if ptr.is_null() {
+        return Err(JsValue::from_str("null pointer"));
+    }
     let len = high.len();
 
     // Create slices from raw pointer

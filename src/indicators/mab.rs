@@ -1205,6 +1205,9 @@ fn mab_batch_inner(
     let combos = expand_grid(sweep)?;
     let rows = combos.len();
     let cols = input.len();
+    if cols == 0 {
+        return Err(MabError::EmptyInputData);
+    }
     rows
         .checked_mul(cols)
         .ok_or(MabError::InvalidRange {
@@ -1213,25 +1216,43 @@ fn mab_batch_inner(
             step: sweep.fast_period.2,
         })?;
 
-    // Calculate warmup periods for each combination
-    let first = input.iter().position(|x| !x.is_nan()).unwrap_or(0);
-    let warmup_periods: Vec<usize> = combos
+    // Calculate warmup prefixes (lengths) for each combination, matching scalar semantics.
+    let first_valid = input
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(MabError::AllValuesNaN)?;
+    let valid = cols - first_valid;
+    let warmup_prefixes: Vec<usize> = combos
         .iter()
         .map(|p| {
             let fast = p.fast_period.unwrap();
             let slow = p.slow_period.unwrap();
-            first + fast.max(slow) - 1
+            if fast == 0 || slow == 0 || fast > cols || slow > cols {
+                return Err(MabError::InvalidPeriod {
+                    fast,
+                    slow,
+                    data_len: cols,
+                });
+            }
+            let need_total = fast.max(slow) + fast - 1;
+            if valid < need_total {
+                return Err(MabError::NotEnoughValidData {
+                    needed: need_total,
+                    valid,
+                });
+            }
+            Ok(first_valid + need_total)
         })
-        .collect();
+        .collect::<Result<Vec<_>, MabError>>()?;
 
     // Use the zero-copy allocation pattern
     let mut upper_buf = make_uninit_matrix(rows, cols);
     let mut middle_buf = make_uninit_matrix(rows, cols);
     let mut lower_buf = make_uninit_matrix(rows, cols);
 
-    init_matrix_prefixes(&mut upper_buf, cols, &warmup_periods);
-    init_matrix_prefixes(&mut middle_buf, cols, &warmup_periods);
-    init_matrix_prefixes(&mut lower_buf, cols, &warmup_periods);
+    init_matrix_prefixes(&mut upper_buf, cols, &warmup_prefixes);
+    init_matrix_prefixes(&mut middle_buf, cols, &warmup_prefixes);
+    init_matrix_prefixes(&mut lower_buf, cols, &warmup_prefixes);
 
     // Convert to mutable slices for computation
     let upper_slice =
@@ -1656,6 +1677,9 @@ pub fn mab_batch_py<'py>(
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    if cols == 0 {
+        return Err(PyValueError::new_err(MabError::EmptyInputData.to_string()));
+    }
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("mab_batch: rows*cols overflow"))?;
@@ -1672,16 +1696,35 @@ pub fn mab_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     // Initialize NaN prefixes outside of allow_threads
-    // Calculate warmup periods for each parameter combination
-    let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
-    let warmup_periods: Vec<usize> = combos
+    // Calculate warmup prefixes (lengths) for each parameter combination, matching scalar semantics.
+    let first_valid = slice_in
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or_else(|| PyValueError::new_err(MabError::AllValuesNaN.to_string()))?;
+    let valid = cols - first_valid;
+    let warmup_prefixes: Vec<usize> = combos
         .iter()
         .map(|p| {
             let fast = p.fast_period.unwrap();
             let slow = p.slow_period.unwrap();
-            first + fast.max(slow) - 1
+            if fast == 0 || slow == 0 || fast > cols || slow > cols {
+                return Err(MabError::InvalidPeriod {
+                    fast,
+                    slow,
+                    data_len: cols,
+                });
+            }
+            let need_total = fast.max(slow) + fast - 1;
+            if valid < need_total {
+                return Err(MabError::NotEnoughValidData {
+                    needed: need_total,
+                    valid,
+                });
+            }
+            Ok(first_valid + need_total)
         })
-        .collect();
+        .collect::<Result<Vec<_>, MabError>>()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     // Reinterpret NumPy buffers as MaybeUninit and set warm prefixes
     let mu_upper: &mut [MaybeUninit<f64>] = unsafe {
@@ -1696,9 +1739,9 @@ pub fn mab_batch_py<'py>(
         let ptr = lower_arr.as_array_mut().as_mut_ptr();
         std::slice::from_raw_parts_mut(ptr as *mut MaybeUninit<f64>, total)
     };
-    init_matrix_prefixes(mu_upper, cols, &warmup_periods);
-    init_matrix_prefixes(mu_middle, cols, &warmup_periods);
-    init_matrix_prefixes(mu_lower, cols, &warmup_periods);
+    init_matrix_prefixes(mu_upper, cols, &warmup_prefixes);
+    init_matrix_prefixes(mu_middle, cols, &warmup_prefixes);
+    init_matrix_prefixes(mu_lower, cols, &warmup_prefixes);
 
     let combos = py
         .allow_threads(|| {
@@ -2068,9 +2111,59 @@ pub fn mab_batch_into(
         let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
+        if cols == 0 {
+            return Err(JsValue::from_str(&MabError::EmptyInputData.to_string()));
+        }
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| JsValue::from_str("mab_batch_into: rows*cols overflow"))?;
+
+        // Initialize NaN warmup prefixes in the caller-provided buffers (needed for fast-path rows).
+        let first_valid = data
+            .iter()
+            .position(|x| !x.is_nan())
+            .ok_or(MabError::AllValuesNaN)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let valid = cols - first_valid;
+        let warmup_prefixes: Vec<usize> = combos
+            .iter()
+            .map(|p| {
+                let fast = p.fast_period.unwrap();
+                let slow = p.slow_period.unwrap();
+                if fast == 0 || slow == 0 || fast > cols || slow > cols {
+                    return Err(MabError::InvalidPeriod {
+                        fast,
+                        slow,
+                        data_len: cols,
+                    });
+                }
+                let need_total = fast.max(slow) + fast - 1;
+                if valid < need_total {
+                    return Err(MabError::NotEnoughValidData {
+                        needed: need_total,
+                        valid,
+                    });
+                }
+                Ok(first_valid + need_total)
+            })
+            .collect::<Result<Vec<_>, MabError>>()
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let mu_upper: &mut [MaybeUninit<f64>] = std::slice::from_raw_parts_mut(
+            upper_ptr as *mut MaybeUninit<f64>,
+            total,
+        );
+        let mu_middle: &mut [MaybeUninit<f64>] = std::slice::from_raw_parts_mut(
+            middle_ptr as *mut MaybeUninit<f64>,
+            total,
+        );
+        let mu_lower: &mut [MaybeUninit<f64>] = std::slice::from_raw_parts_mut(
+            lower_ptr as *mut MaybeUninit<f64>,
+            total,
+        );
+        init_matrix_prefixes(mu_upper, cols, &warmup_prefixes);
+        init_matrix_prefixes(mu_middle, cols, &warmup_prefixes);
+        init_matrix_prefixes(mu_lower, cols, &warmup_prefixes);
 
         let upper_out = std::slice::from_raw_parts_mut(upper_ptr, total);
         let middle_out = std::slice::from_raw_parts_mut(middle_ptr, total);

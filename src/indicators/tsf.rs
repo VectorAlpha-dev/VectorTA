@@ -1140,6 +1140,17 @@ fn tsf_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<TsfBatchOutput, TsfError> {
+    if data.is_empty() {
+        return Err(TsfError::EmptyInputData);
+    }
+
+    let kern = match kern {
+        Kernel::Auto | Kernel::Scalar | Kernel::ScalarBatch => Kernel::Scalar,
+        Kernel::Avx2 | Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx512,
+        other => return Err(TsfError::InvalidKernelForBatch(other)),
+    };
+
     // Build the list of TsfParams to run over
     let combos = expand_grid(sweep);
     if combos.is_empty() {
@@ -1152,8 +1163,23 @@ fn tsf_batch_inner(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(TsfError::AllValuesNaN)?;
-    // Compute the maximum period required by any combo
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    // Compute the maximum period required by any combo (and validate periods)
+    let mut max_p = 0usize;
+    for prm in &combos {
+        let p = prm.period.unwrap();
+        if p < 2 {
+            return Err(TsfError::PeriodTooSmall { period: p });
+        }
+        if p > max_p {
+            max_p = p;
+        }
+    }
+    if max_p > data.len() {
+        return Err(TsfError::InvalidPeriod {
+            period: max_p,
+            data_len: data.len(),
+        });
+    }
     if combos.len().checked_mul(max_p).is_none() {
         let (start, end, step) = sweep.period;
         return Err(TsfError::InvalidRange { start, end, step });
@@ -1266,6 +1292,17 @@ fn tsf_batch_inner_into(
     parallel: bool,
     output: &mut [f64],
 ) -> Result<Vec<TsfParams>, TsfError> {
+    if data.is_empty() {
+        return Err(TsfError::EmptyInputData);
+    }
+
+    let kern = match kern {
+        Kernel::Auto | Kernel::Scalar | Kernel::ScalarBatch => Kernel::Scalar,
+        Kernel::Avx2 | Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx512,
+        other => return Err(TsfError::InvalidKernelForBatch(other)),
+    };
+
     // Build combos
     let combos = expand_grid(sweep);
     if combos.is_empty() {
@@ -1278,7 +1315,22 @@ fn tsf_batch_inner_into(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(TsfError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let mut max_p = 0usize;
+    for prm in &combos {
+        let p = prm.period.unwrap();
+        if p < 2 {
+            return Err(TsfError::PeriodTooSmall { period: p });
+        }
+        if p > max_p {
+            max_p = p;
+        }
+    }
+    if max_p > data.len() {
+        return Err(TsfError::InvalidPeriod {
+            period: max_p,
+            data_len: data.len(),
+        });
+    }
     if combos.len().checked_mul(max_p).is_none() {
         let (start, end, step) = sweep.period;
         return Err(TsfError::InvalidRange { start, end, step });

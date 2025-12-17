@@ -247,11 +247,6 @@ fn mama_prepare<'a>(
         });
     }
 
-    // Optional sanity: fail fast if all-NaN
-    if input.as_ref().iter().all(|v| v.is_nan()) {
-        return Err(MamaError::AllValuesNaN);
-    }
-
     let fast_limit = input.get_fast_limit();
     let slow_limit = input.get_slow_limit();
     if fast_limit <= 0.0 || fast_limit.is_nan() || fast_limit.is_infinite() {

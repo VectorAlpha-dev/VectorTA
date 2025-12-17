@@ -1045,6 +1045,15 @@ pub fn ad_py<'py>(
     let close_slice = close.as_slice()?;
     let volume_slice = volume.as_slice()?;
 
+    // Match Python tests: empty input should report "Not enough data"
+    if high_slice.is_empty()
+        || low_slice.is_empty()
+        || close_slice.is_empty()
+        || volume_slice.is_empty()
+    {
+        return Err(PyValueError::new_err("Not enough data"));
+    }
+
     // Parse and validate kernel
     let kern = crate::utilities::kernel_validation::validate_kernel(kernel, false)?;
 
@@ -1204,6 +1213,10 @@ pub fn ad_js(
     close: &[f64],
     volume: &[f64],
 ) -> Result<Vec<f64>, JsValue> {
+    if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
+        return Err(JsValue::from_str("Not enough data"));
+    }
+
     let input = AdInput::from_slices(high, low, close, volume, AdParams::default());
 
     let mut output = vec![0.0; high.len()]; // Single allocation
