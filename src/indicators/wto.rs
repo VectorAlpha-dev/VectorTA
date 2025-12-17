@@ -265,11 +265,14 @@ pub fn wto_with_kernel(input: &WtoInput, kernel: Kernel) -> Result<WtoOutput, Wt
     let (data, channel_length, average_length, first, chosen) = wto_prepare(input, kernel)?;
     let len = data.len();
 
-    // Allocate output vectors with NaN prefix
-    let warmup = first + average_length + 3; // n2 + 3 for final SMA
-    let mut wavetrend1 = alloc_with_nan_prefix(len, warmup);
-    let mut wavetrend2 = alloc_with_nan_prefix(len, warmup);
-    let mut histogram = alloc_with_nan_prefix(len, warmup);
+    // Allocate output vectors with NaN prefixes matching where each series becomes defined.
+    // WT1 starts at CI start; WT2/HIST start at WT1 start + (SMA(4) warmup).
+    let ci_start = first + channel_length.saturating_sub(1);
+    let warm_wt1 = ci_start;
+    let warm_wt2_hist = ci_start.saturating_add(3);
+    let mut wavetrend1 = alloc_with_nan_prefix(len, warm_wt1);
+    let mut wavetrend2 = alloc_with_nan_prefix(len, warm_wt2_hist);
+    let mut histogram = alloc_with_nan_prefix(len, warm_wt2_hist);
 
     wto_compute_into(
         data,
@@ -309,11 +312,20 @@ pub fn wto_into_slices(
         return Err(WtoError::OutputLengthMismatch { expected, got });
     }
 
-    // First, initialize ALL output arrays with NaN
-    for i in 0..wt1.len() {
-        wt1[i] = f64::NAN;
-        wt2[i] = f64::NAN;
-        hist[i] = f64::NAN;
+    // Initialize only the warmup prefixes (avoid O(n) clearing).
+    let ci_start = first + channel_length.saturating_sub(1);
+    let warm_wt1 = ci_start.min(wt1.len());
+    let warm_wt2_hist = ci_start.saturating_add(3);
+    let warm_wt2_hist = warm_wt2_hist.min(wt2.len()).min(hist.len());
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut wt1[..warm_wt1] {
+        *v = qnan;
+    }
+    for v in &mut wt2[..warm_wt2_hist] {
+        *v = qnan;
+    }
+    for v in &mut hist[..warm_wt2_hist] {
+        *v = qnan;
     }
 
     wto_compute_into(
@@ -358,17 +370,19 @@ pub fn wto_into(
     }
 
     // Prefill warmup prefixes with the crate's canonical quiet-NaN pattern
-    let warmup = first + average_length + 3; // matches allocation path in wto_with_kernel
+    let ci_start = first + channel_length.saturating_sub(1);
+    let warm_wt1 = ci_start;
+    let warm_wt2_hist = ci_start.saturating_add(3);
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
-    let w = warmup.min(wt1_out.len());
+    let w = warm_wt1.min(wt1_out.len());
     for v in &mut wt1_out[..w] {
         *v = qnan;
     }
-    let w = warmup.min(wt2_out.len());
+    let w = warm_wt2_hist.min(wt2_out.len());
     for v in &mut wt2_out[..w] {
         *v = qnan;
     }
-    let w = warmup.min(hist_out.len());
+    let w = warm_wt2_hist.min(hist_out.len());
     for v in &mut hist_out[..w] {
         *v = qnan;
     }
@@ -419,11 +433,15 @@ fn wto_prepare<'a>(
         });
     }
 
-    let needed = average_length + 3; // Need extra for final SMA
-    if len - first < needed {
+    // Need enough valid samples for both the CI warmup and the final SMA(4) stage.
+    let valid = len - first;
+    let needed = channel_length
+        .saturating_add(3)
+        .max(average_length.saturating_add(3));
+    if valid < needed {
         return Err(WtoError::NotEnoughValidData {
             needed,
-            valid: len - first,
+            valid,
         });
     }
 
@@ -1189,8 +1207,18 @@ pub fn wto_batch_into(
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to wto_batch_into"));
     }
+    if len == 0 {
+        return Err(JsValue::from_str(&WtoError::EmptyInputData.to_string()));
+    }
+    if in_ptr == out_ptr {
+        return Err(JsValue::from_str("wto_batch_into: in_ptr and out_ptr must not alias"));
+    }
     unsafe {
         let data = core::slice::from_raw_parts(in_ptr, len);
+        let first = data
+            .iter()
+            .position(|x| !x.is_nan())
+            .ok_or_else(|| JsValue::from_str(&WtoError::AllValuesNaN.to_string()))?;
         let sweep = WtoBatchRange {
             channel: (ch_start, ch_end, ch_step),
             average: (av_start, av_end, av_step),
@@ -1202,19 +1230,52 @@ pub fn wto_batch_into(
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| JsValue::from_str("rows * cols overflow in wto_batch_into"))?;
-        let out = core::slice::from_raw_parts_mut(out_ptr, total);
 
-        // Fill with WT1 values
-        let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-        for (row, combo) in combos.iter().enumerate() {
-            let row_start = row
-                .checked_mul(cols)
-                .ok_or_else(|| JsValue::from_str("row * cols overflow in wto_batch_into"))?;
-            let row_end = row_start + cols;
-            let dst = &mut out[row_start..row_end];
-            wto_fill_wt1_row(data, combo.clone(), first, detect_best_kernel(), dst)
-                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        // Initialize warmup prefixes (WT1 only) and fill outputs in-place (grouped path).
+        let out_mu = core::slice::from_raw_parts_mut(out_ptr as *mut MaybeUninit<f64>, total);
+        let mut warms: Vec<usize> = Vec::with_capacity(rows);
+        for p in combos.iter() {
+            let channel_length = p.channel_length.unwrap_or(10);
+            let average_length = p.average_length.unwrap_or(21);
+
+            if channel_length == 0 || channel_length > cols {
+                return Err(JsValue::from_str(
+                    &WtoError::InvalidPeriod {
+                        period: channel_length,
+                        data_len: cols,
+                    }
+                    .to_string(),
+                ));
+            }
+            if average_length == 0 || average_length > cols {
+                return Err(JsValue::from_str(
+                    &WtoError::InvalidPeriod {
+                        period: average_length,
+                        data_len: cols,
+                    }
+                    .to_string(),
+                ));
+            }
+
+            let valid = cols.saturating_sub(first);
+            if valid < channel_length {
+                return Err(JsValue::from_str(
+                    &WtoError::NotEnoughValidData {
+                        needed: channel_length,
+                        valid,
+                    }
+                    .to_string(),
+                ));
+            }
+
+            let ci_start = first + channel_length - 1;
+            warms.push(ci_start);
         }
+        init_matrix_prefixes(out_mu, cols, &warms);
+
+        let out = core::slice::from_raw_parts_mut(out_ptr, total);
+        wto_fill_wt1_grouped(data, &combos, first, detect_best_kernel(), false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         Ok(rows)
     }
@@ -1933,11 +1994,36 @@ fn wto_batch_inner(
     // Make rows x cols with NaN warmups per row
     let mut mu = make_uninit_matrix(rows, cols);
     {
-        // Warmup per row: first valid + average_length + 3
-        let warms: Vec<usize> = combos
-            .iter()
-            .map(|p| first + p.average_length.unwrap_or(21) + 3)
-            .collect();
+        // Warmup per row (WT1-only): NaN until CI becomes defined.
+        let mut warms: Vec<usize> = Vec::with_capacity(rows);
+        for p in combos.iter() {
+            let channel_length = p.channel_length.unwrap_or(10);
+            let average_length = p.average_length.unwrap_or(21);
+
+            if channel_length == 0 || channel_length > cols {
+                return Err(WtoError::InvalidPeriod {
+                    period: channel_length,
+                    data_len: cols,
+                });
+            }
+            if average_length == 0 || average_length > cols {
+                return Err(WtoError::InvalidPeriod {
+                    period: average_length,
+                    data_len: cols,
+                });
+            }
+
+            let valid = cols.saturating_sub(first);
+            if valid < channel_length {
+                return Err(WtoError::NotEnoughValidData {
+                    needed: channel_length,
+                    valid,
+                });
+            }
+
+            let ci_start = first + channel_length - 1;
+            warms.push(ci_start);
+        }
         init_matrix_prefixes(&mut mu, cols, &warms);
     }
     let mut guard = core::mem::ManuallyDrop::new(mu);
@@ -2030,14 +2116,41 @@ pub fn wto_batch_all_outputs_with_kernel(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(WtoError::AllValuesNaN)?;
-    let warms: Vec<usize> = combos
-        .iter()
-        .map(|p| first + p.average_length.unwrap_or(21) + 3)
-        .collect();
+    let mut warm_wt1: Vec<usize> = Vec::with_capacity(rows);
+    let mut warm_wt2_hist: Vec<usize> = Vec::with_capacity(rows);
+    for p in combos.iter() {
+        let channel_length = p.channel_length.unwrap_or(10);
+        let average_length = p.average_length.unwrap_or(21);
 
-    init_matrix_prefixes(&mut wt1_mu, cols, &warms);
-    init_matrix_prefixes(&mut wt2_mu, cols, &warms);
-    init_matrix_prefixes(&mut hist_mu, cols, &warms);
+        if channel_length == 0 || channel_length > cols {
+            return Err(WtoError::InvalidPeriod {
+                period: channel_length,
+                data_len: cols,
+            });
+        }
+        if average_length == 0 || average_length > cols {
+            return Err(WtoError::InvalidPeriod {
+                period: average_length,
+                data_len: cols,
+            });
+        }
+
+        let valid = cols.saturating_sub(first);
+        let needed = channel_length
+            .saturating_add(3)
+            .max(average_length.saturating_add(3));
+        if valid < needed {
+            return Err(WtoError::NotEnoughValidData { needed, valid });
+        }
+
+        let ci_start = first + channel_length - 1;
+        warm_wt1.push(ci_start);
+        warm_wt2_hist.push(ci_start + 3);
+    }
+
+    init_matrix_prefixes(&mut wt1_mu, cols, &warm_wt1);
+    init_matrix_prefixes(&mut wt2_mu, cols, &warm_wt2_hist);
+    init_matrix_prefixes(&mut hist_mu, cols, &warm_wt2_hist);
 
     // Materialize as slices
     let mut wt1_guard = core::mem::ManuallyDrop::new(wt1_mu);
