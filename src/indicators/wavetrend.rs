@@ -1851,18 +1851,38 @@ fn wavetrend_batch_inner(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(WavetrendError::AllValuesNaN)?;
-    let max_ch = combos
-        .iter()
-        .map(|c| c.channel_length.unwrap())
-        .max()
-        .unwrap();
-    let max_avg = combos
-        .iter()
-        .map(|c| c.average_length.unwrap())
-        .max()
-        .unwrap();
-    let max_ma = combos.iter().map(|c| c.ma_length.unwrap()).max().unwrap();
-    let max_p = *[max_ch, max_avg, max_ma].iter().max().unwrap();
+
+    let mut max_p = 0usize;
+    let mut warmup_periods = Vec::with_capacity(combos.len());
+    for c in combos.iter() {
+        let channel_length = c.channel_length.unwrap();
+        if channel_length == 0 {
+            return Err(WavetrendError::InvalidChannelLen {
+                channel_length,
+                data_len: data.len(),
+            });
+        }
+        let average_length = c.average_length.unwrap();
+        if average_length == 0 {
+            return Err(WavetrendError::InvalidAverageLen {
+                average_length,
+                data_len: data.len(),
+            });
+        }
+        let ma_length = c.ma_length.unwrap();
+        if ma_length == 0 {
+            return Err(WavetrendError::InvalidMaLen {
+                ma_length,
+                data_len: data.len(),
+            });
+        }
+
+        max_p = max_p
+            .max(channel_length)
+            .max(average_length)
+            .max(ma_length);
+        warmup_periods.push(first + channel_length - 1 + average_length - 1 + ma_length - 1);
+    }
     if data.len() - first < max_p {
         return Err(WavetrendError::NotEnoughValidData {
             needed: max_p,
@@ -1877,16 +1897,6 @@ fn wavetrend_batch_inner(
         end: cols.to_string(),
         step: "rows*cols".into(),
     })?;
-
-    // Calculate warmup periods for each parameter combination
-    let warmup_periods: Vec<usize> = combos
-        .iter()
-        .map(|c| {
-            first + c.channel_length.unwrap() - 1 + c.average_length.unwrap() - 1
-                + c.ma_length.unwrap()
-                - 1
-        })
-        .collect();
 
     // Use helper functions for batch allocation
     let mut wt1_mu = make_uninit_matrix(rows, cols);
@@ -2044,18 +2054,36 @@ fn wavetrend_batch_inner_into(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(WavetrendError::AllValuesNaN)?;
-    let max_ch = combos
-        .iter()
-        .map(|c| c.channel_length.unwrap())
-        .max()
-        .unwrap();
-    let max_avg = combos
-        .iter()
-        .map(|c| c.average_length.unwrap())
-        .max()
-        .unwrap();
-    let max_ma = combos.iter().map(|c| c.ma_length.unwrap()).max().unwrap();
-    let max_p = *[max_ch, max_avg, max_ma].iter().max().unwrap();
+
+    let mut max_p = 0usize;
+    for c in combos.iter() {
+        let channel_length = c.channel_length.unwrap();
+        if channel_length == 0 {
+            return Err(WavetrendError::InvalidChannelLen {
+                channel_length,
+                data_len: data.len(),
+            });
+        }
+        let average_length = c.average_length.unwrap();
+        if average_length == 0 {
+            return Err(WavetrendError::InvalidAverageLen {
+                average_length,
+                data_len: data.len(),
+            });
+        }
+        let ma_length = c.ma_length.unwrap();
+        if ma_length == 0 {
+            return Err(WavetrendError::InvalidMaLen {
+                ma_length,
+                data_len: data.len(),
+            });
+        }
+
+        max_p = max_p
+            .max(channel_length)
+            .max(average_length)
+            .max(ma_length);
+    }
     if data.len() - first < max_p {
         return Err(WavetrendError::NotEnoughValidData {
             needed: max_p,
@@ -2065,11 +2093,29 @@ fn wavetrend_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    let _ = rows.checked_mul(cols).ok_or_else(|| WavetrendError::InvalidRange {
+    let total = rows.checked_mul(cols).ok_or_else(|| WavetrendError::InvalidRange {
         start: rows.to_string(),
         end: cols.to_string(),
         step: "rows*cols".into(),
     })?;
+    if out_wt1.len() != total {
+        return Err(WavetrendError::OutputSliceLengthMismatch {
+            expected: total,
+            got: out_wt1.len(),
+        });
+    }
+    if out_wt2.len() != total {
+        return Err(WavetrendError::OutputSliceLengthMismatch {
+            expected: total,
+            got: out_wt2.len(),
+        });
+    }
+    if out_wt_diff.len() != total {
+        return Err(WavetrendError::OutputSliceLengthMismatch {
+            expected: total,
+            got: out_wt_diff.len(),
+        });
+    }
 
     // Initialize NaN prefixes for each row based on warmup period
     // Since _batch_inner_into receives external buffers, we must manually initialize
