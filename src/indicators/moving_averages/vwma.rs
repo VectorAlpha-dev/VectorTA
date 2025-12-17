@@ -793,6 +793,12 @@ fn vwma_batch_inner(
     if len == 0 {
         return Err(VwmaError::EmptyInputData);
     }
+    if volume.len() != len {
+        return Err(VwmaError::PriceVolumeMismatch {
+            price_len: len,
+            volume_len: volume.len(),
+        });
+    }
     let first = price
         .iter()
         .zip(volume.iter())

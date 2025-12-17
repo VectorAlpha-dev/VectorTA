@@ -218,6 +218,18 @@ pub fn kdj_with_kernel(input: &KdjInput, kernel: Kernel) -> Result<KdjOutput, Kd
             data_len: high.len(),
         });
     }
+    if slow_k_period == 0 {
+        return Err(KdjError::InvalidPeriod {
+            period: slow_k_period,
+            data_len: high.len(),
+        });
+    }
+    if slow_d_period == 0 {
+        return Err(KdjError::InvalidPeriod {
+            period: slow_d_period,
+            data_len: high.len(),
+        });
+    }
 
     let first_valid_idx = high
         .iter()
@@ -421,6 +433,18 @@ pub fn kdj_into_slices(
     let slow_d = input.get_slow_d_period();
     let slow_k_ma = input.get_slow_k_ma_type();
     let slow_d_ma = input.get_slow_d_ma_type();
+    if slow_k == 0 {
+        return Err(KdjError::InvalidPeriod {
+            period: slow_k,
+            data_len: len,
+        });
+    }
+    if slow_d == 0 {
+        return Err(KdjError::InvalidPeriod {
+            period: slow_d,
+            data_len: len,
+        });
+    }
 
     let chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
@@ -1721,7 +1745,23 @@ fn kdj_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<KdjBatchOutput, KdjError> {
+    if high.is_empty() || low.is_empty() || close.is_empty() {
+        return Err(KdjError::EmptyInputData);
+    }
+    let cols = high.len();
+
     let combos = expand_grid(sweep)?;
+    for c in &combos {
+        let fk = c.fast_k_period.unwrap();
+        let sk = c.slow_k_period.unwrap();
+        let sd = c.slow_d_period.unwrap();
+        if fk == 0 || sk == 0 || sd == 0 {
+            return Err(KdjError::InvalidPeriod {
+                period: 0,
+                data_len: cols,
+            });
+        }
+    }
     let first = high
         .iter()
         .zip(low.iter())
@@ -1741,7 +1781,6 @@ fn kdj_batch_inner(
         });
     }
     let rows = combos.len();
-    let cols = high.len();
     let _ = rows
         .checked_mul(cols)
         .ok_or(KdjError::InvalidRange {
@@ -4015,8 +4054,12 @@ fn kdj_classic_sma(
         }
     }
 
-    if count_k > 0 && k_warm < len {
-        k_out[k_warm] = sum_k / count_k as f64;
+    if k_warm < len {
+        k_out[k_warm] = if count_k > 0 {
+            sum_k / count_k as f64
+        } else {
+            f64::NAN
+        };
 
         // Rolling SMA for K
         for i in (k_warm + 1)..len {
@@ -4056,8 +4099,12 @@ fn kdj_classic_sma(
         }
     }
 
-    if count_d > 0 && d_warm < len {
-        d_out[d_warm] = sum_d / count_d as f64;
+    if d_warm < len {
+        d_out[d_warm] = if count_d > 0 {
+            sum_d / count_d as f64
+        } else {
+            f64::NAN
+        };
 
         // Rolling SMA for D
         for i in (d_warm + 1)..len {
@@ -4127,18 +4174,24 @@ fn kdj_classic_ema(
         }
     }
 
-    if count_k > 0 && k_warm < len {
-        let mut ema_k = sum_k / count_k as f64;
+    let mut ema_k = f64::NAN;
+    if k_warm < len {
+        if count_k > 0 {
+            ema_k = sum_k / count_k as f64;
+        }
         k_out[k_warm] = ema_k;
 
         // Continue EMA for K
         for i in (k_warm + 1)..len {
-            if !stoch[i].is_nan() {
-                ema_k = stoch[i].mul_add(alpha_k, one_minus_alpha_k * ema_k);
-                k_out[i] = ema_k;
-            } else {
-                k_out[i] = ema_k; // Carry forward last valid value
+            let st = stoch[i];
+            if !st.is_nan() {
+                ema_k = if ema_k.is_nan() {
+                    st
+                } else {
+                    st.mul_add(alpha_k, one_minus_alpha_k * ema_k)
+                };
             }
+            k_out[i] = ema_k;
         }
     }
 
@@ -4162,18 +4215,24 @@ fn kdj_classic_ema(
         }
     }
 
-    if count_d > 0 && d_warm < len {
-        let mut ema_d = sum_d / count_d as f64;
+    let mut ema_d = f64::NAN;
+    if d_warm < len {
+        if count_d > 0 {
+            ema_d = sum_d / count_d as f64;
+        }
         d_out[d_warm] = ema_d;
 
         // Continue EMA for D
         for i in (d_warm + 1)..len {
-            if !k_out[i].is_nan() {
-                ema_d = k_out[i].mul_add(alpha_d, one_minus_alpha_d * ema_d);
-                d_out[i] = ema_d;
-            } else {
-                d_out[i] = ema_d; // Carry forward last valid value
+            let kv = k_out[i];
+            if !kv.is_nan() {
+                ema_d = if ema_d.is_nan() {
+                    kv
+                } else {
+                    kv.mul_add(alpha_d, one_minus_alpha_d * ema_d)
+                };
             }
+            d_out[i] = ema_d;
         }
     }
 

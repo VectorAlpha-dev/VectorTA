@@ -1764,55 +1764,36 @@ pub fn devstop_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    let combos = expand_grid_devstop(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let rows = combos.len();
-    let cols = h.len();
-
-    let total = rows
-        .checked_mul(cols)
-        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-    py.allow_threads(|| {
-        let k = match kern {
-            Kernel::Auto => detect_best_batch_kernel(),
-            k => k,
-        };
-        let simd = match k {
-            Kernel::Avx512Batch => Kernel::Avx512,
-            Kernel::Avx2Batch => Kernel::Avx2,
-            Kernel::ScalarBatch => Kernel::Scalar,
-            _ => Kernel::Scalar, // Default to Scalar for any other kernel
-        };
-        // Compute into `slice_out` directly:
-        for (row, combo) in combos.iter().enumerate() {
-            let start = row * cols;
-            let input = DevStopInput {
-                data: DevStopData::SliceHL(h, l),
-                params: combo.clone(),
-            };
-            let warm = {
-                let fh = h.iter().position(|x| !x.is_nan()).unwrap_or(0);
-                let fl = l.iter().position(|x| !x.is_nan()).unwrap_or(0);
-                devstop_warmup(fh.min(fl), combo.period.unwrap())
-            };
-            let dst = &mut slice_out[start..start + cols];
-            for v in &mut dst[..warm.min(cols)] {
-                *v = f64::NAN;
+    // Delegate to the core Rust batch API so Python batch semantics (warmup, errors)
+    // exactly match Rust and WASM devstop_batch_* bindings.
+    let out = py
+        .allow_threads(|| devstop_batch_with_kernel(h, l, &sweep, kern))
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("InvalidPeriod") || msg.contains("Invalid period") {
+                PyValueError::new_err("Invalid period")
+            } else if msg.contains("NotEnoughValidData") || msg.contains("Not enough valid data") {
+                PyValueError::new_err("Not enough valid data")
+            } else if msg.contains("AllValuesNaN") || msg.contains("All values are NaN") {
+                PyValueError::new_err("All values are NaN")
+            } else {
+                PyValueError::new_err(msg)
             }
-            devstop_into_slice(dst, &input, simd).map_err(|e| format!("{}", e))?;
-        }
-        Ok::<(), String>(())
-    })
-    .map_err(|e: String| PyValueError::new_err(e))?;
+        })?;
+
+    let rows = out.rows;
+    let cols = out.cols;
+
+    let values_arr = out.values.into_pyarray(py);
+    let values_2d = values_arr
+        .reshape((rows, cols))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let d = PyDict::new(py);
-    d.set_item("values", out_arr.reshape((rows, cols))?)?;
+    d.set_item("values", values_2d)?;
     d.set_item(
         "periods",
-        combos
+        out.combos
             .iter()
             .map(|p| p.period.unwrap() as u64)
             .collect::<Vec<_>>()
@@ -1820,7 +1801,7 @@ pub fn devstop_batch_py<'py>(
     )?;
     d.set_item(
         "mults",
-        combos
+        out.combos
             .iter()
             .map(|p| p.mult.unwrap())
             .collect::<Vec<_>>()
@@ -1828,7 +1809,7 @@ pub fn devstop_batch_py<'py>(
     )?;
     d.set_item(
         "devtypes",
-        combos
+        out.combos
             .iter()
             .map(|p| p.devtype.unwrap() as u64)
             .collect::<Vec<_>>()

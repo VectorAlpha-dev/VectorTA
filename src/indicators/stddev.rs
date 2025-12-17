@@ -800,6 +800,27 @@ fn expand_grid_checked(r: &StdDevBatchRange) -> Result<Vec<StdDevParams>, StdDev
     }
 
     let periods = axis_usize(r.period)?;
+    if periods.iter().any(|&p| p == 0) {
+        return Err(StdDevError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+
+    let (nb_start, nb_end, nb_step) = r.nbdev;
+    if !nb_start.is_finite() || nb_start < 0.0 {
+        return Err(StdDevError::InvalidNbdev { nbdev: nb_start });
+    }
+    if !nb_end.is_finite() || nb_end < 0.0 {
+        return Err(StdDevError::InvalidNbdev { nbdev: nb_end });
+    }
+    if !nb_step.is_finite() {
+        return Err(StdDevError::InvalidRange {
+            start: nb_start.to_string(),
+            end: nb_end.to_string(),
+            step: nb_step.to_string(),
+        });
+    }
     let nbdevs = axis_f64(r.nbdev)?;
     let cap = periods
         .len()
@@ -871,6 +892,11 @@ fn stddev_batch_inner(
     }
     let rows = combos.len();
     let cols = len;
+
+    // Guard rows*cols overflow before allocating the output matrix.
+    let _ = rows.checked_mul(cols).ok_or_else(|| StdDevError::InvalidInput {
+        msg: "stddev: rows*cols overflow in batch".to_string(),
+    })?;
 
     // Calculate warmup periods for each row
     let warm: Vec<usize> = combos
@@ -1352,8 +1378,11 @@ pub fn stddev_batch_py<'py>(
     let combos = expand_grid_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py

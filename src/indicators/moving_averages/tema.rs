@@ -1933,7 +1933,8 @@ pub fn tema_into_slice(dst: &mut [f64], input: &TemaInput, kern: Kernel) -> Resu
     }
     tema_compute_into(data, period, first, chosen, dst);
     let warm = first + (period - 1) * 3;
-    for v in &mut dst[..warm] {
+    let pref = warm.min(len);
+    for v in &mut dst[..pref] {
         *v = f64::NAN;
     }
     Ok(())

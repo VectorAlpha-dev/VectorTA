@@ -237,7 +237,7 @@ impl BollingerBandsBuilder {
 
 #[derive(Debug, Error)]
 pub enum BollingerBandsError {
-    #[error("bollinger_bands: Empty input data.")]
+    #[error("bollinger_bands: Empty data provided.")]
     EmptyInputData,
     #[error("bollinger_bands: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },

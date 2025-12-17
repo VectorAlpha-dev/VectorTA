@@ -1609,6 +1609,12 @@ fn ott_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(OttError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if max_p == 0 || max_p > cols {
+        return Err(OttError::InvalidPeriod {
+            period: max_p,
+            data_len: cols,
+        });
+    }
     if cols - first < max_p {
         return Err(OttError::NotEnoughValidData {
             needed: max_p,
@@ -1634,6 +1640,16 @@ fn ott_batch_inner_into(
     let mut ma_cache: HashMap<(usize, String), (Vec<f64>, usize)> = HashMap::new();
     for prm in &combos {
         let p = prm.period.unwrap();
+        if p == 0 || p > cols {
+            return Err(OttError::InvalidPeriod {
+                period: p,
+                data_len: cols,
+            });
+        }
+        let pct = prm.percent.unwrap();
+        if pct < 0.0 || !pct.is_finite() {
+            return Err(OttError::InvalidPercent { percent: pct });
+        }
         let mt = prm.ma_type.as_deref().unwrap().to_uppercase();
         if !ma_cache.contains_key(&(p, mt.clone())) {
             let ma = calculate_moving_average(data, p, &mt, row_kern).map_err(|e| {
@@ -1927,6 +1943,28 @@ pub fn ott_cuda_batch_dev_py(
         percent: percent_range,
         ma_types,
     };
+    // Validate sweep params using the same rules as CPU batch.
+    let combos =
+        expand_grid_ott(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let cols = slice_in.len();
+    for prm in &combos {
+        let p = prm.period.unwrap();
+        if p == 0 || p > cols {
+            return Err(PyValueError::new_err(
+                OttError::InvalidPeriod {
+                    period: p,
+                    data_len: cols,
+                }
+                .to_string(),
+            ));
+        }
+        let pct = prm.percent.unwrap();
+        if pct < 0.0 || !pct.is_finite() {
+            return Err(PyValueError::new_err(
+                OttError::InvalidPercent { percent: pct }.to_string(),
+            ));
+        }
+    }
     let inner = py.allow_threads(|| {
         let cuda = CudaOtt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.ott_batch_dev(slice_in, &sweep)
@@ -2220,6 +2258,20 @@ pub fn ott_batch_into(
             let p = prm.period.unwrap();
             let pct = prm.percent.unwrap();
             let mt = prm.ma_type.as_deref().unwrap();
+            if p == 0 || p > cols {
+                return Err(JsValue::from_str(
+                    &OttError::InvalidPeriod {
+                        period: p,
+                        data_len: cols,
+                    }
+                    .to_string(),
+                ));
+            }
+            if pct < 0.0 || !pct.is_finite() {
+                return Err(JsValue::from_str(
+                    &OttError::InvalidPercent { percent: pct }.to_string(),
+                ));
+            }
 
             let ma = calculate_moving_average(data, p, mt, row_kern)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;

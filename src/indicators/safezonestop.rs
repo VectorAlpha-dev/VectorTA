@@ -1310,12 +1310,21 @@ fn safezonestop_batch_inner(
     parallel: bool,
 ) -> Result<SafeZoneStopBatchOutput, SafeZoneStopError> {
     let combos = expand_grid(sweep)?;
+    if direction != "long" && direction != "short" {
+        return Err(SafeZoneStopError::InvalidDirection);
+    }
     if high.len() != low.len() {
         return Err(SafeZoneStopError::MismatchedLengths);
     }
     let len = high.len();
     if len == 0 {
         return Err(SafeZoneStopError::EmptyInputData);
+    }
+    for c in combos.iter() {
+        let p = c.period.unwrap();
+        if p == 0 || p > len {
+            return Err(SafeZoneStopError::InvalidPeriod { period: p, data_len: len });
+        }
     }
     let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
     let max_need = combos
@@ -1450,12 +1459,21 @@ pub fn safezonestop_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<SafeZoneStopParams>, SafeZoneStopError> {
     let combos = expand_grid(sweep)?;
+    if direction != "long" && direction != "short" {
+        return Err(SafeZoneStopError::InvalidDirection);
+    }
     if high.len() != low.len() {
         return Err(SafeZoneStopError::MismatchedLengths);
     }
     let len = high.len();
     if len == 0 {
         return Err(SafeZoneStopError::EmptyInputData);
+    }
+    for c in combos.iter() {
+        let p = c.period.unwrap();
+        if p == 0 || p > len {
+            return Err(SafeZoneStopError::InvalidPeriod { period: p, data_len: len });
+        }
     }
     let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
     let max_need = combos
@@ -1484,6 +1502,15 @@ pub fn safezonestop_batch_inner_into(
             got: out.len(),
         });
     }
+
+    let out_uninit = unsafe {
+        core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>, out.len())
+    };
+    let warm_prefixes: Vec<usize> = combos
+        .iter()
+        .map(|c| warm_len(first, c.period.unwrap(), c.max_lookback.unwrap()))
+        .collect();
+    init_matrix_prefixes(out_uninit, cols, &warm_prefixes);
 
     // Precompute dm_raw once per direction
     let dir_long = direction
@@ -1521,7 +1548,11 @@ pub fn safezonestop_batch_inner_into(
         }
     }
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    let do_row = |row: usize, out_row_mu: &mut [core::mem::MaybeUninit<f64>]| unsafe {
+        let out_row = core::slice::from_raw_parts_mut(
+            out_row_mu.as_mut_ptr() as *mut f64,
+            out_row_mu.len(),
+        );
         let p = combos[row].period.unwrap();
         let m = combos[row].mult.unwrap();
         let lb = combos[row].max_lookback.unwrap();
@@ -1542,19 +1573,20 @@ pub fn safezonestop_batch_inner_into(
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            out.par_chunks_mut(cols)
+            out_uninit
+                .par_chunks_mut(cols)
                 .enumerate()
                 .for_each(|(row, slice)| do_row(row, slice));
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            for (row, slice) in out.chunks_mut(cols).enumerate() {
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
                 do_row(row, slice);
             }
         }
     } else {
-        for (row, slice) in out.chunks_mut(cols).enumerate() {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
@@ -1637,6 +1669,21 @@ unsafe fn safezonestop_row_scalar_with_dmraw(
             }
             let mut dm_prev = boot_sum;
             let alpha = 1.0 - 1.0 / (period as f64);
+
+            // Seed the deque with the first candidate at j=end0 so the first
+            // non-warm output index (which can be end0) is always initialized.
+            let cand0 = if dir_long {
+                (-mult).mul_add(dm_prev, *low.get_unchecked(end0 - 1))
+            } else {
+                mult.mul_add(dm_prev, *high.get_unchecked(end0 - 1))
+            };
+            *q_idx.get_unchecked_mut(q_tail) = end0;
+            *q_val.get_unchecked_mut(q_tail) = cand0;
+            q_tail = ring_inc(q_tail, cap);
+            q_len = 1;
+            if end0 >= warm {
+                *out.get_unchecked_mut(end0) = cand0;
+            }
 
             for i in (end0 + 1)..len {
                 // j == i here

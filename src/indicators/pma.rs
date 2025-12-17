@@ -163,6 +163,22 @@ pub enum PmaError {
     SizeOverflow { rows: usize, cols: usize },
 }
 
+#[inline(always)]
+fn pma_first_valid_idx(data: &[f64]) -> Result<usize, PmaError> {
+    if data.is_empty() {
+        return Err(PmaError::EmptyInputData);
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(PmaError::AllValuesNaN)?;
+    let valid = data.len() - first;
+    if valid < 7 {
+        return Err(PmaError::NotEnoughValidData { needed: 7, valid });
+    }
+    Ok(first)
+}
+
 #[inline]
 pub fn pma(input: &PmaInput) -> Result<PmaOutput, PmaError> {
     pma_with_kernel(input, Kernel::Auto)
@@ -174,19 +190,7 @@ pub fn pma_with_kernel(input: &PmaInput, kernel: Kernel) -> Result<PmaOutput, Pm
         PmaData::Slice(sl) => sl,
     };
 
-    if data.is_empty() {
-        return Err(PmaError::EmptyInputData);
-    }
-
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(PmaError::AllValuesNaN)?;
-
-    let valid = data.len() - first;
-    if valid < 7 {
-        return Err(PmaError::NotEnoughValidData { needed: 7, valid });
-    }
+    let first = pma_first_valid_idx(data)?;
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -550,17 +554,7 @@ pub fn pma_batch_unified_with_kernel(
 
 #[inline]
 fn pma_batch_unified_inner(data: &[f64], kern: Kernel) -> Result<PmaBatchOutputUnified, PmaError> {
-    if data.is_empty() {
-        return Err(PmaError::EmptyInputData);
-    }
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(PmaError::AllValuesNaN)?;
-    let valid = data.len() - first;
-    if valid < 7 {
-        return Err(PmaError::NotEnoughValidData { needed: 7, valid });
-    }
+    let first = pma_first_valid_idx(data)?;
 
     let rows = 2usize;
     let cols = data.len();
@@ -768,13 +762,13 @@ fn pma_batch_inner(
     kern: Kernel,
     _parallel: bool,
 ) -> Result<PmaBatchOutput, PmaError> {
-    let params = PmaParams {};
+    let first = pma_first_valid_idx(data)?;
     let out = match kern {
-        Kernel::Scalar => pma_scalar(data, data.iter().position(|x| !x.is_nan()).unwrap_or(0))?,
+        Kernel::Scalar => pma_scalar(data, first)?,
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 => pma_avx2(data, data.iter().position(|x| !x.is_nan()).unwrap_or(0))?,
+        Kernel::Avx2 => pma_avx2(data, first)?,
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512 => pma_avx512(data, data.iter().position(|x| !x.is_nan()).unwrap_or(0))?,
+        Kernel::Avx512 => pma_avx512(data, first)?,
         _ => unreachable!(),
     };
     Ok(PmaBatchOutput {
@@ -873,19 +867,7 @@ pub fn pma_into_slice(
         });
     }
 
-    if data.is_empty() {
-        return Err(PmaError::EmptyInputData);
-    }
-
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(PmaError::AllValuesNaN)?;
-
-    let valid = data.len() - first;
-    if valid < 7 {
-        return Err(PmaError::NotEnoughValidData { needed: 7, valid });
-    }
+    let first = pma_first_valid_idx(data)?;
 
     let chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
@@ -930,9 +912,14 @@ pub fn pma_into(
 #[wasm_bindgen]
 pub fn pma_js(data: &[f64]) -> Result<Vec<f64>, JsValue> {
     let input = PmaInput::from_slice(data, PmaParams {});
-    let mut values = vec![0.0; 2 * data.len()];
+    let rows = 2usize;
+    let cols = data.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str(&PmaError::SizeOverflow { rows, cols }.to_string()))?;
+    let mut values = vec![0.0; total];
     {
-        let (pred, trig) = values.split_at_mut(data.len());
+        let (pred, trig) = values.split_at_mut(cols);
         pma_into_slice(pred, trig, &input, detect_best_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
@@ -1061,15 +1048,20 @@ pub fn pma_unified_into(
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer"));
     }
+    let rows = 2usize;
+    let cols = len;
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str(&PmaError::SizeOverflow { rows, cols }.to_string()))?;
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
-        let out = std::slice::from_raw_parts_mut(out_ptr, 2 * len);
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         let input = PmaInput::from_slice(data, PmaParams {});
-        let (pred, trig) = out.split_at_mut(len);
+        let (pred, trig) = out.split_at_mut(cols);
         pma_into_slice(pred, trig, &input, detect_best_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
-    Ok(2) // rows
+    Ok(rows) // rows
 }
 
 #[cfg(feature = "wasm")]
@@ -1185,29 +1177,29 @@ pub fn pma_batch_py<'py>(
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let (rows, cols) = (2usize, slice_in.len());
+    let size = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err(PmaError::SizeOverflow { rows, cols }.to_string()))?;
 
     // Preallocate one flat array; fill directly with our unified inner
-    let values_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let values_arr = unsafe { PyArray1::<f64>::new(py, [size], false) };
     let values_slice = unsafe { values_arr.as_slice_mut()? };
 
-    py.allow_threads(|| {
+    py.allow_threads(|| -> PyResult<()> {
         // Compute directly into values_slice without intermediate copies
-        let first = slice_in
-            .iter()
-            .position(|x| !x.is_nan())
-            .ok_or_else(|| PyValueError::new_err("All NaN"))?;
-        if (slice_in.len() - first) < 7 {
-            return Err(PyValueError::new_err("Not enough valid data"));
-        }
+        let first = pma_first_valid_idx(slice_in)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        // NaN warmup for both rows
+        // NaN warmup for both rows (ALMA-style prefix init)
         let warm = first + 7 - 1;
-        for v in &mut values_slice[..warm] {
-            *v = f64::NAN;
-        }
-        for v in &mut values_slice[cols..cols + warm] {
-            *v = f64::NAN;
-        }
+        let warm_prefixes = [warm; 2];
+        let values_mu: &mut [core::mem::MaybeUninit<f64>] = unsafe {
+            core::slice::from_raw_parts_mut(
+                values_slice.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>,
+                values_slice.len(),
+            )
+        };
+        init_matrix_prefixes(values_mu, cols, &warm_prefixes);
 
         let (row0, row1) = values_slice.split_at_mut(cols);
         pma_compute_into(

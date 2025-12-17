@@ -1142,16 +1142,28 @@ fn zscore_batch_inner(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(ZscoreError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    if data.len() - first < max_p {
+    let cols = data.len();
+    let mut max_p = 0usize;
+    for prm in &combos {
+        let period = prm.period.unwrap();
+        if period == 0 || period > cols {
+            return Err(ZscoreError::InvalidPeriod {
+                period,
+                data_len: cols,
+            });
+        }
+        if period > max_p {
+            max_p = period;
+        }
+    }
+    if cols - first < max_p {
         return Err(ZscoreError::NotEnoughValidData {
             needed: max_p,
-            valid: data.len() - first,
+            valid: cols - first,
         });
     }
 
     let rows = combos.len();
-    let cols = data.len();
 
     rows.checked_mul(cols).ok_or(ZscoreError::InvalidRange {
         start: rows as f64,
@@ -1967,16 +1979,28 @@ pub fn zscore_batch_inner_into(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(ZscoreError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    if data.len() - first < max_p {
+    let cols = data.len();
+    let mut max_p = 0usize;
+    for prm in &combos {
+        let period = prm.period.unwrap();
+        if period == 0 || period > cols {
+            return Err(ZscoreError::InvalidPeriod {
+                period,
+                data_len: cols,
+            });
+        }
+        if period > max_p {
+            max_p = period;
+        }
+    }
+    if cols - first < max_p {
         return Err(ZscoreError::NotEnoughValidData {
             needed: max_p,
-            valid: data.len() - first,
+            valid: cols - first,
         });
     }
 
     let rows = combos.len();
-    let cols = data.len();
 
     let expected = rows
         .checked_mul(cols)
@@ -1992,22 +2016,20 @@ pub fn zscore_batch_inner_into(
         });
     }
 
-    // Initialize NaN prefixes for each row based on warmup period
-    // This is critical for external buffers from Python/WASM that contain garbage
-    for (row, combo) in combos.iter().enumerate() {
-        let period = combo.period.unwrap();
-        let warmup = first
-            .checked_add(period)
-            .and_then(|v| v.checked_sub(1))
-            .ok_or(ZscoreError::InvalidRange {
-                start: first as f64,
-                end: period as f64,
-                step: 1.0,
-            })?;
-        let row_start = row * cols;
-        for i in 0..warmup.min(cols) {
-            out[row_start + i] = f64::NAN;
-        }
+    // Initialize warmup prefixes (NaN) in the output buffer so that all rows/columns
+    // are initialized before being exposed via Python/WASM.
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+    {
+        let out_uninit = unsafe {
+            std::slice::from_raw_parts_mut(
+                out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
+                out.len(),
+            )
+        };
+        init_matrix_prefixes(out_uninit, cols, &warm);
     }
 
     let mut groups: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();

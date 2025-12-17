@@ -902,6 +902,17 @@ fn linearreg_angle_batch_inner(
             step: sweep.period.2,
         });
     }
+
+    // Validate all periods are >= 2 (linear regression needs at least 2 points)
+    for combo in &combos {
+        let period = combo.period.unwrap();
+        if period < 2 {
+            return Err(Linearreg_angleError::InvalidPeriod {
+                period,
+                data_len: data.len(),
+            });
+        }
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -2146,8 +2157,33 @@ pub fn linearreg_angle_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
+    // Validate all periods are >= 2 before computing warmups/allocating.
+    for combo in &combos {
+        let period = combo.period.unwrap();
+        if period < 2 {
+            return Err(PyValueError::new_err(
+                Linearreg_angleError::InvalidPeriod {
+                    period,
+                    data_len: cols,
+                }
+                .to_string(),
+            ));
+        }
+    }
+
+    let total = rows.checked_mul(cols).ok_or_else(|| {
+        PyValueError::new_err(
+            Linearreg_angleError::InvalidRange {
+                start: sweep.period.0,
+                end: sweep.period.1,
+                step: sweep.period.2,
+            }
+            .to_string(),
+        )
+    })?;
+
     // Allocate uninitialized flat output (rows*cols), like alma.rs
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Warmup prefixes via helper, zero-copy, before compute
@@ -2392,6 +2428,17 @@ fn linearreg_angle_batch_inner_into(
         });
     }
 
+    // Validate all periods are >= 2 (linear regression needs at least 2 points)
+    for combo in &combos {
+        let period = combo.period.unwrap();
+        if period < 2 {
+            return Err(Linearreg_angleError::InvalidPeriod {
+                period,
+                data_len: data.len(),
+            });
+        }
+    }
+
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -2534,7 +2581,7 @@ pub fn linearreg_angle_into(
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        if period == 0 || period > len {
+        if period < 2 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
