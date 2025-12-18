@@ -300,15 +300,15 @@ impl DecyclerBuilder {
 
 #[derive(Debug, Error)]
 pub enum DecyclerError {
-    #[error("decycler: empty input data")]
+    #[error("decycler: Empty data provided.")]
     EmptyInputData,
-    #[error("decycler: invalid period: hp_period = {period}, data length = {data_len}")]
+    #[error("decycler: Invalid period: hp_period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("decycler: not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("decycler: all values are NaN")]
+    #[error("decycler: All values are NaN")]
     AllValuesNaN,
-    #[error("decycler: invalid k: k = {k}")]
+    #[error("decycler: Invalid k: k = {k}")]
     InvalidK { k: f64 },
     #[error("decycler: output length mismatch: expected={expected}, got={got}")]
     OutputLengthMismatch { expected: usize, got: usize },

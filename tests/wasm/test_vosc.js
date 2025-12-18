@@ -6,7 +6,6 @@ import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createRequire } from 'module';
 import { 
     loadTestData, 
     assertArrayClose, 
@@ -24,15 +23,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load a known-good NodeJS wrapper to avoid ESM/"env" import issues
     try {
-        const req = createRequire(import.meta.url);
-        // Use the full CommonJS wrapper copy to avoid ESM 'module' issues
-        const mod = req(path.join(__dirname, 'my_project_full.cjs'));
-        wasm = mod; // CommonJS exports
+        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+        const importPath = process.platform === 'win32'
+            ? 'file:///' + wasmPath.replace(/\\/g, '/')
+            : wasmPath;
+        wasm = await import(importPath);
     } catch (error) {
-        console.error('Failed to load local WASM wrapper (tests/wasm/my_project.js).');
-        console.error('If missing, run: wasm-pack build -- --features wasm --no-default-features');
+        console.error('Failed to load WASM module. Run "wasm-pack build --target nodejs -- --features wasm --no-default-features" first');
         throw error;
     }
 

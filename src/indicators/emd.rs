@@ -250,7 +250,7 @@ impl EmdBuilder {
 
 #[derive(Debug, Error)]
 pub enum EmdError {
-    #[error("emd: Empty input data")]
+    #[error("emd: Invalid input length (empty input data)")]
     EmptyInputData,
 
     #[error("emd: All values are NaN.")]

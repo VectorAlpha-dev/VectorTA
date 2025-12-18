@@ -106,7 +106,7 @@ test('trima_empty_input', () => {
     
     assert.throws(() => {
         wasm.trima_js(empty, 9);
-    }, /No data provided/);
+    }, /empty/i);
 });
 
 test('trima_period_too_small', () => {

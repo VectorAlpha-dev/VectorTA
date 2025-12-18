@@ -2256,7 +2256,7 @@ pub fn lpc_batch_unified_js(
         cutoff_type: cfg.cutoff_type,
         max_cycle_limit: cfg.max_cycle_limit,
     };
-    let out = lpc_batch_with_kernel(high, low, close, src, &sweep, detect_best_kernel())
+    let out = lpc_batch_with_kernel(high, low, close, src, &sweep, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     // Convert flat values to 2D array for JavaScript

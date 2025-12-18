@@ -269,7 +269,7 @@ impl VlmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum VlmaError {
-    #[error("vlma: Input data slice is empty.")]
+    #[error("vlma: Empty data provided.")]
     EmptyInputData,
     #[error("vlma: min_period={min_period} is greater than max_period={max_period}.")]
     InvalidPeriodRange {

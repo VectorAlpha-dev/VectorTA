@@ -90,7 +90,7 @@ class TestPpo:
         """Test PPO fails with empty input"""
         empty = np.array([])
         
-        with pytest.raises(ValueError, match="All values are NaN"):
+        with pytest.raises(ValueError, match="Empty data"):
             ta_indicators.ppo(empty, fast_period=12, slow_period=26, ma_type='sma')
     
     def test_ppo_nan_handling(self, test_data):

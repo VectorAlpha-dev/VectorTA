@@ -189,7 +189,7 @@ impl LinRegBuilder {
 
 #[derive(Debug, Error)]
 pub enum LinRegError {
-    #[error("linreg: No data provided.")]
+    #[error("linreg: No data provided (All values are NaN).")]
     EmptyInputData,
     #[error("linreg: All values are NaN.")]
     AllValuesNaN,

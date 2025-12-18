@@ -504,14 +504,14 @@ test('VolumeAdjustedMa zero-copy API', () => {
     assert(volPtr !== 0, 'Failed to allocate volume memory');
     
     // Create views into WASM memory
-    const memory = wasm.__wbindgen_memory();
+    const memory = wasm.__wasm.memory.buffer;
     const dataView = new Float64Array(
-        memory.buffer,
+        memory,
         dataPtr,
         data.length
     );
     const volView = new Float64Array(
-        memory.buffer,
+        memory,
         volPtr,
         volume.length
     );
@@ -555,17 +555,17 @@ test('VolumeAdjustedMa zero-copy with large dataset', () => {
     assert(volPtr !== 0, 'Failed to allocate large volume buffer');
     
     try {
-        const memory = wasm.__wbindgen_memory();
-        const dataView = new Float64Array(memory.buffer, dataPtr, size);
-        const volView = new Float64Array(memory.buffer, volPtr, size);
+        const memory = wasm.__wasm.memory.buffer;
+        const dataView = new Float64Array(memory, dataPtr, size);
+        const volView = new Float64Array(memory, volPtr, size);
         dataView.set(data);
         volView.set(volume);
         
         wasm.volume_adjusted_ma_into(dataPtr, volPtr, dataPtr, size, 13, 0.67, true, 0);
         
         // Recreate view in case memory grew
-        const memory2 = wasm.__wbindgen_memory();
-        const dataView2 = new Float64Array(memory2.buffer, dataPtr, size);
+        const memory2 = wasm.__wasm.memory.buffer;
+        const dataView2 = new Float64Array(memory2, dataPtr, size);
         
         // Check warmup period has NaN
         for (let i = 0; i < 12; i++) {
@@ -620,9 +620,9 @@ test('VolumeAdjustedMa zero-copy memory management', () => {
         assert(volPtr !== 0, `Failed to allocate ${size} volume elements`);
         
         // Write pattern to verify memory
-        const memory = wasm.__wbindgen_memory();
-        const dataView = new Float64Array(memory.buffer, dataPtr, size);
-        const volView = new Float64Array(memory.buffer, volPtr, size);
+        const memory = wasm.__wasm.memory.buffer;
+        const dataView = new Float64Array(memory, dataPtr, size);
+        const volView = new Float64Array(memory, volPtr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             dataView[i] = i * 1.5;
             volView[i] = i * 100.0;

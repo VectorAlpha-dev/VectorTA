@@ -161,7 +161,7 @@ pub struct KdjOutput {
 
 #[derive(Debug, Error)]
 pub enum KdjError {
-    #[error("kdj: Input data slice is empty (empty data).")]
+    #[error("kdj: Empty data provided.")]
     EmptyInputData,
     #[error("kdj: Empty data provided.")]
     EmptyData,

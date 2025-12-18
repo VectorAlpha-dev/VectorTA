@@ -560,85 +560,10 @@ pub fn hwma_scalar(data: &[f64], na: f64, nb: f64, nc: f64, first_valid: usize, 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 unsafe fn hwma_simd128(data: &[f64], na: f64, nb: f64, nc: f64, first: usize, out: &mut [f64]) {
-    use core::arch::wasm32::*;
-
-    debug_assert_eq!(data.len(), out.len());
-    if first >= data.len() {
-        return;
-    }
-
-    // Pre-compute complements once.
-    let one_m_na = 1.0 - na;
-    let one_m_nb = 1.0 - nb;
-    let one_m_nc = 1.0 - nc;
-    const HALF: f64 = 0.5;
-
-    // State registers - we process 2 elements at a time with SIMD128
-    let mut f = f64x2_splat(data[first]); // level
-    let mut v = f64x2_splat(0.0); // velocity / trend
-    let mut a = f64x2_splat(0.0); // acceleration
-
-    // Broadcast coefficients
-    let na_vec = f64x2_splat(na);
-    let one_m_na_vec = f64x2_splat(one_m_na);
-    let nb_vec = f64x2_splat(nb);
-    let one_m_nb_vec = f64x2_splat(one_m_nb);
-    let nc_vec = f64x2_splat(nc);
-    let one_m_nc_vec = f64x2_splat(one_m_nc);
-    let half_vec = f64x2_splat(HALF);
-
-    // Initialize first element
-    out[first] = data[first];
-
-    // Process two elements at a time
-    let mut i = first + 1;
-    while i + 1 < data.len() {
-        // Load two prices
-        let price = v128_load(data.as_ptr().add(i) as *const v128);
-
-        // f = na·price + (1-na)·(f + v + 0.5 a)
-        let fv_sum = f64x2_add(f, f64x2_add(v, f64x2_mul(half_vec, a)));
-        let f_new = f64x2_add(f64x2_mul(na_vec, price), f64x2_mul(one_m_na_vec, fv_sum));
-
-        // v = nb·(f_new - f) + (1-nb)·(v + a)
-        let v_new = f64x2_add(
-            f64x2_mul(nb_vec, f64x2_sub(f_new, f)),
-            f64x2_mul(one_m_nb_vec, f64x2_add(v, a)),
-        );
-
-        // a = nc·(v_new - v) + (1-nc)·a
-        let a_new = f64x2_add(
-            f64x2_mul(nc_vec, f64x2_sub(v_new, v)),
-            f64x2_mul(one_m_nc_vec, a),
-        );
-
-        // Output HWMA = f + v + 0.5 a
-        let result = f64x2_add(f_new, f64x2_add(v_new, f64x2_mul(half_vec, a_new)));
-        v128_store(out.as_mut_ptr().add(i) as *mut v128, result);
-
-        // Roll state
-        f = f_new;
-        v = v_new;
-        a = a_new;
-
-        i += 2;
-    }
-
-    // Handle remaining element if any
-    if i < data.len() {
-        // Extract last computed state
-        let f_last = f64x2_extract_lane::<1>(f);
-        let v_last = f64x2_extract_lane::<1>(v);
-        let a_last = f64x2_extract_lane::<1>(a);
-
-        // Compute final element
-        let price = data[i];
-        let fv_sum = f_last + v_last + 0.5 * a_last;
-        let f_new = na * price + one_m_na * fv_sum;
-        let v_new = nb * (f_new - f_last) + one_m_nb * (v_last + a_last);
-        let a_new = nc * (v_new - v_last) + one_m_nc * a_last;
-        out[i] = f_new + v_new + 0.5 * a_new;
-    }
+    // HWMA is a loop-carried recurrence; lanes cannot advance two independent
+    // timepoints in parallel without changing semantics. Keep the optimized
+    // scalar kernel as the correct fast path on wasm32 as well.
+    hwma_scalar(data, na, nb, nc, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

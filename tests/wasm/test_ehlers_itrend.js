@@ -400,9 +400,9 @@ test('Ehlers ITrend zero-copy API', () => {
     assert(ptr !== 0, 'Failed to allocate memory');
     
     // Create view into WASM memory
-    const memory = wasm.__wbindgen_memory();
+    const memoryBuffer = wasm.__wasm.memory.buffer;
     const memView = new Float64Array(
-        memory.buffer,
+        memoryBuffer,
         ptr,
         data.length
     );
@@ -537,8 +537,8 @@ test('Ehlers ITrend memory management', () => {
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         
         // Write pattern to verify memory
-        const memory = wasm.__wbindgen_memory();
-        const memView = new Float64Array(memory.buffer, ptr, size);
+        const memoryBuffer = wasm.__wasm.memory.buffer;
+        const memView = new Float64Array(memoryBuffer, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             memView[i] = i * 1.5;
         }

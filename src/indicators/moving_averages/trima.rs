@@ -172,7 +172,7 @@ impl TrimaBuilder {
 
 #[derive(Debug, Error)]
 pub enum TrimaError {
-    #[error("trima: Input data slice is empty.")]
+    #[error("trima: No data provided (input data slice is empty).")]
     EmptyInputData,
     #[error("trima: All values are NaN.")]
     AllValuesNaN,

@@ -201,7 +201,7 @@ test('TTM Trend - error handling', () => {
     // Test with empty arrays
     assert.throws(() => {
         wasm.ttm_trend_js([], [], 5);
-    }, /All values are NaN|Invalid period/, 'Should throw on empty input');
+    }, /empty/i, 'Should throw on empty input');
 });
 
 test('TTM Trend - accuracy check', () => {

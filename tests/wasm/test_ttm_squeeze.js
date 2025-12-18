@@ -435,16 +435,16 @@ test('TTM Squeeze zero-copy API', () => {
     
     try {
         // Create views into WASM memory for input
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory.buffer;
         
         // Copy input data to allocated buffers (we'll reuse for simplicity)
         const ptrHigh = wasm.ttm_squeeze_alloc(high.length);
         const ptrLow = wasm.ttm_squeeze_alloc(low.length);
         const ptrClose = wasm.ttm_squeeze_alloc(close.length);
         
-        const memHigh = new Float64Array(memory.buffer, ptrHigh, high.length);
-        const memLow = new Float64Array(memory.buffer, ptrLow, low.length);
-        const memClose = new Float64Array(memory.buffer, ptrClose, close.length);
+        const memHigh = new Float64Array(memory, ptrHigh, high.length);
+        const memLow = new Float64Array(memory, ptrLow, low.length);
+        const memClose = new Float64Array(memory, ptrClose, close.length);
         
         memHigh.set(high);
         memLow.set(low);
@@ -460,9 +460,9 @@ test('TTM Squeeze zero-copy API', () => {
         );
         
         // Read results
-        const memory2 = wasm.__wbindgen_memory();
-        const memMom = new Float64Array(memory2.buffer, ptrMom, high.length);
-        const memSqz = new Float64Array(memory2.buffer, ptrSqz, high.length);
+        const memory2 = wasm.__wasm.memory.buffer;
+        const memMom = new Float64Array(memory2, ptrMom, high.length);
+        const memSqz = new Float64Array(memory2, ptrSqz, high.length);
         
         // Verify results match regular API
         const regularRawResult = wasm.ttm_squeeze(
@@ -516,10 +516,10 @@ test('TTM Squeeze zero-copy with large dataset', () => {
         const ptrLow = wasm.ttm_squeeze_alloc(size);
         const ptrClose = wasm.ttm_squeeze_alloc(size);
         
-        const memory = wasm.__wbindgen_memory();
-        const memHigh = new Float64Array(memory.buffer, ptrHigh, size);
-        const memLow = new Float64Array(memory.buffer, ptrLow, size);
-        const memClose = new Float64Array(memory.buffer, ptrClose, size);
+        const memory = wasm.__wasm.memory.buffer;
+        const memHigh = new Float64Array(memory, ptrHigh, size);
+        const memLow = new Float64Array(memory, ptrLow, size);
+        const memClose = new Float64Array(memory, ptrClose, size);
         
         memHigh.set(high);
         memLow.set(low);
@@ -533,9 +533,9 @@ test('TTM Squeeze zero-copy with large dataset', () => {
         );
         
         // Recreate views in case memory grew
-        const memory2 = wasm.__wbindgen_memory();
-        const memMom = new Float64Array(memory2.buffer, ptrMom, size);
-        const memSqz = new Float64Array(memory2.buffer, ptrSqz, size);
+        const memory2 = wasm.__wasm.memory.buffer;
+        const memMom = new Float64Array(memory2, ptrMom, size);
+        const memSqz = new Float64Array(memory2, ptrSqz, size);
         
         // Check warmup period has NaN
         for (let i = 0; i < 19; i++) {
@@ -593,9 +593,9 @@ test('TTM Squeeze memory leak prevention', () => {
         assert(ptrSqz !== 0, `Failed to allocate ${size} squeeze elements`);
         
         // Write pattern to verify memory
-        const memory = wasm.__wbindgen_memory();
-        const memMom = new Float64Array(memory.buffer, ptrMom, size);
-        const memSqz = new Float64Array(memory.buffer, ptrSqz, size);
+        const memory = wasm.__wasm.memory.buffer;
+        const memMom = new Float64Array(memory, ptrMom, size);
+        const memSqz = new Float64Array(memory, ptrSqz, size);
         
         for (let i = 0; i < Math.min(10, size); i++) {
             memMom[i] = i * 1.5;

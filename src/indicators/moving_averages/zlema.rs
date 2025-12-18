@@ -2038,7 +2038,7 @@ pub fn zlema_batch_js(
     };
 
     // Use the existing batch function with parallel=false for WASM
-    zlema_batch_inner(data, &sweep, Kernel::Scalar, false)
+    zlema_batch_inner(data, &sweep, Kernel::Auto, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -2089,21 +2089,7 @@ pub fn zlema_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, 
         period: config.period_range,
     };
 
-    // Use batch kernel detection and conversion like alma does
-    let kernel = match Kernel::Auto {
-        Kernel::Auto => {
-            let batch_kernel = detect_best_batch_kernel();
-            match batch_kernel {
-                Kernel::Avx512Batch => Kernel::Avx512,
-                Kernel::Avx2Batch => Kernel::Avx2,
-                Kernel::ScalarBatch => Kernel::Scalar,
-                _ => Kernel::Scalar,
-            }
-        }
-        k => k,
-    };
-
-    let output = zlema_batch_inner(data, &sweep, kernel, false)
+    let output = zlema_batch_inner(data, &sweep, Kernel::Auto, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let js_output = ZlemaBatchJsOutput {
@@ -2203,21 +2189,7 @@ pub fn zlema_batch_into(
             .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        // Use batch kernel detection and conversion
-        let kernel = match Kernel::Auto {
-            Kernel::Auto => {
-                let batch_kernel = detect_best_batch_kernel();
-                match batch_kernel {
-                    Kernel::Avx512Batch => Kernel::Avx512,
-                    Kernel::Avx2Batch => Kernel::Avx2,
-                    Kernel::ScalarBatch => Kernel::Scalar,
-                    _ => Kernel::Scalar,
-                }
-            }
-            k => k,
-        };
-
-        zlema_batch_inner_into(data, &sweep, kernel, false, out)
+        zlema_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         Ok(rows)

@@ -747,13 +747,7 @@ pub fn lrsi_batch_with_kernel(
         other if other.is_batch() => other,
         other => return Err(LrsiError::InvalidKernelForBatch(other)),
     };
-    let simd = match kernel {
-        Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch => Kernel::Avx2,
-        Kernel::ScalarBatch => Kernel::Scalar,
-        _ => unreachable!(),
-    };
-    lrsi_batch_par_slice(high, low, sweep, simd)
+    lrsi_batch_par_slice(high, low, sweep, kernel)
 }
 
 #[derive(Clone, Debug)]

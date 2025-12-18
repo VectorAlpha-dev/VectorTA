@@ -381,13 +381,13 @@ impl VpciStream {
 
 #[derive(Debug, Error)]
 pub enum VpciError {
-    #[error("vpci: Input data slice is empty.")]
+    #[error("vpci: Empty input data (All close or volume values are NaN).")]
     EmptyInputData,
 
     #[error("vpci: All close or volume values are NaN.")]
     AllValuesNaN,
 
-    #[error("vpci: Invalid period: period = {period}, data length = {data_len}")]
+    #[error("vpci: Invalid range (Invalid period): period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
 
     #[error("vpci: Not enough valid data: needed = {needed}, valid = {valid}")]

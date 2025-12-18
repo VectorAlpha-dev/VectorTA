@@ -11,7 +11,6 @@ import {
     assertNoNaN,
     EXPECTED_OUTPUTS 
 } from './test_utils.js';
-import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,34 +19,11 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Manually instantiate wasm to avoid Node ESM import issues (mirrors tests like OBV)
-    // This wires the generated glue (my_project_bg.js) to the wasm instance and provides the 'env' memory.
-    const gluePath = path.join(__dirname, '../../pkg/my_project_bg.js');
-    const wasmBinPath = path.join(__dirname, '../../pkg/my_project_bg.wasm');
-    const glue = await import(process.platform === 'win32' ? 'file:///' + gluePath.replace(/\\/g, '/') : gluePath);
-    const bytes = fs.readFileSync(wasmBinPath);
-
-    // Provide an ample linear memory; wasm will grow it as needed.
-    const memory = new WebAssembly.Memory({ initial: 256, maximum: 16384 });
-    // Wasm imports functions from the JS glue using the module name './my_project_bg.js'
-    const imports = { env: { memory }, './my_project_bg.js': glue };
-    const module = await WebAssembly.compile(bytes);
-    const instance = await WebAssembly.instantiate(module, imports);
-    // Wire instance exports to the glue
-    glue.__wbg_set_wasm(instance.exports);
-    if (typeof instance.exports.__wbindgen_start === 'function') {
-        instance.exports.__wbindgen_start();
-    }
-
-    // Expose API in the same shape used by existing tests
-    wasm = {
-        pivot_js: glue.pivot_js,
-        pivot_batch: glue.pivot_batch,
-        pivot_alloc: glue.pivot_alloc,
-        pivot_free: glue.pivot_free,
-        pivot_into: glue.pivot_into,
-        __wasm: instance.exports,
-    };
+    const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+    const importPath = process.platform === 'win32'
+        ? 'file:///' + wasmPath.replace(/\\/g, '/')
+        : wasmPath;
+    wasm = await import(importPath);
 
     testData = loadTestData();
 });

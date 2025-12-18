@@ -141,14 +141,14 @@ class TestVwmacd:
         close = np.array([10.0, 20.0, 30.0])
         volume = np.array([100.0, 200.0])  # Different length
         
-        with pytest.raises(ValueError, match="Invalid period"):
+        with pytest.raises(ValueError, match="length mismatch|Output length mismatch|mismatched"):
             ta.vwmacd(close, volume, 12, 26, 9)
     
     def test_vwmacd_empty_inputs(self):
         """Test VWMACD fails with empty inputs - mirrors check_vwmacd_empty_inputs"""
         empty = np.array([])
         
-        with pytest.raises(ValueError, match="Invalid period"):
+        with pytest.raises(ValueError, match="empty|Empty"):
             ta.vwmacd(empty, empty, 12, 26, 9)
     
     def test_vwmacd_reinput(self, test_data):

@@ -182,7 +182,7 @@ impl TrixBuilder {
 
 #[derive(Debug, Error)]
 pub enum TrixError {
-    #[error("trix: input data slice is empty")]
+    #[error("trix: Empty data provided.")]
     EmptyInputData,
     #[error("trix: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
@@ -747,48 +747,42 @@ impl TrixBatchOutput {
     }
 }
 
-#[inline(always)]
-fn expand_grid(r: &TrixBatchRange) -> Result<Vec<TrixParams>, TrixError> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TrixError> {
-        if step == 0 || start == end {
-            return Ok(vec![start]);
-        }
-        let mut vals = Vec::new();
-        if start < end {
-            let mut v = start;
-            loop {
-                vals.push(v);
-                if v >= end {
-                    break;
-                }
-                let next = match v.checked_add(step) {
-                    Some(n) => n,
-                    None => break,
-                };
-                if next == v {
-                    break;
-                }
-                v = next;
+    #[inline(always)]
+    fn expand_grid(r: &TrixBatchRange) -> Result<Vec<TrixParams>, TrixError> {
+        fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TrixError> {
+            if step == 0 || start == end {
+                return Ok(vec![start]);
             }
-        } else {
-            let mut v = start;
-            loop {
-                vals.push(v);
-                if v <= end {
-                    break;
+            let mut vals = Vec::new();
+            if start < end {
+                let mut v = start;
+                while v <= end {
+                    vals.push(v);
+                    let next = match v.checked_add(step) {
+                        Some(n) => n,
+                        None => break,
+                    };
+                    if next == v {
+                        break;
+                    }
+                    v = next;
                 }
-                let next = v.saturating_sub(step);
-                if next == v {
-                    break;
+            } else {
+                let mut v = start;
+                while v >= end {
+                    vals.push(v);
+                    let next = v.saturating_sub(step);
+                    if next == v {
+                        break;
+                    }
+                    v = next;
                 }
-                v = next;
             }
+            if vals.is_empty() {
+                return Err(TrixError::InvalidRange { start, end, step });
+            }
+            Ok(vals)
         }
-        if vals.is_empty() {
-            return Err(TrixError::InvalidRange { start, end, step });
-        }
-        Ok(vals)
-    }
     let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {

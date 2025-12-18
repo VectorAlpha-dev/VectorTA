@@ -24,33 +24,12 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM wrappers and ensure the wasm instance is bound for both ESM and nodejs targets
     try {
-        // First try pkg output. Handle both ESM and nodejs (CJS) targets.
         const pkgPath = path.join(__dirname, '../../pkg/my_project.js');
-        const pkgImportPath = process.platform === 'win32'
+        const importPath = process.platform === 'win32'
             ? 'file:///' + pkgPath.replace(/\\/g, '/')
             : pkgPath;
-        const mod = await import(pkgImportPath);
-        const candidate = (mod && mod.default) ? mod.default : mod;
-        if (candidate && (typeof candidate.hma_js === 'function' || candidate.__wasm)) {
-            if (candidate.__wasm) {
-                // Nodejs target: bind wrappers to underlying wasm
-                const wrappersPath = path.join(__dirname, '../../pkg/my_project_bg.js');
-                const wrappersImportPath = process.platform === 'win32'
-                    ? 'file:///' + wrappersPath.replace(/\\/g, '/')
-                    : wrappersPath;
-                const wrappers = await import(wrappersImportPath);
-                if (typeof wrappers.__wbg_set_wasm === 'function') {
-                    wrappers.__wbg_set_wasm(candidate.__wasm);
-                }
-                wasm = wrappers;
-            } else {
-                wasm = candidate; // ESM target re-exports wrappers
-            }
-        } else {
-            throw new Error('pkg module missing expected exports');
-        }
+        wasm = await import(importPath);
     } catch (e1) {
         // Fallback to local test build (CJS with wrappers baked-in)
         try {

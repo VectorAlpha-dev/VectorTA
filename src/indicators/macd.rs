@@ -2330,7 +2330,40 @@ pub fn macd_js(
     ma_type: &str,
 ) -> Result<MacdResult, JsValue> {
     let len = data.len();
-    let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+    if len == 0 {
+        return Err(JsValue::from_str(&MacdError::EmptyInputData.to_string()));
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(MacdError::AllValuesNaN)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    if fast_period == 0
+        || slow_period == 0
+        || signal_period == 0
+        || fast_period > len
+        || slow_period > len
+        || signal_period > len
+    {
+        return Err(JsValue::from_str(
+            &MacdError::InvalidPeriod {
+                fast: fast_period,
+                slow: slow_period,
+                signal: signal_period,
+                data_len: len,
+            }
+            .to_string(),
+        ));
+    }
+    if len - first < slow_period {
+        return Err(JsValue::from_str(
+            &MacdError::NotEnoughValidData {
+                needed: slow_period,
+                valid: len - first,
+            }
+            .to_string(),
+        ));
+    }
     let macd_warmup = first + slow_period - 1;
     let signal_warmup = first + slow_period + signal_period - 2;
 

@@ -168,7 +168,7 @@ impl EmvBuilder {
 pub enum EmvError {
     #[error("emv: input data slice is empty")]
     EmptyInputData,
-    #[error("emv: all values are NaN")]
+    #[error("emv: All values are NaN")]
     AllValuesNaN,
     #[error("emv: invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },

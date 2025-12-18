@@ -226,21 +226,21 @@ impl PpoBuilder {
 
 #[derive(Debug, Error)]
 pub enum PpoError {
-    #[error("ppo: empty input data")]
+    #[error("ppo: Empty data provided.")]
     EmptyInputData,
-    #[error("ppo: all values are NaN")]
+    #[error("ppo: All values are NaN.")]
     AllValuesNaN,
-    #[error("ppo: invalid period: fast = {fast}, slow = {slow}, data length = {data_len}")]
+    #[error("ppo: Invalid period: fast = {fast}, slow = {slow}, data length = {data_len}")]
     InvalidPeriod {
         fast: usize,
         slow: usize,
         data_len: usize,
     },
-    #[error("ppo: not enough valid data: needed = {needed}, valid = {valid}")]
+    #[error("ppo: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("ppo: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
-    #[error("ppo: invalid range: start = {start}, end = {end}, step = {step}")]
+    #[error("ppo: Invalid range: start = {start}, end = {end}, step = {step}")]
     InvalidRange { start: usize, end: usize, step: usize },
     #[error("ppo: invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),

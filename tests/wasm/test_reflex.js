@@ -93,7 +93,7 @@ test('Reflex zero period', () => {
     
     assert.throws(() => {
         wasm.reflex_js(inputData, 0);
-    }, /period must be >=2/);
+    }, /period must be >=2|invalid period/i);
 });
 
 test('Reflex period less than two', () => {
@@ -102,7 +102,7 @@ test('Reflex period less than two', () => {
     
     assert.throws(() => {
         wasm.reflex_js(inputData, 1);
-    }, /period must be >=2/);
+    }, /period must be >=2|invalid period/i);
 });
 
 test('Reflex period exceeds length', () => {
@@ -111,7 +111,7 @@ test('Reflex period exceeds length', () => {
     
     assert.throws(() => {
         wasm.reflex_js(dataSmall, 10);
-    }, /Not enough data/);
+    }, /invalid period|not enough valid data|not enough data/i);
 });
 
 test('Reflex very small dataset', () => {
@@ -120,7 +120,7 @@ test('Reflex very small dataset', () => {
     
     assert.throws(() => {
         wasm.reflex_js(singlePoint, 5);
-    }, /Not enough data/);
+    }, /invalid period|not enough valid data|not enough data/i);
 });
 
 test('Reflex empty input', () => {
@@ -129,7 +129,7 @@ test('Reflex empty input', () => {
     
     assert.throws(() => {
         wasm.reflex_js(dataEmpty, 20);
-    }, /No data available/);
+    }, /empty/i);
 });
 
 test('Reflex NaN handling', () => {
@@ -261,7 +261,7 @@ test('Reflex batch error conditions', () => {
     const smallData = new Float64Array([1.0, 2.0, 3.0]);
     assert.throws(() => {
         wasm.reflex_batch_js(smallData, 10, 20, 5);
-    }, /Not enough data/);
+    }, /not enough valid data|invalid period|not enough/i);
 });
 
 test('Reflex edge cases', () => {

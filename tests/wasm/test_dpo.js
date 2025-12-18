@@ -206,7 +206,7 @@ test('DPO batch single parameter', () => {
     assertArrayClose(
         batchResult.values,
         singleResult,
-        1e-10,
+        1e-8, // Batch uses prefix sums; single uses a sliding sum (tiny FP-order differences).
         "Batch vs single mismatch"
     );
 });

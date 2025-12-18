@@ -146,7 +146,7 @@ test('DM empty input', () => {
     
     assert.throws(() => {
         wasm.dm(emptyHigh, emptyLow, 14);
-    }, /Empty data/);
+    }, /Input data is empty|Empty data/i);
 });
 
 test('DM all NaN input', () => {
@@ -358,14 +358,14 @@ test('DM zero-copy API', () => {
     assert(minusPtr !== 0, 'Failed to allocate minus memory');
     
     // Create views into WASM memory
-    const memory = wasm.__wbindgen_memory();
+    const memoryBuffer = wasm.__wasm.memory.buffer;
     const highPtr = wasm.dm_alloc(high.length);
     const lowPtr = wasm.dm_alloc(low.length);
     
-    const highView = new Float64Array(memory.buffer, highPtr, high.length);
-    const lowView = new Float64Array(memory.buffer, lowPtr, low.length);
-    const plusView = new Float64Array(memory.buffer, plusPtr, high.length);
-    const minusView = new Float64Array(memory.buffer, minusPtr, low.length);
+    const highView = new Float64Array(memoryBuffer, highPtr, high.length);
+    const lowView = new Float64Array(memoryBuffer, lowPtr, low.length);
+    const plusView = new Float64Array(memoryBuffer, plusPtr, high.length);
+    const minusView = new Float64Array(memoryBuffer, minusPtr, low.length);
     
     // Copy data into WASM memory
     highView.set(high);
@@ -434,9 +434,9 @@ test('DM zero-copy memory management', () => {
         assert(ptr2 !== 0, `Failed to allocate ${size} elements for minus`);
         
         // Write pattern to verify memory
-        const memory = wasm.__wbindgen_memory();
-        const view1 = new Float64Array(memory.buffer, ptr1, size);
-        const view2 = new Float64Array(memory.buffer, ptr2, size);
+        const memoryBuffer = wasm.__wasm.memory.buffer;
+        const view1 = new Float64Array(memoryBuffer, ptr1, size);
+        const view2 = new Float64Array(memoryBuffer, ptr2, size);
         
         for (let i = 0; i < Math.min(10, size); i++) {
             view1[i] = i * 1.5;

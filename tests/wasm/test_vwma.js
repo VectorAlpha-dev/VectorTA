@@ -291,7 +291,7 @@ test('VWMA batch edge cases', () => {
             new Float64Array([]),
             10, 10, 0
         );
-    }, /All/);
+    }, /empty/i);
 });
 
 // Note: Streaming tests would require streaming functions to be exposed in WASM bindings

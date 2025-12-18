@@ -271,7 +271,7 @@ impl StochBuilder {
 pub enum StochError {
     #[error("stoch: Empty data provided.")]
     EmptyInputData,
-    #[error("stoch: Empty data provided.")]
+    #[error("stoch: Mismatched length.")]
     MismatchedLength,
     #[error("stoch: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },

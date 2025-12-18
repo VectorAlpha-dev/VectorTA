@@ -89,7 +89,7 @@ test('PPO zero period', () => {
     
     assert.throws(() => {
         wasm.ppo_js(inputData, 0, 26, 'sma');
-    }, /Invalid period/);
+    }, /invalid period/i);
 });
 
 test('PPO period exceeds length', () => {
@@ -98,7 +98,7 @@ test('PPO period exceeds length', () => {
     
     assert.throws(() => {
         wasm.ppo_js(dataSmall, 12, 26, 'sma');
-    }, /Invalid period/);
+    }, /invalid period/i);
 });
 
 test('PPO very small dataset', () => {
@@ -107,7 +107,7 @@ test('PPO very small dataset', () => {
     
     assert.throws(() => {
         wasm.ppo_js(singlePoint, 12, 26, 'sma');
-    }, /Invalid period/);
+    }, /invalid period/i);
 });
 
 test('PPO empty input', () => {
@@ -116,7 +116,7 @@ test('PPO empty input', () => {
     
     assert.throws(() => {
         wasm.ppo_js(empty, 12, 26, 'sma');
-    }, /All values are NaN|Invalid period/);
+    }, /empty|all values are nan|invalid period/i);
 });
 
 test('PPO NaN handling', () => {

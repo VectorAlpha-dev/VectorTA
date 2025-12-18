@@ -569,11 +569,11 @@ test('TRADJEMA zero-copy API', () => {
     
     try {
         // Create views into WASM memory
-        const memory = wasm.__wbindgen_memory();
-        const highView = new Float64Array(memory.buffer, highPtr, high.length);
-        const lowView = new Float64Array(memory.buffer, lowPtr, low.length);
-        const closeView = new Float64Array(memory.buffer, closePtr, close.length);
-        const outView = new Float64Array(memory.buffer, outPtr, high.length);
+        const memory = wasm.__wasm.memory.buffer;
+        const highView = new Float64Array(memory, highPtr, high.length);
+        const lowView = new Float64Array(memory, lowPtr, low.length);
+        const closeView = new Float64Array(memory, closePtr, close.length);
+        const outView = new Float64Array(memory, outPtr, high.length);
         
         // Copy data into WASM memory
         highView.set(high);
@@ -624,10 +624,10 @@ test('TRADJEMA zero-copy with large dataset', () => {
     assert(outPtr !== 0, 'Failed to allocate large output buffer');
     
     try {
-        const memory = wasm.__wbindgen_memory();
-        const highView = new Float64Array(memory.buffer, highPtr, size);
-        const lowView = new Float64Array(memory.buffer, lowPtr, size);
-        const closeView = new Float64Array(memory.buffer, closePtr, size);
+        const memory = wasm.__wasm.memory.buffer;
+        const highView = new Float64Array(memory, highPtr, size);
+        const lowView = new Float64Array(memory, lowPtr, size);
+        const closeView = new Float64Array(memory, closePtr, size);
         
         highView.set(high);
         lowView.set(low);
@@ -636,8 +636,8 @@ test('TRADJEMA zero-copy with large dataset', () => {
         wasm.tradjema_into(highPtr, lowPtr, closePtr, outPtr, size, 40, 10.0);
         
         // Recreate view in case memory grew
-        const memory2 = wasm.__wbindgen_memory();
-        const outView = new Float64Array(memory2.buffer, outPtr, size);
+        const memory2 = wasm.__wasm.memory.buffer;
+        const outView = new Float64Array(memory2, outPtr, size);
         
         // Check warmup period has NaN
         for (let i = 0; i < 39; i++) {
@@ -697,8 +697,8 @@ test('TRADJEMA zero-copy memory management', () => {
         assert(outPtr !== 0, `Failed to allocate output with ${size} elements`);
         
         // Write pattern to verify memory
-        const memory = wasm.__wbindgen_memory();
-        const highView = new Float64Array(memory.buffer, highPtr, size);
+        const memory = wasm.__wasm.memory.buffer;
+        const highView = new Float64Array(memory, highPtr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             highView[i] = i * 1.5;
         }
@@ -740,11 +740,11 @@ test('TRADJEMA memory stability under stress', () => {
         }
         
         // Fill with test data
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory.buffer;
         const views = {
-            high: new Float64Array(memory.buffer, ptrs.high, size),
-            low: new Float64Array(memory.buffer, ptrs.low, size),
-            close: new Float64Array(memory.buffer, ptrs.close, size)
+            high: new Float64Array(memory, ptrs.high, size),
+            low: new Float64Array(memory, ptrs.low, size),
+            close: new Float64Array(memory, ptrs.close, size)
         };
         
         // Generate synthetic data
@@ -760,7 +760,8 @@ test('TRADJEMA memory stability under stress', () => {
             wasm.tradjema_into(ptrs.high, ptrs.low, ptrs.close, ptrs.out, size, 20, 10.0);
             
             // Verify output has expected structure
-            const outView = new Float64Array(memory.buffer, ptrs.out, size);
+            const memory2 = wasm.__wasm.memory.buffer;
+            const outView = new Float64Array(memory2, ptrs.out, size);
             
             // Check warmup period
             for (let i = 0; i < 19; i++) {

@@ -110,7 +110,7 @@ test('DI error handling - mirrors check_di_with_zero_period', () => {
             new Float64Array([]),
             14
         );
-    }, /Empty data/);
+    }, /Empty input data|Empty data/i);
 });
 
 test('DI NaN handling - mirrors check_di_accuracy_nan_check', () => {

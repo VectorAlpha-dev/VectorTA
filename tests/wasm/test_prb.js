@@ -494,7 +494,7 @@ test('PRB zero-copy API', () => {
     
     try {
         // Create views into WASM memory
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const inView = new Float64Array(memory.buffer, inPtr, len);
         
         // Copy data into WASM memory
@@ -516,7 +516,7 @@ test('PRB zero-copy API', () => {
         );
         
         // Read results (recreate views in case memory grew)
-        const memory2 = wasm.__wbindgen_memory();
+        const memory2 = wasm.__wasm.memory;
         const mainView = new Float64Array(memory2.buffer, mainPtr, len);
         const upperView = new Float64Array(memory2.buffer, upperPtr, len);
         const lowerView = new Float64Array(memory2.buffer, lowerPtr, len);
@@ -573,7 +573,7 @@ test('PRB zero-copy with large dataset', () => {
     assert(inPtr !== 0, 'Failed to allocate large input buffer');
     
     try {
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const inView = new Float64Array(memory.buffer, inPtr, size);
         inView.set(data);
         
@@ -583,7 +583,7 @@ test('PRB zero-copy with large dataset', () => {
         );
         
         // Recreate views in case memory grew
-        const memory2 = wasm.__wbindgen_memory();
+        const memory2 = wasm.__wasm.memory;
         const mainView = new Float64Array(memory2.buffer, mainPtr, size);
         const upperView = new Float64Array(memory2.buffer, upperPtr, size);
         const lowerView = new Float64Array(memory2.buffer, lowerPtr, size);

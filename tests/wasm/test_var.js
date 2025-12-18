@@ -115,7 +115,7 @@ test('VAR empty input', () => {
     
     assert.throws(() => {
         wasm.var_js(empty, 14, 1.0);
-    }, /All values are NaN/);
+    }, /empty/i);
 });
 
 test('VAR all NaN', () => {

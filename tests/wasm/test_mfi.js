@@ -152,7 +152,7 @@ test('MFI empty input', () => {
     
     assert.throws(() => {
         wasm.mfi_js(empty, empty, 14);
-    }, /Empty data/);
+    }, /empty/i);
 });
 
 test('MFI mismatched array lengths', () => {
@@ -162,7 +162,7 @@ test('MFI mismatched array lengths', () => {
     
     assert.throws(() => {
         wasm.mfi_js(typicalPrice, volume, 14);
-    }, /Empty data/);
+    }, /empty/i);
 });
 
 test('MFI NaN handling', () => {

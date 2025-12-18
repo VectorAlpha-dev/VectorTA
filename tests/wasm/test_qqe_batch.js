@@ -147,35 +147,30 @@ test('QQE zero-copy API', () => {
     
     // Allocate buffer for input and output
     const inPtr = wasm.qqe_alloc(len);
-    const outPtr = wasm.qqe_alloc(len * 2);  // Need 2x space for fast and slow
+    const outPtr = wasm.qqe_alloc(len);
     assert(inPtr !== 0, 'Failed to allocate input memory');
     assert(outPtr !== 0, 'Failed to allocate output memory');
     
     try {
         // Get memory view and copy data
         const memory = wasm.__wasm.memory.buffer;
-        const inView = new Float64Array(memory, inPtr / 8, len);
+        const inView = new Float64Array(memory, inPtr, len);
         inView.set(data);
         
         // Compute QQE into output buffer
         wasm.qqe_into(inPtr, outPtr, len, 14, 5, 4.236);
         
-        // Read results (interleaved fast and slow)
+        // Read results (layout: [fast..len][slow..len])
         const memory2 = wasm.__wasm.memory.buffer;  // Re-get in case it grew
-        const outView = new Float64Array(memory2, outPtr / 8, len * 2);
+        const outView = new Float64Array(memory2, outPtr, len * 2);
         
         // Verify results match regular API
         const regularResult = wasm.qqe_js(data, 14, 5, 4.236);
         const regularFast = regularResult.values.slice(0, regularResult.cols);
         const regularSlow = regularResult.values.slice(regularResult.cols, regularResult.cols * 2);
         
-        // Extract fast and slow from interleaved output
-        const fast = [];
-        const slow = [];
-        for (let i = 0; i < len; i++) {
-            fast.push(outView[i * 2]);
-            slow.push(outView[i * 2 + 1]);
-        }
+        const fast = outView.subarray(0, len);
+        const slow = outView.subarray(len, len * 2);
         
         // Compare results
         for (let i = 0; i < len; i++) {
@@ -190,7 +185,7 @@ test('QQE zero-copy API', () => {
     } finally {
         // Always free memory
         wasm.qqe_free(inPtr, len);
-        wasm.qqe_free(outPtr, len * 2);
+        wasm.qqe_free(outPtr, len);
     }
 });
 
@@ -203,36 +198,45 @@ test('QQE zero-copy with large dataset', () => {
     }
     
     const inPtr = wasm.qqe_alloc(size);
-    const outPtr = wasm.qqe_alloc(size * 2);
+    const outPtr = wasm.qqe_alloc(size);
     assert(inPtr !== 0, 'Failed to allocate large input buffer');
     assert(outPtr !== 0, 'Failed to allocate large output buffer');
     
     try {
         const memory = wasm.__wasm.memory.buffer;
-        const inView = new Float64Array(memory, inPtr / 8, size);
+        const inView = new Float64Array(memory, inPtr, size);
         inView.set(data);
         
         wasm.qqe_into(inPtr, outPtr, size, 14, 5, 4.236);
         
         // Recreate view in case memory grew
         const memory2 = wasm.__wasm.memory.buffer;
-        const outView = new Float64Array(memory2, outPtr / 8, size * 2);
+        const outView = new Float64Array(memory2, outPtr, size * 2);
+        const fast = outView.subarray(0, size);
+        const slow = outView.subarray(size, size * 2);
         
-        // Check warmup period has NaN
-        const warmup = EXPECTED_OUTPUTS.qqe.warmupPeriod;
-        for (let i = 0; i < warmup; i++) {
-            assert(isNaN(outView[i * 2]), `Expected NaN in fast at warmup index ${i}`);
-            assert(isNaN(outView[i * 2 + 1]), `Expected NaN in slow at warmup index ${i}`);
+        // Warmup semantics:
+        // - fast (smoothed RSI) becomes defined starting at rsi_start (= first + rsi_period)
+        // - slow becomes defined starting at warm (= first + rsi_period + smoothing_factor - 2)
+        const rsiStart = EXPECTED_OUTPUTS.qqe.defaultParams.rsiPeriod;
+        const slowWarmup = EXPECTED_OUTPUTS.qqe.warmupPeriod;
+
+        for (let i = 0; i < rsiStart; i++) {
+            assert(isNaN(fast[i]), `Expected NaN in fast at warmup index ${i}`);
         }
-        
-        // Check after warmup has values
-        for (let i = warmup; i < Math.min(warmup + 100, size); i++) {
-            assert(!isNaN(outView[i * 2]), `Unexpected NaN in fast at index ${i}`);
-            assert(!isNaN(outView[i * 2 + 1]), `Unexpected NaN in slow at index ${i}`);
+        for (let i = 0; i < slowWarmup; i++) {
+            assert(isNaN(slow[i]), `Expected NaN in slow at warmup index ${i}`);
+        }
+
+        for (let i = rsiStart; i < Math.min(rsiStart + 100, size); i++) {
+            assert(!isNaN(fast[i]), `Unexpected NaN in fast at index ${i}`);
+        }
+        for (let i = slowWarmup; i < Math.min(slowWarmup + 100, size); i++) {
+            assert(!isNaN(slow[i]), `Unexpected NaN in slow at index ${i}`);
         }
     } finally {
         wasm.qqe_free(inPtr, size);
-        wasm.qqe_free(outPtr, size * 2);
+        wasm.qqe_free(outPtr, size);
     }
 });
 
@@ -244,7 +248,7 @@ test('QQE zero-copy error handling', () => {
     
     // Test invalid parameters with allocated memory
     const ptr = wasm.qqe_alloc(20);
-    const outPtr = wasm.qqe_alloc(40);
+    const outPtr = wasm.qqe_alloc(20);
     try {
         // Invalid rsi_period
         assert.throws(() => {
@@ -257,7 +261,7 @@ test('QQE zero-copy error handling', () => {
         }, /Invalid|smoothing/);
     } finally {
         wasm.qqe_free(ptr, 20);
-        wasm.qqe_free(outPtr, 40);
+        wasm.qqe_free(outPtr, 20);
     }
 });
 
@@ -271,7 +275,7 @@ test('QQE memory leak prevention', () => {
         
         // Write pattern to verify memory
         const memory = wasm.__wasm.memory.buffer;
-        const memView = new Float64Array(memory, ptr / 8, size);
+        const memView = new Float64Array(memory, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             memView[i] = i * 2.5;
         }

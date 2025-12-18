@@ -99,7 +99,7 @@ impl<'a> NviInput<'a> {
 
 #[derive(Debug, Error)]
 pub enum NviError {
-    #[error("nvi: input data slice is empty.")]
+    #[error("nvi: Empty data provided.")]
     EmptyInputData,
     #[error("nvi: Empty data provided.")]
     EmptyData,

@@ -1295,20 +1295,7 @@ fn expand_grid(r: &NmaBatchRange) -> Result<Vec<NmaParams>, NmaError> {
             }
             Ok(v)
         } else {
-            let mut v = Vec::new();
-            let mut cur = start;
-            loop {
-                v.push(cur);
-                if cur <= end { break; }
-                cur = cur
-                    .checked_sub(step)
-                    .ok_or_else(|| NmaError::InvalidRange { start, end, step })?;
-                if cur < end { break; }
-            }
-            if v.is_empty() {
-                return Err(NmaError::InvalidRange { start, end, step });
-            }
-            Ok(v)
+            Err(NmaError::InvalidRange { start, end, step })
         }
     }
     let periods = axis_usize(r.period)?;

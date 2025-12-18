@@ -162,7 +162,7 @@ impl DmBuilder {
 
 #[derive(Debug, Error)]
 pub enum DmError {
-    #[error("dm: Input data is empty or high/low length mismatch.")]
+    #[error("dm: Empty data provided (or high/low length mismatch).")]
     EmptyInputData,
     #[error("dm: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },

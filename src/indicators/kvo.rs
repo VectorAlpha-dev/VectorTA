@@ -220,7 +220,7 @@ impl KvoBuilder {
 
 #[derive(Debug, Error)]
 pub enum KvoError {
-    #[error("kvo: Input data slice is empty.")]
+    #[error("kvo: Empty data provided.")]
     EmptyInputData,
     #[error("kvo: All values are NaN.")]
     AllValuesNaN,

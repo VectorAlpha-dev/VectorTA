@@ -287,7 +287,7 @@ test('NAMA zero-copy API', () => {
     
     try {
         // Get WASM memory
-        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const memory = wasm.__wasm.memory;
         
         // Copy input data to WASM memory
         const inputArray = new Float64Array(memory.buffer, inPtr, data.length);

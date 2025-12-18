@@ -393,8 +393,8 @@ test('trendflex_batch_into', () => {
     
     try {
         // Copy data to input buffer
-        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
-        const inView = new Float64Array(memory.buffer, in_ptr, data.length);
+        const memory = wasm.__wasm.memory.buffer;
+        const inView = new Float64Array(memory, in_ptr, data.length);
         inView.set(data);
         
         // Call batch_into
@@ -406,8 +406,8 @@ test('trendflex_batch_into', () => {
         assert.strictEqual(n_combos, expected_combos);
         
         // Verify output
-        const memory2 = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
-        const outView = new Float64Array(memory2.buffer, out_ptr, total_size);
+        const memory2 = wasm.__wasm.memory.buffer;
+        const outView = new Float64Array(memory2, out_ptr, total_size);
         
         // Compare with regular batch API
         const regularBatch = wasm.trendflex_batch(data, {
@@ -439,15 +439,15 @@ test('trendflex_zero_copy_large_dataset', () => {
     assert(ptr !== 0, 'Failed to allocate large buffer');
     
     try {
-        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
-        const memView = new Float64Array(memory.buffer, ptr, size);
+        const memory = wasm.__wasm.memory.buffer;
+        const memView = new Float64Array(memory, ptr, size);
         memView.set(data);
         
         wasm.trendflex_into(ptr, ptr, size, 20);
         
         // Recreate view in case memory grew
-        const memory2 = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
-        const memView2 = new Float64Array(memory2.buffer, ptr, size);
+        const memory2 = wasm.__wasm.memory.buffer;
+        const memView2 = new Float64Array(memory2, ptr, size);
         
         // Check warmup period has NaN
         for (let i = 0; i < 20; i++) {
@@ -472,8 +472,8 @@ test('trendflex_memory_management', () => {
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         
         // Write pattern to verify memory
-        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
-        const memView = new Float64Array(memory.buffer, ptr, size);
+        const memory = wasm.__wasm.memory.buffer;
+        const memView = new Float64Array(memory, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             memView[i] = i * 1.5;
         }

@@ -211,7 +211,7 @@ pub enum CfoError {
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("cfo: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
-    #[error("cfo: invalid range: start={start} end={end} step={step}")]
+    #[error("cfo: Invalid range: start={start} end={end} step={step}")]
     InvalidRange { start: usize, end: usize, step: usize },
 }
 
@@ -859,14 +859,7 @@ fn expand_grid(r: &CfoBatchRange) -> Result<Vec<CfoParams>, CfoError> {
                 match cur.checked_add(step) { Some(next) => cur = next, None => break }
             }
         } else {
-            let mut cur = start;
-            while cur >= end {
-                vals.push(cur);
-                cur = cur.saturating_sub(step);
-                if cur == 0 && end > 0 { break; }
-                if vals.last() == Some(&cur) { break; }
-            }
-            if let Some(&last) = vals.last() { if last < end { vals.pop(); } }
+            return Err(CfoError::InvalidRange { start, end, step });
         }
         if vals.is_empty() { return Err(CfoError::InvalidRange { start, end, step }); }
         Ok(vals)

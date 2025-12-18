@@ -493,7 +493,7 @@ test('PNR zero-copy API', () => {
     assert(ptr !== 0, 'Failed to allocate memory');
     
     // Create view into WASM memory
-    const memory = wasm.__wbindgen_memory();
+    const memory = wasm.__wasm.memory;
     const memView = new Float64Array(
         memory.buffer,
         ptr,

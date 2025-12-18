@@ -469,14 +469,13 @@ test('MAAQ batch with invalid ranges', () => {
         data[i] = i + 1;
     }
     
-    // Invalid period range (start > end)
-    assert.throws(() => {
-        wasm.maaq_batch_js(data, {
-            period_range: [20, 10, 5],
-            fast_period_range: [2, 2, 0],
-            slow_period_range: [30, 30, 0]
-        });
+    // Descending ranges are supported (start > end)
+    const desc = wasm.maaq_batch_js(data, {
+        period_range: [20, 10, 5], // 20, 15, 10
+        fast_period_range: [2, 2, 0],
+        slow_period_range: [30, 30, 0]
     });
+    assert.strictEqual(desc.length, 3 * data.length, 'Expected 3 period combos');
     
     // Period exceeds data length
     assert.throws(() => {

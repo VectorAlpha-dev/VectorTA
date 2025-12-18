@@ -165,19 +165,23 @@ test('STC NaN handling', () => {
 
 test('STC fast API', () => {
     // Test the fast API with pre-allocated memory
-    const close = new Float64Array(testData.close);
+    const close = new Float64Array(testData.close.slice(0, 500));
     const len = close.length;
     
-    // Allocate output buffer
+    // Allocate input/output buffers in WASM memory
+    const inPtr = wasm.stc_alloc(len);
     const outPtr = wasm.stc_alloc(len);
+    assert(inPtr !== 0, 'Failed to allocate input buffer');
+    assert(outPtr !== 0, 'Failed to allocate output buffer');
     
     try {
-        // Get input pointer
-        const inPtr = close.byteOffset / 8; // Convert byte offset to f64 offset
+        // Copy input into WASM memory
+        const memory = wasm.__wasm.memory.buffer;
+        new Float64Array(memory, inPtr, len).set(close);
         
         // Call fast API
         wasm.stc_into(
-            close,
+            inPtr,
             outPtr,
             len,
             23, 50, 10, 3,
@@ -185,49 +189,51 @@ test('STC fast API', () => {
         );
         
         // Read results
-        const memory = new Float64Array(wasm.memory.buffer);
-        const result = memory.slice(outPtr / 8, outPtr / 8 + len);
+        const memory2 = wasm.__wasm.memory.buffer;
+        const result = new Float64Array(memory2, outPtr, len);
         
         assert.strictEqual(result.length, len);
         
-        // Verify some values are valid
-        let hasValidValues = false;
-        for (let i = 50; i < result.length; i++) {
-            if (!isNaN(result[i])) {
-                hasValidValues = true;
-                break;
-            }
+        // Compare against the standard API
+        const regular = wasm.stc_js(close, 23, 50, 10, 3, "ema", "ema");
+        for (let i = 0; i < len; i++) {
+            if (isNaN(regular[i]) && isNaN(result[i])) continue;
+            assertClose(result[i], regular[i], 1e-10, `stc_into mismatch at ${i}`);
         }
-        assert(hasValidValues, "Expected valid values from fast API");
     } finally {
         // Free allocated memory
+        wasm.stc_free(inPtr, len);
         wasm.stc_free(outPtr, len);
     }
 });
 
 test('STC fast API in-place', () => {
     // Test the fast API with in-place operation (aliasing)
-    const data = new Float64Array(testData.close);
-    const len = data.length;
+    const close = new Float64Array(testData.close.slice(0, 500));
+    const len = close.length;
     
-    // Call fast API with same pointer for input and output
-    wasm.stc_into(
-        data,
-        data,
-        len,
-        23, 50, 10, 3,
-        "ema", "ema"
-    );
-    
-    // Check that data was modified in-place
-    let hasValidValues = false;
-    for (let i = 50; i < data.length; i++) {
-        if (!isNaN(data[i])) {
-            hasValidValues = true;
-            break;
+    const inOutPtr = wasm.stc_alloc(len);
+    assert(inOutPtr !== 0, 'Failed to allocate in/out buffer');
+
+    try {
+        const regular = wasm.stc_js(close, 23, 50, 10, 3, "ema", "ema");
+
+        const memory = wasm.__wasm.memory.buffer;
+        new Float64Array(memory, inOutPtr, len).set(close);
+
+        // Call fast API with same pointer for input and output
+        wasm.stc_into(inOutPtr, inOutPtr, len, 23, 50, 10, 3, "ema", "ema");
+
+        const memory2 = wasm.__wasm.memory.buffer;
+        const result = new Float64Array(memory2, inOutPtr, len);
+
+        for (let i = 0; i < len; i++) {
+            if (isNaN(regular[i]) && isNaN(result[i])) continue;
+            assertClose(result[i], regular[i], 1e-10, `stc_into aliasing mismatch at ${i}`);
         }
+    } finally {
+        wasm.stc_free(inOutPtr, len);
     }
-    assert(hasValidValues, "Expected valid values from in-place operation");
 });
 
 test('STC batch processing', async () => {

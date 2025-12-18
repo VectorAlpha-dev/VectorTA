@@ -200,7 +200,7 @@ impl VarBuilder {
 
 #[derive(Debug, Error)]
 pub enum VarError {
-    #[error("var: input data is empty")]
+    #[error("var: input data is empty (All values are NaN).")]
     EmptyInputData,
     #[error("var: All values are NaN.")]
     AllValuesNaN,

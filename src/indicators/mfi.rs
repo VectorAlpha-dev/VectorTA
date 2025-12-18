@@ -129,7 +129,7 @@ impl<'a> MfiInput<'a> {
 
 #[derive(Debug, Error)]
 pub enum MfiError {
-    #[error("mfi: Input data slice is empty.")]
+    #[error("mfi: Empty data provided.")]
     EmptyInputData,
     #[error("mfi: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },

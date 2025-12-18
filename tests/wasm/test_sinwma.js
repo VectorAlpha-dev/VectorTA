@@ -487,7 +487,7 @@ test('SINWMA zero-copy in-place operation', () => {
     assert(ptr !== 0, 'Failed to allocate memory');
     
     // Create view into WASM memory
-    const memory = wasm.__wbindgen_memory();
+    const memory = wasm.__wasm.memory;
     const memView = new Float64Array(
         memory.buffer,
         ptr,
@@ -527,14 +527,14 @@ test('SINWMA zero-copy with large dataset', () => {
     assert(ptr !== 0, 'Failed to allocate large buffer');
     
     try {
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const memView = new Float64Array(memory.buffer, ptr, size);
         memView.set(data);
         
         wasm.sinwma_into(ptr, ptr, size, 14);
         
         // Recreate view in case memory grew
-        const memory2 = wasm.__wbindgen_memory();
+        const memory2 = wasm.__wasm.memory;
         const memView2 = new Float64Array(memory2.buffer, ptr, size);
         
         // Check warmup period has NaN
@@ -583,7 +583,7 @@ test('SINWMA zero-copy memory management', () => {
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         
         // Write pattern to verify memory
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const memView = new Float64Array(memory.buffer, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             memView[i] = i * 1.5;

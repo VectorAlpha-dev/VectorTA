@@ -83,7 +83,7 @@ describe('Mass Index', () => {
     it('should handle empty data - mirrors check_mass_empty_input', () => {
         assert.throws(() => {
             talib.mass_js([], [], 5);
-        }, /Empty data/, 'Should throw for empty data');
+        }, /empty/i, 'Should throw for empty data');
     });
     
     it('should handle different length high/low - mirrors check_mass_different_length_hl', () => {

@@ -194,7 +194,7 @@ impl DiBuilder {
 
 #[derive(Debug, Error)]
 pub enum DiError {
-    #[error("di: Empty input data.")]
+    #[error("di: Empty data provided.")]
     EmptyInputData,
     #[error("di: Empty data provided for DI.")]
     EmptyData,

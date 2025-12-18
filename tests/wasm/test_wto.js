@@ -441,11 +441,11 @@ test('WTO zero-copy API', () => {
     
     try {
         // Create views into WASM memory
-        const memory = wasm.__wbindgen_memory();
-        const inView = new Float64Array(memory.buffer, inPtr, data.length);
-        const wt1View = new Float64Array(memory.buffer, wt1Ptr, data.length);
-        const wt2View = new Float64Array(memory.buffer, wt2Ptr, data.length);
-        const histView = new Float64Array(memory.buffer, histPtr, data.length);
+        const memory = wasm.__wasm.memory.buffer;
+        const inView = new Float64Array(memory, inPtr, data.length);
+        const wt1View = new Float64Array(memory, wt1Ptr, data.length);
+        const wt2View = new Float64Array(memory, wt2Ptr, data.length);
+        const histView = new Float64Array(memory, histPtr, data.length);
         
         // Copy data into WASM memory
         inView.set(data);

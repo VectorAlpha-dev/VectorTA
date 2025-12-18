@@ -145,7 +145,7 @@ test('PMA empty input', () => {
     
     assert.throws(() => {
         wasm.pma_js(empty);
-    }, /Empty data/);
+    }, /empty/i);
 });
 
 test('PMA NaN handling', () => {

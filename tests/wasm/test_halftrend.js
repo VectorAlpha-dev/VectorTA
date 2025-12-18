@@ -418,10 +418,10 @@ test('HALFTREND zero-copy API', () => {
         assert(outPtr !== 0, 'Failed to allocate output buffer');
         
         // Create views into WASM memory
-        const memory = wasm.__wbindgen_memory();
-        const highView = new Float64Array(memory.buffer, highPtr, size);
-        const lowView = new Float64Array(memory.buffer, lowPtr, size);
-        const closeView = new Float64Array(memory.buffer, closePtr, size);
+        const memoryBuffer = wasm.__wasm.memory.buffer;
+        const highView = new Float64Array(memoryBuffer, highPtr, size);
+        const lowView = new Float64Array(memoryBuffer, lowPtr, size);
+        const closeView = new Float64Array(memoryBuffer, closePtr, size);
         
         // Copy data into WASM memory
         highView.set(data);
@@ -436,8 +436,7 @@ test('HALFTREND zero-copy API', () => {
         );
         
         // Verify results exist
-        const memory2 = wasm.__wbindgen_memory();
-        const htView = new Float64Array(memory2.buffer, outPtr, size);
+        const htView = new Float64Array(memoryBuffer, outPtr, size);
         
         // Check warmup period has NaN
         let hasNaN = false;
@@ -592,8 +591,8 @@ test('HALFTREND memory management stress test', () => {
         }
         
         // Write test pattern
-        const memory = wasm.__wbindgen_memory();
-        const view = new Float64Array(memory.buffer, buffers[0], size);
+        const memoryBuffer = wasm.__wasm.memory.buffer;
+        const view = new Float64Array(memoryBuffer, buffers[0], size);
         for (let i = 0; i < Math.min(10, size); i++) {
             view[i] = i * 2.5;
         }

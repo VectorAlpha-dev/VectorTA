@@ -119,7 +119,7 @@ test('VPCI error handling - mismatched input lengths', () => {
     
     assert.throws(
         () => wasm.vpci_js(close, volume, 5, 25),
-        /Mismatched input lengths/,
+        /mismatched input lengths/i,
         'Should throw error for mismatched input lengths'
     );
 });
@@ -129,7 +129,7 @@ test('VPCI error handling - insufficient data', () => {
     
     assert.throws(
         () => wasm.vpci_js(singlePoint, singlePoint, 5, 25),
-        /Invalid range/,
+        /Invalid period|Not enough/i,
         'Should throw error for insufficient data'
     );
 });
@@ -139,7 +139,7 @@ test('VPCI error handling - empty input', () => {
     
     assert.throws(
         () => wasm.vpci_js(empty, empty, 5, 25),
-        /All close or volume values are NaN/,
+        /empty/i,
         'Should throw error for empty input'
     );
 });

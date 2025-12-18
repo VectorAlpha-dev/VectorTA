@@ -41,16 +41,15 @@ class TestAvsl:
     @pytest.fixture(scope='class')
     def test_data(self):
         """Load test data from CSV file"""
-        import pandas as pd
         csv_path = os.path.join(os.path.dirname(__file__), 
                                 '..', '..', 'src', 'data', 
                                 '2018-09-01-2024-Bitfinex_Spot-4h.csv')
         # CSV columns: 0=timestamp, 1=open, 2=close, 3=high, 4=low, 5=volume
-        df = pd.read_csv(csv_path, header=None)
+        df = np.loadtxt(csv_path, delimiter=',')
         return {
-            'close': df[2].values,  # Column 2 is close
-            'low': df[4].values,    # Column 4 is low
-            'volume': df[5].values  # Column 5 is volume
+            'close': np.ascontiguousarray(df[:, 2], dtype=np.float64),  # Column 2 is close
+            'low': np.ascontiguousarray(df[:, 4], dtype=np.float64),    # Column 4 is low
+            'volume': np.ascontiguousarray(df[:, 5], dtype=np.float64)  # Column 5 is volume
         }
     
     def test_avsl_accuracy(self, test_data):

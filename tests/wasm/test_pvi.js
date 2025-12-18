@@ -72,7 +72,7 @@ test('PVI empty data', () => {
     
     assert.throws(() => {
         wasm.pvi_js(close, volume, 1000.0);
-    }, /Empty data/);
+    }, /empty/i);
 });
 
 test('PVI mismatched lengths', () => {
@@ -90,7 +90,7 @@ test('PVI all NaN values', () => {
     
     assert.throws(() => {
         wasm.pvi_js(close, volume, 1000.0);
-    }, /All values are NaN/);
+    }, /all values are nan/i);
 });
 
 test('PVI not enough valid data', () => {
@@ -99,7 +99,7 @@ test('PVI not enough valid data', () => {
     
     assert.throws(() => {
         wasm.pvi_js(close, volume, 1000.0);
-    }, /Not enough valid data/);
+    }, /not enough valid data/i);
 });
 
 test('PVI fast API (in-place operation)', () => {

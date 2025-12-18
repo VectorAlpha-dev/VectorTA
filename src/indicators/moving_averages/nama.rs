@@ -1571,7 +1571,7 @@ pub fn nama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
     let sweep = NamaBatchRange {
         period: cfg.period_range,
     };
-    let output = nama_batch_with_kernel(data, &sweep, detect_best_kernel())
+    let output = nama_batch_with_kernel(data, &sweep, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let js = NamaBatchJsOutput {
         values: output.values,

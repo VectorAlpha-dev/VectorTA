@@ -490,12 +490,12 @@ test('SMMA batch validation', () => {
         wasm.smma_batch(close, {});
     }, /Invalid config/);
     
-    // Test invalid period range
-    assert.throws(() => {
-        wasm.smma_batch(close, {
-            period_range: [10, 5, 1]  // start > end
-        });
-    }, /Invalid|Error/);
+    // Descending ranges are supported (start > end)
+    const desc = wasm.smma_batch(close, {
+        period_range: [10, 5, 1]  // 10, 9, 8, 7, 6, 5
+    });
+    assert.strictEqual(desc.rows, 6);
+    assert.strictEqual(desc.combos.length, 6);
     
     // Test zero period
     assert.throws(() => {

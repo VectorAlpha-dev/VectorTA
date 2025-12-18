@@ -214,7 +214,7 @@ impl CorrelationCycleBuilder {
 
 #[derive(Debug, Error)]
 pub enum CorrelationCycleError {
-    #[error("correlation_cycle: input data slice is empty")]
+    #[error("correlation_cycle: Empty data provided.")]
     EmptyInputData,
     #[error("correlation_cycle: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },

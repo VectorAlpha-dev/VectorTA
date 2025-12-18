@@ -90,7 +90,7 @@ test('TRIX error handling', () => {
     // Test empty data
     assert.throws(
         () => wasm.trix_js([], 18),
-        /Empty/,
+        /empty/i,
         'TRIX should fail with empty data'
     );
     

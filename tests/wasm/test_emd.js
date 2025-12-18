@@ -112,7 +112,7 @@ test('EMD error handling', () => {
     // Test with empty data
     assert.throws(() => {
         wasm.emd_js([], [], [], [], 20, 0.5, 0.1);
-    }, /Invalid input length/, 'Should throw on empty data');
+    }, /Invalid input length|Empty input data/i, 'Should throw on empty data');
     
     // Test with mismatched lengths
     assert.throws(() => {

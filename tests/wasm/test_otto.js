@@ -571,7 +571,7 @@ test('OTTO zero-copy API', () => {
     
     try {
         // Create views into WASM memory
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const dataView = new Float64Array(memory.buffer, hottPtr, data.length);
         dataView.set(data);
         
@@ -590,7 +590,7 @@ test('OTTO zero-copy API', () => {
         );
         
         // Recreate views in case memory grew
-        const memory2 = wasm.__wbindgen_memory();
+        const memory2 = wasm.__wasm.memory;
         const hottView = new Float64Array(memory2.buffer, hottPtr, data.length);
         const lottView = new Float64Array(memory2.buffer, lottPtr, data.length);
         
@@ -641,7 +641,7 @@ test('OTTO zero-copy with large dataset', () => {
     assert(lottPtr !== 0, 'Failed to allocate large LOTT buffer');
     
     try {
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const dataView = new Float64Array(memory.buffer, hottPtr, size);
         dataView.set(data);
         
@@ -659,7 +659,7 @@ test('OTTO zero-copy with large dataset', () => {
         );
         
         // Recreate views
-        const memory2 = wasm.__wbindgen_memory();
+        const memory2 = wasm.__wasm.memory;
         const hottView = new Float64Array(memory2.buffer, hottPtr, size);
         const lottView = new Float64Array(memory2.buffer, lottPtr, size);
         
@@ -714,7 +714,7 @@ test('OTTO zero-copy memory management', () => {
         assert(ptr2 !== 0, `Failed to allocate ${size} elements for LOTT`);
         
         // Write pattern to verify memory
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const view1 = new Float64Array(memory.buffer, ptr1, size);
         const view2 = new Float64Array(memory.buffer, ptr2, size);
         
@@ -750,7 +750,7 @@ test('OTTO zero-copy mismatched buffer sizes', () => {
     assert(lottPtr !== 0, 'Failed to allocate LOTT buffer');
     
     try {
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const dataView = new Float64Array(memory.buffer, dataPtr, dataSize);
         
         // Fill with test data
@@ -785,7 +785,7 @@ test('OTTO zero-copy concurrent allocations', () => {
     }
     
     // Write different patterns to each
-    const memory = wasm.__wbindgen_memory();
+    const memory = wasm.__wasm.memory;
     for (let i = 0; i < allocations.length; i++) {
         const view = new Float64Array(memory.buffer, allocations[i].ptr, size);
         // Write unique pattern
@@ -795,7 +795,7 @@ test('OTTO zero-copy concurrent allocations', () => {
     }
     
     // Verify patterns remain intact
-    const memory2 = wasm.__wbindgen_memory(); // Re-get in case it grew
+    const memory2 = wasm.__wasm.memory; // Re-get in case it grew
     for (let i = 0; i < allocations.length; i++) {
         const view = new Float64Array(memory2.buffer, allocations[i].ptr, size);
         for (let j = 0; j < 10; j++) {
@@ -829,7 +829,7 @@ test('OTTO zero-copy stress test', () => {
         }
         
         // Quick write and verify
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const view1 = new Float64Array(memory.buffer, ptr1, size);
         view1[0] = iter;
         view1[size - 1] = iter + 0.5;

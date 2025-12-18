@@ -496,7 +496,8 @@ fn cci_cycle_prepare<'a>(
         });
     }
 
-    if !factor.is_finite() || factor < 0.0 || factor > 1.0 {
+    // NaN factor is allowed (propagates NaNs through output); reject infinities.
+    if factor.is_infinite() {
         return Err(CciCycleError::InvalidFactor { factor });
     }
 

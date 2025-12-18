@@ -279,13 +279,13 @@ pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, At
     let len = close.len();
     let length = input.get_length();
     if length == 0 {
-        return Err(AtrError::InvalidPeriod { period: length, data_len: len });
+        return Err(AtrError::InvalidLength { length });
     }
     if len == 0 {
-        return Err(AtrError::EmptyInputData);
+        return Err(AtrError::NoCandlesAvailable);
     }
     if length > len {
-        return Err(AtrError::InvalidPeriod { period: length, data_len: len });
+        return Err(AtrError::NotEnoughData { length, data_len: len });
     }
 
     let chosen = match kernel {
@@ -2323,17 +2323,17 @@ fn atr_prepare<'a>(
 
     // Check for empty data
     if close.is_empty() {
-        return Err(AtrError::EmptyInputData);
+        return Err(AtrError::NoCandlesAvailable);
     }
 
     // Check for zero length
     if length == 0 {
-        return Err(AtrError::InvalidPeriod { period: length, data_len: close.len() });
+        return Err(AtrError::InvalidLength { length });
     }
 
     // Check if we have enough total data
     if length > close.len() {
-        return Err(AtrError::InvalidPeriod { period: length, data_len: close.len() });
+        return Err(AtrError::NotEnoughData { length, data_len: close.len() });
     }
 
     Ok((high, low, close, length))

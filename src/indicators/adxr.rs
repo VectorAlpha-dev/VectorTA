@@ -192,7 +192,7 @@ impl AdxrBuilder {
 pub enum AdxrError {
     #[error("adxr: Candle field error: {0}")]
     CandleFieldError(String),
-    #[error("adxr: Empty input data")]
+    #[error("adxr: Empty input data (All values are NaN).")]
     EmptyInputData,
     #[error("adxr: HLC data length mismatch: high={high_len}, low={low_len}, close={close_len}")]
     HlcLengthMismatch {

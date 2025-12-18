@@ -198,7 +198,7 @@ impl SarBuilder {
 
 #[derive(Debug, Error)]
 pub enum SarError {
-    #[error("sar: Empty input data.")]
+    #[error("sar: Empty data provided.")]
     EmptyInputData,
     #[error("sar: All values are NaN.")]
     AllValuesNaN,

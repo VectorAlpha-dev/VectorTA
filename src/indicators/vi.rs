@@ -179,7 +179,7 @@ impl ViBuilder {
 
 #[derive(Debug, Error)]
 pub enum ViError {
-    #[error("vi: Input data slice is empty.")]
+    #[error("vi: Empty data provided.")]
     EmptyInputData,
     #[error("vi: All values are NaN.")]
     AllValuesNaN,

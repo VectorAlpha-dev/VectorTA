@@ -243,17 +243,17 @@ impl ChandeBuilder {
 
 #[derive(Debug, Error)]
 pub enum ChandeError {
-    #[error("chande: input series are empty")] 
+    #[error("chande: Input series are empty.")] 
     EmptyInputData,
-    #[error("chande: all values are NaN")] 
+    #[error("chande: All values are NaN.")] 
     AllValuesNaN,
-    #[error("chande: invalid period: period={period}, data_len={data_len}")] 
+    #[error("chande: Invalid period: period={period}, data_len={data_len}")] 
     InvalidPeriod { period: usize, data_len: usize },
     #[error("chande: not enough valid data: needed={needed}, valid={valid}")] 
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("chande: input length mismatch: high={h}, low={l}, close={c}")] 
     DataLengthMismatch { h: usize, l: usize, c: usize },
-    #[error("chande: invalid direction: {direction}")] 
+    #[error("chande: Invalid direction: {direction}")] 
     InvalidDirection { direction: String },
     #[error("chande: output length mismatch: expected={expected}, got={got}")]
     OutputLengthMismatch { expected: usize, got: usize },

@@ -214,10 +214,10 @@ impl<'a> ModGodModeInput<'a> {
 /// Error type for Modified God Mode indicator
 #[derive(Debug, Error)]
 pub enum ModGodModeError {
-    #[error("mod_god_mode: input data slice is empty.")]
+    #[error("mod_god_mode: Input data slice is empty.")]
     EmptyInputData,
 
-    #[error("mod_god_mode: all values are NaN.")]
+    #[error("mod_god_mode: All values are NaN.")]
     AllValuesNaN,
 
     #[error("mod_god_mode: invalid periods: n1={n1}, n2={n2}, n3={n3}, data_len={data_len}")]
@@ -228,7 +228,7 @@ pub enum ModGodModeError {
         data_len: usize,
     },
 
-    #[error("mod_god_mode: not enough valid data: needed={needed}, valid={valid}")]
+    #[error("mod_god_mode: Not enough valid data: needed={needed}, valid={valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 
     #[error("mod_god_mode: output slice length mismatch: expected={expected}, got={got}")]

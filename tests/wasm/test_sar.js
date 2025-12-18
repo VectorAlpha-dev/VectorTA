@@ -100,7 +100,7 @@ test('SAR empty input', () => {
     
     assert.throws(() => {
         wasm.sar_js(empty, empty, 0.02, 0.2);
-    }, /Empty data/);
+    }, /empty/i);
 });
 
 test('SAR mismatched lengths', () => {

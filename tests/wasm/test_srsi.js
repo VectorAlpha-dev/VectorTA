@@ -127,40 +127,84 @@ test('SRSI empty input', () => {
 });
 
 test('SRSI fast API (srsi_into)', () => {
-    const close = new Float64Array(testData.close);
-    const k_out = new Float64Array(close.length);
-    const d_out = new Float64Array(close.length);
-    
-    // Test normal operation (no aliasing)
-    wasm.srsi_into(
-        close.byteOffset, 
-        k_out.byteOffset,
-        d_out.byteOffset,
-        close.length,
-        14, 14, 3, 3
-    );
-    
-    // Verify outputs are filled
-    assert(!isNaN(k_out[50]));
-    assert(!isNaN(d_out[50]));
+    const close = new Float64Array(testData.close.slice(0, 500));
+    const len = close.length;
+
+    const inPtr = wasm.srsi_alloc(len);
+    const kPtr = wasm.srsi_alloc(len);
+    const dPtr = wasm.srsi_alloc(len);
+    assert(inPtr !== 0, 'Failed to allocate input buffer');
+    assert(kPtr !== 0, 'Failed to allocate k buffer');
+    assert(dPtr !== 0, 'Failed to allocate d buffer');
+
+    try {
+        // Copy input into WASM memory
+        const memory = wasm.__wasm.memory.buffer;
+        const inView = new Float64Array(memory, inPtr, len);
+        inView.set(close);
+
+        // Compute into separate output buffers
+        wasm.srsi_into(inPtr, kPtr, dPtr, len, 14, 14, 3, 3);
+
+        // Read back results (re-fetch memory in case it grew)
+        const memory2 = wasm.__wasm.memory.buffer;
+        const kView = new Float64Array(memory2, kPtr, len);
+        const dView = new Float64Array(memory2, dPtr, len);
+
+        // Compare against the standard API
+        const regular = wasm.srsi_js(close, 14, 14, 3, 3);
+        const regularK = regular.slice(0, len);
+        const regularD = regular.slice(len);
+
+        for (let i = 0; i < len; i++) {
+            if (isNaN(regularK[i]) && isNaN(kView[i])) continue;
+            if (isNaN(regularD[i]) && isNaN(dView[i])) continue;
+            assertClose(kView[i], regularK[i], 1e-10, `srsi_into k mismatch at ${i}`);
+            assertClose(dView[i], regularD[i], 1e-10, `srsi_into d mismatch at ${i}`);
+        }
+    } finally {
+        wasm.srsi_free(inPtr, len);
+        wasm.srsi_free(kPtr, len);
+        wasm.srsi_free(dPtr, len);
+    }
 });
 
 test('SRSI fast API with aliasing', () => {
-    const data = new Float64Array(testData.close);
-    const data_copy = new Float64Array(data);
-    
-    // Test in-place operation (input aliased with k output)
-    wasm.srsi_into(
-        data.byteOffset,
-        data.byteOffset,  // k_out same as input
-        data_copy.byteOffset,  // d_out different
-        data.length,
-        14, 14, 3, 3
-    );
-    
-    // The function should handle aliasing correctly
-    assert(!isNaN(data[50]));  // k values
-    assert(!isNaN(data_copy[50]));  // d values
+    const close = new Float64Array(testData.close.slice(0, 500));
+    const len = close.length;
+
+    const inOutPtr = wasm.srsi_alloc(len);
+    const dPtr = wasm.srsi_alloc(len);
+    assert(inOutPtr !== 0, 'Failed to allocate in/out buffer');
+    assert(dPtr !== 0, 'Failed to allocate d buffer');
+
+    try {
+        // Keep a JS copy for the reference computation
+        const regular = wasm.srsi_js(close, 14, 14, 3, 3);
+        const regularK = regular.slice(0, len);
+        const regularD = regular.slice(len);
+
+        // Copy input into WASM memory (will be overwritten with K output)
+        const memory = wasm.__wasm.memory.buffer;
+        const inOutView = new Float64Array(memory, inOutPtr, len);
+        inOutView.set(close);
+
+        wasm.srsi_into(inOutPtr, inOutPtr, dPtr, len, 14, 14, 3, 3);
+
+        const memory2 = wasm.__wasm.memory.buffer;
+        const kView = new Float64Array(memory2, inOutPtr, len);
+        const dView = new Float64Array(memory2, dPtr, len);
+
+        for (let i = 0; i < len; i++) {
+            if (isNaN(regularK[i]) && isNaN(kView[i])) continue;
+            if (isNaN(regularD[i]) && isNaN(dView[i])) continue;
+            assertClose(kView[i], regularK[i], 1e-10, `aliasing k mismatch at ${i}`);
+            assertClose(dView[i], regularD[i], 1e-10, `aliasing d mismatch at ${i}`);
+        }
+    } finally {
+        wasm.srsi_free(inOutPtr, len);
+        wasm.srsi_free(dPtr, len);
+    }
 });
 
 test('SRSI batch operation', () => {
@@ -227,23 +271,43 @@ test('SRSI batch fast API', () => {
     const d_periods = 2;      // (2, 3, 1) => 2, 3
     const expected_rows = rsi_periods * stoch_periods * k_periods * d_periods;
     
-    const k_out = new Float64Array(expected_rows * close.length);
-    const d_out = new Float64Array(expected_rows * close.length);
-    
-    const rows = wasm.srsi_batch_into(
-        close.byteOffset,
-        k_out.byteOffset,
-        d_out.byteOffset,
-        close.length,
-        10, 14, 2,    // rsi_period range
-        10, 14, 2,    // stoch_period range
-        2, 4, 1,      // k range
-        2, 3, 1       // d range
-    );
-    
-    assert.strictEqual(rows, expected_rows);
-    
-    // Verify outputs are filled
-    assert(!isNaN(k_out[50]));
-    assert(!isNaN(d_out[50]));
+    const len = close.length;
+    const total = expected_rows * len;
+
+    const inPtr = wasm.srsi_alloc(len);
+    const kPtr = wasm.srsi_alloc(total);
+    const dPtr = wasm.srsi_alloc(total);
+    assert(inPtr !== 0, 'Failed to allocate input buffer');
+    assert(kPtr !== 0, 'Failed to allocate k buffer');
+    assert(dPtr !== 0, 'Failed to allocate d buffer');
+
+    try {
+        const memory = wasm.__wasm.memory.buffer;
+        new Float64Array(memory, inPtr, len).set(close);
+
+        const rows = wasm.srsi_batch_into(
+            inPtr,
+            kPtr,
+            dPtr,
+            len,
+            10, 14, 2,    // rsi_period range
+            10, 14, 2,    // stoch_period range
+            2, 4, 1,      // k range
+            2, 3, 1       // d range
+        );
+
+        assert.strictEqual(rows, expected_rows);
+
+        const memory2 = wasm.__wasm.memory.buffer;
+        const kView = new Float64Array(memory2, kPtr, total);
+        const dView = new Float64Array(memory2, dPtr, total);
+
+        // Verify outputs are filled (post-warmup sample)
+        assert(!isNaN(kView[50]));
+        assert(!isNaN(dView[50]));
+    } finally {
+        wasm.srsi_free(inPtr, len);
+        wasm.srsi_free(kPtr, total);
+        wasm.srsi_free(dPtr, total);
+    }
 });

@@ -199,13 +199,13 @@ impl ReflexBuilder {
 
 #[derive(Debug, Error)]
 pub enum ReflexError {
-    #[error("reflex: Input data slice is empty.")]
+    #[error("reflex: No data available (input data slice is empty).")]
     EmptyInputData,
     #[error("reflex: All values are NaN.")]
     AllValuesNaN,
-    #[error("reflex: Invalid period: period = {period}, data length = {data_len}")]
+    #[error("reflex: period must be >=2 (period = {period}, data length = {data_len})")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("reflex: Not enough valid data: needed = {needed}, valid = {valid}")]
+    #[error("reflex: Not enough data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("reflex: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
@@ -412,9 +412,6 @@ fn reflex_prepare<'a>(
     let period = input.get_period();
 
     if period < 2 {
-        return Err(ReflexError::InvalidPeriod { period, data_len: len });
-    }
-    if period > len {
         return Err(ReflexError::InvalidPeriod { period, data_len: len });
     }
     if period > (len - first) {

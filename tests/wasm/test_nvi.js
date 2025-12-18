@@ -64,7 +64,7 @@ test('NVI error handling - empty data', () => {
     
     assert.throws(() => {
         wasm.nvi_js(emptyArray, emptyArray);
-    }, /Empty data/i, 'Should throw error for empty data');
+    }, /empty/i, 'Should throw error for empty data');
 });
 
 test('NVI error handling - all NaN values', () => {

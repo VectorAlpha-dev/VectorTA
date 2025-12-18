@@ -193,14 +193,14 @@ impl PviBuilder {
 
 #[derive(Debug, Error)]
 pub enum PviError {
-    #[error("pvi: empty input data")]
+    #[error("pvi: Empty data provided.")]
     EmptyInputData,
-    #[error("pvi: all values are NaN")]
+    #[error("pvi: All values are NaN.")]
     AllValuesNaN,
     #[error("pvi: close and volume data have different lengths")]
     MismatchedLength,
     #[error(
-        "pvi: not enough valid data: needed at least {needed} valid data points, got {valid}"
+        "pvi: Not enough valid data: needed at least {needed} valid data points, got {valid}"
     )]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("pvi: output length mismatch: expected {expected}, got {got}")]

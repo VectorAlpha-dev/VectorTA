@@ -372,68 +372,58 @@ pub fn dpo_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
 unsafe fn dpo_simd128(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
     use core::arch::wasm32::*;
 
+    let len = data.len();
+    if len == 0 {
+        return;
+    }
+
     let back = period / 2 + 1;
-    let mut sum = 0.0;
-    let scale = 1.0 / (period as f64);
-    const STEP: usize = 2;
-
-    // Setup sum for the initial window
-    for i in first_val..first_val + period.min(data.len() - first_val) {
-        sum += data[i];
-    }
-
-    // Process initial elements until we reach the point where we can produce output
     let start_idx = first_val + period - 1;
-
-    // Scalar computation for warmup and edge cases
-    for i in start_idx..data.len().min(start_idx + back) {
-        if i >= back {
-            out[i] = data[i - back] - (sum * scale);
-        }
-        if i + 1 < data.len() {
-            sum += data[i + 1] - data[i + 1 - period];
-        }
+    let warm = start_idx.max(back);
+    if warm >= len {
+        return;
     }
 
-    // SIMD computation for the main bulk
-    let simd_start = (start_idx + back).max(back);
-    let simd_end = data.len().saturating_sub(STEP - 1);
+    // Initial sliding sum for the window ending at `start_idx`.
+    let mut sum = 0.0f64;
+    for j in 0..period {
+        sum += data[first_val + j];
+    }
 
-    if simd_start < simd_end {
-        let scale_vec = f64x2_splat(scale);
+    // Advance sum to the window ending at `warm` (only needed when back > start_idx).
+    let mut cur = start_idx;
+    while cur < warm {
+        let next = cur + 1;
+        sum += data[next] - data[next - period];
+        cur = next;
+    }
 
-        for i in (simd_start..simd_end).step_by(STEP) {
-            // Load data[i-back] and data[i-back+1]
-            let data_vec = v128_load(&data[i - back] as *const f64 as *const v128);
+    let scale = 1.0f64 / (period as f64);
+    let scale_vec = f64x2_splat(scale);
 
-            // Compute current sums for both positions
-            let sum0 = sum;
-            let sum1 = sum + data[i] - data[i - period];
+    let mut i = warm;
+    while i + 1 < len {
+        // Prices for i and i+1: data[i-back], data[i+1-back]
+        let price_vec = v128_load(&data[i - back] as *const f64 as *const v128);
 
-            // Create two different sum values for the vector
-            let sum_vec = f64x2(sum0, sum1);
+        // Window sums for i and i+1.
+        let sum0 = sum;
+        let sum1 = sum0 + data[i + 1] - data[i + 1 - period];
+        let sum_vec = f64x2(sum0, sum1);
 
-            // Compute DPO: data[i-back] - (sum * scale)
-            let result = f64x2_sub(data_vec, f64x2_mul(sum_vec, scale_vec));
+        let result = f64x2_sub(price_vec, f64x2_mul(sum_vec, scale_vec));
+        v128_store(&mut out[i] as *mut f64 as *mut v128, result);
 
-            // Store result
-            v128_store(&mut out[i] as *mut f64 as *mut v128, result);
-
-            // Update sum for next iteration
-            if i + STEP < data.len() {
-                sum = sum1 + data[i + 1] - data[i + 1 - period];
-            }
+        // Prepare sum for the next iteration (i += 2) => window ending at i+2.
+        if i + 2 < len {
+            sum = sum1 + data[i + 2] - data[i + 2 - period];
         }
+        i += 2;
+    }
 
-        // Handle remaining elements
-        for i in simd_end..data.len() {
-            if i >= back {
-                out[i] = data[i - back] - (sum * scale);
-            }
-            if i + 1 < data.len() {
-                sum += data[i + 1] - data[i + 1 - period];
-            }
-        }
+    // Tail element (odd remaining length)
+    if i < len {
+        out[i] = data[i - back] - (sum * scale);
     }
 }
 

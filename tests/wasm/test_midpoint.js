@@ -181,8 +181,7 @@ test('Midpoint fast API basic', () => {
     const outPtr = wasm.midpoint_alloc(len);
     
     try {
-        // Create memory views (compat with different wasm-bindgen outputs)
-        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const memory = wasm.__wasm.memory;
         const inView = new Float64Array(memory.buffer, inPtr, len);
         inView.set(close);
         
@@ -215,8 +214,7 @@ test('Midpoint fast API in-place', () => {
     const ptr = wasm.midpoint_alloc(len);
     
     try {
-        // Create memory view and copy data (use exported memory)
-        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const memory = wasm.__wasm.memory;
         const memView = new Float64Array(memory.buffer, ptr, len);
         memView.set(data);
         
@@ -306,7 +304,7 @@ test('Midpoint batch zero-copy API', () => {
     
     try {
         // Copy data to input buffer
-        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const memory = wasm.__wasm.memory;
         const inView = new Float64Array(memory.buffer, inPtr, len);
         inView.set(close);
         
@@ -365,7 +363,7 @@ test('Midpoint batch zero-copy with large dataset', () => {
     
     try {
         // Copy data to input buffer
-        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
+        const memory = wasm.__wasm.memory;
         const inView = new Float64Array(memory.buffer, inPtr, size);
         inView.set(data);
         

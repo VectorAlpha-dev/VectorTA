@@ -145,7 +145,7 @@ impl PmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum PmaError {
-    #[error("pma: Input data slice is empty.")]
+    #[error("pma: Empty data provided.")]
     EmptyInputData,
     #[error("pma: All values are NaN.")]
     AllValuesNaN,

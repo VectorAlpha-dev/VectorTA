@@ -126,7 +126,7 @@ test('EMV empty data', () => {
     
     assert.throws(() => {
         wasm.emv_js(empty, empty, empty, empty);
-    }, /Empty data|EmptyData/);
+    }, /input data slice is empty|Empty data|EmptyData/i);
 });
 
 test('EMV all NaN', () => {
@@ -135,7 +135,7 @@ test('EMV all NaN', () => {
     
     assert.throws(() => {
         wasm.emv_js(nanArr, nanArr, nanArr, nanArr);
-    }, /All values are NaN|AllValuesNaN/);
+    }, /all values are nan|AllValuesNaN/i);
 });
 
 test('EMV not enough data', () => {
@@ -147,7 +147,7 @@ test('EMV not enough data', () => {
     
     assert.throws(() => {
         wasm.emv_js(high, low, close, volume);
-    }, /Not enough data|NotEnoughData/);
+    }, /not enough valid data|Not enough data|NotEnoughData/i);
 });
 
 test('EMV partial NaN handling', () => {

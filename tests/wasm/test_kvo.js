@@ -116,7 +116,7 @@ test('KVO error handling - empty input', () => {
     
     assert.throws(
         () => wasm.kvo_js(empty, empty, empty, empty, 2, 5),
-        /Empty/,
+        /empty/i,
         'Should throw error for empty input'
     );
 });

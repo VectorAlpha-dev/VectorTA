@@ -143,7 +143,7 @@ impl<'a> MassInput<'a> {
 
 #[derive(Debug, Error)]
 pub enum MassError {
-    #[error("mass: Input data slice is empty.")]
+    #[error("mass: Empty data provided.")]
     EmptyInputData,
     #[error("mass: High and low slices must have the same length.")]
     DifferentLengthHL,

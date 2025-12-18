@@ -93,7 +93,7 @@ test('MarketEFI empty data', () => {
     
     assert.throws(() => {
         wasm.marketefi_js(high, low, volume);
-    }, /Empty data/);
+    }, /empty/i);
 });
 
 test('MarketEFI mismatched lengths', () => {

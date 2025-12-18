@@ -92,7 +92,7 @@ test('ERI error handling', () => {
     // Test with empty data
     assert.throws(
         () => wasm.eri_js([], [], [], 13, "ema"),
-        /Empty data/,
+        /Empty input data|Empty data/i,
         'Should fail with empty data'
     );
     

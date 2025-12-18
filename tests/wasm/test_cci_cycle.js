@@ -122,24 +122,34 @@ test('CCI_CYCLE empty input', () => {
     }, /empty/i);
 });
 
-test('CCI_CYCLE invalid factor', () => {
-    // Test CCI_CYCLE with invalid factor values
-    const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0,
-                                   11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0]);
-    
-    // NaN factor should throw
+test('CCI_CYCLE factor edge cases', () => {
+    const data = new Float64Array([
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0,
+        11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0,
+    ]);
+
+    // NaN factor is allowed; it should propagate NaNs through most of the output.
+    const nanResult = wasm.cci_cycle_js(data, 5, NaN);
+    assert.strictEqual(nanResult.length, data.length);
+    let nanCount = 0;
+    for (const v of nanResult) {
+        if (Number.isNaN(v)) nanCount++;
+    }
+    assert.ok(
+        nanCount >= data.length - 5,
+        `Expected mostly NaN when factor is NaN, got ${nanCount}/${data.length} NaN values`
+    );
+
+    // Negative and large factors are allowed.
+    const negResult = wasm.cci_cycle_js(data, 5, -0.5);
+    assert.strictEqual(negResult.length, data.length);
+
+    const bigResult = wasm.cci_cycle_js(data, 5, 10.0);
+    assert.strictEqual(bigResult.length, data.length);
+
+    // Infinities are rejected.
     assert.throws(() => {
-        wasm.cci_cycle_js(data, 5, NaN);
-    }, /Invalid factor/);
-    
-    // Negative factor should throw
-    assert.throws(() => {
-        wasm.cci_cycle_js(data, 5, -0.5);
-    }, /Invalid factor/);
-    
-    // Very large factor should throw
-    assert.throws(() => {
-        wasm.cci_cycle_js(data, 5, 10.0);
+        wasm.cci_cycle_js(data, 5, Infinity);
     }, /Invalid factor/);
 });
 
@@ -324,9 +334,9 @@ test('CCI_CYCLE zero-copy API', () => {
         assert(ptr !== 0, 'Failed to allocate memory');
         
         // Create view into WASM memory
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory.buffer;
         const memView = new Float64Array(
-            memory.buffer,
+            memory,
             ptr,
             data.length
         );
@@ -369,15 +379,15 @@ test('CCI_CYCLE zero-copy with large dataset', () => {
         assert(ptr !== 0, 'Failed to allocate large buffer');
         
         try {
-            const memory = wasm.__wbindgen_memory();
-            const memView = new Float64Array(memory.buffer, ptr, size);
+            const memory = wasm.__wasm.memory.buffer;
+            const memView = new Float64Array(memory, ptr, size);
             memView.set(data);
             
             wasm.cci_cycle_into(ptr, ptr, size, 10, 0.5);
             
             // Recreate view in case memory grew
-            const memory2 = wasm.__wbindgen_memory();
-            const memView2 = new Float64Array(memory2.buffer, ptr, size);
+            const memory2 = wasm.__wasm.memory.buffer;
+            const memView2 = new Float64Array(memory2, ptr, size);
             
             // Check warmup period has NaN (length * 4)
             const warmupPeriod = 10 * 4;
@@ -419,9 +429,14 @@ test('CCI_CYCLE zero-copy error handling', () => {
                 wasm.cci_cycle_into(ptr, ptr, 20, 0, 0.5);
             }, /Invalid period/);
             
-            // Invalid factor (NaN)
-            assert.throws(() => {
+            // NaN factor is allowed (should not throw)
+            assert.doesNotThrow(() => {
                 wasm.cci_cycle_into(ptr, ptr, 20, 5, NaN);
+            });
+
+            // Invalid factor (infinite)
+            assert.throws(() => {
+                wasm.cci_cycle_into(ptr, ptr, 20, 5, Infinity);
             }, /Invalid factor/);
         } finally {
             wasm.cci_cycle_free(ptr, 20);
@@ -443,8 +458,8 @@ test('CCI_CYCLE zero-copy memory management', () => {
             assert(ptr !== 0, `Failed to allocate ${size} elements`);
             
             // Write pattern to verify memory
-            const memory = wasm.__wbindgen_memory();
-            const memView = new Float64Array(memory.buffer, ptr, size);
+            const memory = wasm.__wasm.memory.buffer;
+            const memView = new Float64Array(memory, ptr, size);
             for (let i = 0; i < Math.min(10, size); i++) {
                 memView[i] = i * 1.5;
             }

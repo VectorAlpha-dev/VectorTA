@@ -113,7 +113,7 @@ test('LinReg empty input', () => {
     
     assert.throws(() => {
         wasm.linreg_js(dataEmpty, 14);
-    }, /Input data slice is empty|All values are NaN/);
+    }, /no data provided|empty|all values are nan/i);
 });
 
 test('LinReg all NaN', () => {

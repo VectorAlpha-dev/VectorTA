@@ -211,7 +211,7 @@ pub enum EriError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("eri: MA calculation error: {0}")]
     MaCalculationError(String),
-    #[error("eri: Empty input data.")]
+    #[error("eri: Empty data provided.")]
     EmptyInputData,
     #[error("eri: Output slice length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },

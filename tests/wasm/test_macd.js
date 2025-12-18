@@ -143,7 +143,7 @@ test('MACD empty input', () => {
     
     assert.throws(() => {
         wasm.macd_js(empty, 12, 26, 9, "ema");
-    }, /Input data slice is empty|Invalid period|unreachable/);
+    }, /input data slice is empty|invalid period|unreachable/i);
 });
 
 test('MACD NaN handling', () => {
@@ -172,15 +172,9 @@ test('MACD all NaN input', () => {
     const allNaN = new Float64Array(100);
     allNaN.fill(NaN);
     
-    // Current WASM binding does not error here; it returns NaN outputs
-    const result = wasm.macd_js(allNaN, 12, 26, 9, "ema");
-    const len = allNaN.length;
-    const macd = result.values.slice(0, len);
-    const signal = result.values.slice(len, 2 * len);
-    const hist = result.values.slice(2 * len);
-    assertAllNaN(macd, 'MACD should be NaN for all-NaN input');
-    assertAllNaN(signal, 'Signal should be NaN for all-NaN input');
-    assertAllNaN(hist, 'Histogram should be NaN for all-NaN input');
+    assert.throws(() => {
+        wasm.macd_js(allNaN, 12, 26, 9, "ema");
+    }, /all values are nan/i);
 });
 
 test('MACD fast API (in-place)', () => {
@@ -196,7 +190,7 @@ test('MACD fast API (in-place)', () => {
     
     try {
         // Copy input data to WASM memory
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const memView = new Float64Array(memory.buffer, in_ptr, len);
         memView.set(close);
         
@@ -213,7 +207,7 @@ test('MACD fast API (in-place)', () => {
         
         // Read results from memory - recreate views after potential memory growth
         // Note: pointers are byte offsets, convert to element indices for subarray
-        const memory2 = wasm.__wbindgen_memory();
+        const memory2 = wasm.__wasm.memory;
         const fullView = new Float64Array(memory2.buffer);
         const macd = fullView.subarray(macd_ptr / 8, macd_ptr / 8 + len);
         const signal = fullView.subarray(signal_ptr / 8, signal_ptr / 8 + len);
@@ -255,7 +249,7 @@ test('MACD fast API aliasing detection', () => {
     
     try {
         // Copy input data to buffer
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const buffer = new Float64Array(memory.buffer, buffer_ptr, len);
         buffer.set(close);
         
@@ -272,7 +266,7 @@ test('MACD fast API aliasing detection', () => {
         
         // Re-create view after potential memory changes
         // Use subarray for more reliable view creation
-        const memory2 = wasm.__wbindgen_memory();
+        const memory2 = wasm.__wasm.memory;
         const fullView = new Float64Array(memory2.buffer);
         const buffer_after = fullView.subarray(buffer_ptr / 8, buffer_ptr / 8 + len);
         
