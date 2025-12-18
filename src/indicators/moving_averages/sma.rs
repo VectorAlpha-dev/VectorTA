@@ -870,22 +870,15 @@ fn sma_batch_inner(
     // 1) allocate rows×cols uninit
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // 2) warmup NaN prefixes per row
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first + c.period.unwrap() - 1)
-        .collect();
-    init_matrix_prefixes(&mut buf_mu, cols, &warm);
-
-    // 3) view as &mut [f64] without copy
+    // 2) view as &mut [f64] without copy
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // 4) compute in-place
+    // 3) compute in-place
     sma_batch_inner_into(data, sweep, kern, parallel, out_slice)?;
 
-    // 5) reconstruct Vec<f64> with zero copy
+    // 4) reconstruct Vec<f64> with zero copy
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -900,6 +893,81 @@ fn sma_batch_inner(
         rows,
         cols,
     })
+}
+
+#[inline(always)]
+unsafe fn sma_batch_row_prefixsum_scalar(
+    ps: &[f64],
+    period: usize,
+    mut i: usize,
+    cols: usize,
+    inv: f64,
+    dst: *mut f64,
+) {
+    while i < cols {
+        let s_hi = *ps.get_unchecked(i);
+        let s_lo = *ps.get_unchecked(i - period);
+        *dst.add(i) = (s_hi - s_lo) * inv;
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn sma_batch_row_prefixsum_avx2(
+    ps: &[f64],
+    period: usize,
+    mut i: usize,
+    cols: usize,
+    inv: f64,
+    dst: *mut f64,
+) {
+    use core::arch::x86_64::*;
+
+    let inv_v = _mm256_set1_pd(inv);
+    let ps_ptr = ps.as_ptr();
+    let lanes = 4usize;
+
+    while i + (lanes - 1) < cols {
+        let hi = _mm256_loadu_pd(ps_ptr.add(i));
+        let lo = _mm256_loadu_pd(ps_ptr.add(i - period));
+        let diff = _mm256_sub_pd(hi, lo);
+        let out_v = _mm256_mul_pd(diff, inv_v);
+        _mm256_storeu_pd(dst.add(i), out_v);
+        i += lanes;
+    }
+
+    sma_batch_row_prefixsum_scalar(ps, period, i, cols, inv, dst);
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn sma_batch_row_prefixsum_avx512(
+    ps: &[f64],
+    period: usize,
+    mut i: usize,
+    cols: usize,
+    inv: f64,
+    dst: *mut f64,
+) {
+    use core::arch::x86_64::*;
+
+    let inv_v = _mm512_set1_pd(inv);
+    let ps_ptr = ps.as_ptr();
+    let lanes = 8usize;
+
+    while i + (lanes - 1) < cols {
+        let hi = _mm512_loadu_pd(ps_ptr.add(i));
+        let lo = _mm512_loadu_pd(ps_ptr.add(i - period));
+        let diff = _mm512_sub_pd(hi, lo);
+        let out_v = _mm512_mul_pd(diff, inv_v);
+        _mm512_storeu_pd(dst.add(i), out_v);
+        i += lanes;
+    }
+
+    sma_batch_row_prefixsum_scalar(ps, period, i, cols, inv, dst);
 }
 
 #[inline(always)]
@@ -974,19 +1042,37 @@ fn sma_batch_inner_into(
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let warm = first + period - 1;
-        let inv = 1.0 / (period as f64);
         // cast this row to &mut [f64]
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
         if warm >= cols {
             return;
         }
-        // Fill valid outputs using prefix sums
-        let mut i = warm;
-        while i < cols {
-            let s_hi = ps[i];
-            let s_lo = if i >= period { ps[i - period] } else { 0.0 };
-            dst[i] = (s_hi - s_lo) * inv;
-            i += 1;
+        let inv = (period as f64).recip();
+
+        // First computable output may have i < period (e.g., first=0 => warm=period-1).
+        // For those, treat the lower prefix as 0.0.
+        let s_hi = *ps.get_unchecked(warm);
+        let s_lo = if warm >= period {
+            *ps.get_unchecked(warm - period)
+        } else {
+            0.0
+        };
+        dst[warm] = (s_hi - s_lo) * inv;
+
+        let mut i = warm + 1;
+        if i >= cols {
+            return;
+        }
+
+        // For i >= warm+1, we always have i >= period, so ps[i-period] is in-bounds.
+        let dst_ptr = dst.as_mut_ptr();
+        match actual_kern {
+            Kernel::Scalar => sma_batch_row_prefixsum_scalar(&ps, period, i, cols, inv, dst_ptr),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => sma_batch_row_prefixsum_avx2(&ps, period, i, cols, inv, dst_ptr),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => sma_batch_row_prefixsum_avx512(&ps, period, i, cols, inv, dst_ptr),
+            _ => sma_batch_row_prefixsum_scalar(&ps, period, i, cols, inv, dst_ptr),
         }
     };
 

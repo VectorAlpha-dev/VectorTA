@@ -340,7 +340,16 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // HWMA is a loop-carried recurrence; the per-element work is scalar and
+        // AVX2/AVX512 `#[target_feature]` variants can underperform due to
+        // downclock. Prefer the scalar reference for `Auto` unless a future
+        // SIMD implementation demonstrates a consistent win.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 | Kernel::Avx2 | Kernel::Avx512Batch | Kernel::Avx2Batch => {
+                Kernel::Scalar
+            }
+            other => other,
+        },
         other => other,
     };
 
@@ -434,7 +443,13 @@ pub fn hwma_with_kernel_into(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // See `hwma_with_kernel`: avoid AVX2/AVX512 downclock for `Auto`.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 | Kernel::Avx2 | Kernel::Avx512Batch | Kernel::Avx2Batch => {
+                Kernel::Scalar
+            }
+            other => other,
+        },
         other => other,
     };
 
@@ -890,12 +905,9 @@ pub fn hwma_batch_with_kernel(
     }
     // Map batch kernels to their regular SIMD equivalents
     let simd = match k {
-        Kernel::Auto => match detect_best_batch_kernel() {
-            Kernel::Avx512Batch => Kernel::Avx512,
-            Kernel::Avx2Batch => Kernel::Avx2,
-            Kernel::ScalarBatch => Kernel::Scalar,
-            _ => Kernel::Scalar,
-        },
+        // HWMA batch is effectively a per-row scalar recurrence; prefer the
+        // scalar reference for `Auto` (see single-series rationale).
+        Kernel::Auto => Kernel::Scalar,
         Kernel::Avx512Batch | Kernel::Avx512 => Kernel::Avx512,
         Kernel::Avx2Batch | Kernel::Avx2 => Kernel::Avx2,
         Kernel::ScalarBatch | Kernel::Scalar => Kernel::Scalar,
@@ -1678,18 +1690,15 @@ pub fn hwma_batch_py<'py>(
     // Compute without GIL
     let (combos_result, _, _) = py
         .allow_threads(|| {
-            // Handle kernel selection for batch operations
-            let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
-                k => k,
-            };
-
-            // Map batch kernels to regular kernels
-            let simd = match kernel {
-                Kernel::Avx512Batch => Kernel::Avx512,
-                Kernel::Avx2Batch => Kernel::Avx2,
-                Kernel::ScalarBatch => Kernel::Scalar,
-                _ => kernel,
+            // HWMA batch is a per-row recurrence; prefer scalar for `Auto`.
+            let simd = match kern {
+                Kernel::Auto => Kernel::Scalar,
+                kernel => match kernel {
+                    Kernel::Avx512Batch => Kernel::Avx512,
+                    Kernel::Avx2Batch => Kernel::Avx2,
+                    Kernel::ScalarBatch => Kernel::Scalar,
+                    _ => kernel,
+                },
             };
 
             hwma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)

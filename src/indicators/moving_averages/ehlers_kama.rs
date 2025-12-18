@@ -13,7 +13,8 @@
 //! ## Developer Status
 //! - **AVX2/AVX512**: Enabled for initial ER denominator (vector abs-diff sum);
 //!   main recurrence remains scalar (recursive filter). Auto selection falls back
-//!   to scalar when `nightly-avx` is disabled. Expect modest wins on long series.
+//!   to scalar (recurrence-bound; AVX512 downclock often outweighs benefits).
+//!   Explicit AVX kernels remain available via `Kernel::Avx2` / `Kernel::Avx512`.
 //! - **Scalar path**: Minor optimizations (branch hoist, mul_add, no powi).
 //! - **Batch (row-specific)**: Uses shared prefix sums of abs-diffs to seed ER
 //!   denominators in O(1) per row; reduces overhead for wide sweeps. Outputs
@@ -240,6 +241,15 @@ fn ehlers_kama_compute_into(
     kernel: Kernel,
     out: &mut [f64],
 ) {
+    if period == 1 {
+        let len = data.len();
+        unsafe {
+            for i in first..len {
+                *out.get_unchecked_mut(i) = *data.get_unchecked(i);
+            }
+        }
+        return;
+    }
     unsafe {
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => ehlers_kama_scalar(data, period, first, out),
@@ -266,15 +276,10 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
         return;
     }
 
-    // Calculate initial delta sum with PERIOD terms (not period-1).
-    // Use max to avoid a per-iteration branch (k > first_valid is always true now).
+    // Initial delta sum over (period-1) consecutive diffs, ignoring the (NaN) diff at `first_valid`
+    // when the input has a NaN prefix.
     let mut delta_sum = 0.0;
-    // Guard underflow by branching once here; avoids per-iteration checks below.
-    let delta_start = if start >= period {
-        start - period + 1
-    } else {
-        first_valid + 1
-    };
+    let delta_start = first_valid + 1;
     for k in delta_start..=start {
         delta_sum += (data[k] - data[k - 1]).abs();
     }
@@ -299,7 +304,7 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
 
     // Continue with adaptive calculation
     for i in (start + 1)..len {
-        // Rolling delta: maintain period terms by dropping from i-period
+        // Rolling delta: maintain (period-1) terms by dropping from i-period
         let drop_idx = i - period;
         if drop_idx > first_valid {
             delta_sum -= (data[drop_idx] - data[drop_idx - 1]).abs();
@@ -307,7 +312,7 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
         let a = data[i];
         delta_sum += (a - data[i - 1]).abs();
 
-        // Direction uses full period window
+        // Direction uses full (period-1) lookback
         let direction = (a - data[i - (period - 1)]).abs();
         let ef = if delta_sum == 0.0 {
             0.0
@@ -315,8 +320,7 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
             (direction / delta_sum).min(1.0)
         };
 
-        // Ehlers smoothing constant
-        // Original formula: s = ((0.6667 * ef) + 0.0645)^2
+        // Ehlers smoothing constant: s = ((0.6667 * ef) + 0.0645)^2
         let s_term = 0.6667f64.mul_add(ef, 0.0645);
         s = s_term * s_term;
 
@@ -572,7 +576,7 @@ fn ehlers_kama_prepare<'a>(
         });
     }
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((data, period, first, chosen))
@@ -934,7 +938,7 @@ pub fn ehlers_kama_batch_with_kernel(
     k: Kernel,
 ) -> Result<EhlersKamaBatchOutput, EhlersKamaError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(EhlersKamaError::InvalidKernelForBatch(other)),
     };
@@ -1034,7 +1038,7 @@ fn ehlers_kama_batch_inner_into(
 
     // resolve once
     let actual = match kern {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         other => other,
     };
     // map batch → compute kernel (same as alma.rs)
@@ -1178,7 +1182,7 @@ pub fn ehlers_kama_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
     py.allow_threads(|| {
         let resolved = match kern {
-            Kernel::Auto => detect_best_batch_kernel(),
+            Kernel::Auto => Kernel::ScalarBatch,
             k => k,
         };
         let simd = match resolved {

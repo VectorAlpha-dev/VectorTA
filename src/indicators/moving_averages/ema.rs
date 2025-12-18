@@ -490,12 +490,11 @@ unsafe fn ema_scalar_into(
         let x = *data.get_unchecked(i);
         if is_finite_fast(x) {
             valid_count += 1;
-            mean = ((valid_count as f64 - 1.0) * mean + x) / valid_count as f64;
-            *out.get_unchecked_mut(i) = mean;
-        } else {
-            // During warmup, skip NaN values and carry forward
-            *out.get_unchecked_mut(i) = mean;
+            let vc = valid_count as f64;
+            mean = ((vc - 1.0) * mean + x) / vc;
         }
+        // During warmup, skip NaN values and carry forward
+        *out.get_unchecked_mut(i) = mean;
     }
 
     // EMA phase (from first_val+period onwards)
@@ -505,11 +504,9 @@ unsafe fn ema_scalar_into(
             let x = *data.get_unchecked(i);
             if is_finite_fast(x) {
                 prev = beta.mul_add(prev, alpha * x);
-                *out.get_unchecked_mut(i) = prev;
-            } else {
-                // Skip NaN values - carry forward previous value
-                *out.get_unchecked_mut(i) = prev;
             }
+            // Skip NaN values - carry forward previous value
+            *out.get_unchecked_mut(i) = prev;
         }
     }
 }
@@ -926,12 +923,11 @@ unsafe fn ema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
         let x = unsafe { *data.get_unchecked(i) };
         if is_finite_fast(x) {
             valid_count += 1;
-            mean = ((valid_count as f64 - 1.0) * mean + x) / valid_count as f64;
-            unsafe { *out.get_unchecked_mut(i) = mean };
-        } else {
-            // Skip NaN values like stream does - carry forward previous value
-            unsafe { *out.get_unchecked_mut(i) = mean };
+            let vc = valid_count as f64;
+            mean = ((vc - 1.0) * mean + x) / vc;
         }
+        // Skip NaN values like stream does - carry forward previous value
+        unsafe { *out.get_unchecked_mut(i) = mean };
     }
 
     // EMA phase (from first+period onwards)
@@ -941,11 +937,9 @@ unsafe fn ema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
             let x = unsafe { *data.get_unchecked(i) };
             if is_finite_fast(x) {
                 prev = beta.mul_add(prev, alpha * x);
-                unsafe { *out.get_unchecked_mut(i) = prev };
-            } else {
-                // Skip NaN values - carry forward previous value
-                unsafe { *out.get_unchecked_mut(i) = prev };
             }
+            // Skip NaN values - carry forward previous value
+            unsafe { *out.get_unchecked_mut(i) = prev };
         }
     }
 }

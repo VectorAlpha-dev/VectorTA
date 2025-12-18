@@ -673,6 +673,13 @@ pub fn cwma_avx512(
     inv_norm: f64,
     out: &mut [f64],
 ) {
+    // Many targets downclock on AVX-512; for very small weight vectors the AVX2 kernel
+    // is consistently faster while staying within the existing strict accuracy checks.
+    // The long-kernel already falls back for wlen < 24; mirror that behavior here.
+    if weights.len() < 24 {
+        unsafe { cwma_avx2(data, weights, period, first_valid, inv_norm, out) }
+        return;
+    }
     if period <= 32 {
         unsafe { cwma_avx512_short(data, weights, period, first_valid, inv_norm, out) }
     } else {

@@ -1875,12 +1875,13 @@ pub fn highpass_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    let combos = py
-        .allow_threads(|| {
-            let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
-                k => k,
-            };
+	    let combos = py
+	        .allow_threads(|| {
+	            let kernel = match kern {
+	                // Keep batch Auto consistent with the Rust API: SIMD underperforms for this IIR.
+	                Kernel::Auto => Kernel::ScalarBatch,
+	                k => k,
+	            };
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,

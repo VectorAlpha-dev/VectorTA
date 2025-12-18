@@ -1721,7 +1721,10 @@ fn buff_averages_batch_inner_into_parallel(
 
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     let masked_buffers: Option<(Vec<f64>, Vec<f64>)> =
-        if matches!(simd, Kernel::Avx2 | Kernel::Avx512) {
+        // The masked pv/vv precompute is an amortization win when we have multiple rows
+        // reusing the same (price, volume) series. For a single row, the extra O(n) pass
+        // dominates and is slower than computing pv/v on the fly.
+        if rows > 1 && matches!(simd, Kernel::Avx2 | Kernel::Avx512) {
             let mut pv = vec![0.0; price.len()];
             let mut vv = vec![0.0; price.len()];
             unsafe {

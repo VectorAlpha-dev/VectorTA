@@ -283,7 +283,11 @@ fn ehma_prepare<'a>(
     let (weights, inv_coef) = build_hann_weights_rec(period);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // EHMA is typically faster on AVX2 than AVX512 on many CPUs due to AVX512 downclock.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 => Kernel::Avx2,
+            k => k,
+        },
         k => k,
     };
 
@@ -902,7 +906,10 @@ pub fn ehma_batch_with_kernel(
 ) -> Result<EhmaBatchOutput, EhmaError> {
     // enforce batch like alma.rs
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => match detect_best_batch_kernel() {
+            Kernel::Avx512Batch => Kernel::Avx2Batch,
+            other => other,
+        },
         other if other.is_batch() => other,
         other => return Err(EhmaError::InvalidKernelForBatch(other)),
     };
@@ -1261,7 +1268,10 @@ pub fn ehma_batch_py<'py>(
         .allow_threads(|| {
             // resolve batch -> non-batch simd like alma.rs
             let batch = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
+                Kernel::Auto => match detect_best_batch_kernel() {
+                    Kernel::Avx512Batch => Kernel::Avx2Batch,
+                    other => other,
+                },
                 k => k,
             };
             let simd = match batch {

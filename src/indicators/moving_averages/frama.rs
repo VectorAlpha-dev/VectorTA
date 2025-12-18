@@ -349,7 +349,11 @@ fn frama_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // FRAMA is typically faster on AVX2 than AVX512 on many CPUs due to AVX512 downclock.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 => Kernel::Avx2,
+            k => k,
+        },
         other => other,
     };
 
@@ -1236,7 +1240,10 @@ pub fn frama_batch_with_kernel(
     k: Kernel,
 ) -> Result<FramaBatchOutput, FramaError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => match detect_best_batch_kernel() {
+            Kernel::Avx512Batch => Kernel::Avx2Batch,
+            other => other,
+        },
         other if other.is_batch() => other,
         other => return Err(FramaError::InvalidKernelForBatch(other)),
     };
@@ -2776,7 +2783,10 @@ pub fn frama_batch_py<'py>(
     let combos_result = py
         .allow_threads(|| -> Result<Vec<FramaParams>, FramaError> {
             let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
+                Kernel::Auto => match detect_best_batch_kernel() {
+                    Kernel::Avx512Batch => Kernel::Avx2Batch,
+                    other => other,
+                },
                 k => k,
             };
 

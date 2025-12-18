@@ -427,7 +427,7 @@ pub fn jma_scalar(
 
     let n = data.len();
     unsafe {
-        // Pointer walk with 4x unrolling for ILP; keep strict op ordering (no FMA)
+        // Pointer walk with 4x unrolling for ILP; use `mul_add` (FMA) for speed.
         let mut p = data.as_ptr().add(first_valid + 1);
         let mut q = output.as_mut_ptr().add(first_valid + 1);
         let end_ptr = data.as_ptr().add(n);
@@ -435,10 +435,10 @@ pub fn jma_scalar(
         while p.add(3) < end_ptr {
             // step 0
             let x0 = *p;
-            e0 = one_minus_alpha * x0 + alpha * e0;
-            e1 = (x0 - e0) * one_minus_beta + beta * e1;
+            e0 = one_minus_alpha.mul_add(x0, alpha * e0);
+            e1 = (x0 - e0).mul_add(one_minus_beta, beta * e1);
             let d0 = e0 + pr * e1 - j_prev;
-            e2 = d0 * oma_sq + alpha_sq * e2;
+            e2 = d0.mul_add(oma_sq, alpha_sq * e2);
             j_prev += e2;
             *q = j_prev;
             p = p.add(1);
@@ -446,10 +446,10 @@ pub fn jma_scalar(
 
             // step 1
             let x1 = *p;
-            e0 = one_minus_alpha * x1 + alpha * e0;
-            e1 = (x1 - e0) * one_minus_beta + beta * e1;
+            e0 = one_minus_alpha.mul_add(x1, alpha * e0);
+            e1 = (x1 - e0).mul_add(one_minus_beta, beta * e1);
             let d1 = e0 + pr * e1 - j_prev;
-            e2 = d1 * oma_sq + alpha_sq * e2;
+            e2 = d1.mul_add(oma_sq, alpha_sq * e2);
             j_prev += e2;
             *q = j_prev;
             p = p.add(1);
@@ -457,10 +457,10 @@ pub fn jma_scalar(
 
             // step 2
             let x2 = *p;
-            e0 = one_minus_alpha * x2 + alpha * e0;
-            e1 = (x2 - e0) * one_minus_beta + beta * e1;
+            e0 = one_minus_alpha.mul_add(x2, alpha * e0);
+            e1 = (x2 - e0).mul_add(one_minus_beta, beta * e1);
             let d2 = e0 + pr * e1 - j_prev;
-            e2 = d2 * oma_sq + alpha_sq * e2;
+            e2 = d2.mul_add(oma_sq, alpha_sq * e2);
             j_prev += e2;
             *q = j_prev;
             p = p.add(1);
@@ -468,10 +468,10 @@ pub fn jma_scalar(
 
             // step 3
             let x3 = *p;
-            e0 = one_minus_alpha * x3 + alpha * e0;
-            e1 = (x3 - e0) * one_minus_beta + beta * e1;
+            e0 = one_minus_alpha.mul_add(x3, alpha * e0);
+            e1 = (x3 - e0).mul_add(one_minus_beta, beta * e1);
             let d3 = e0 + pr * e1 - j_prev;
-            e2 = d3 * oma_sq + alpha_sq * e2;
+            e2 = d3.mul_add(oma_sq, alpha_sq * e2);
             j_prev += e2;
             *q = j_prev;
             p = p.add(1);
@@ -481,10 +481,10 @@ pub fn jma_scalar(
         // Scalar tail
         while p < end_ptr {
             let x = *p;
-            e0 = one_minus_alpha * x + alpha * e0;
-            e1 = (x - e0) * one_minus_beta + beta * e1;
+            e0 = one_minus_alpha.mul_add(x, alpha * e0);
+            e1 = (x - e0).mul_add(one_minus_beta, beta * e1);
             let d = e0 + pr * e1 - j_prev;
-            e2 = d * oma_sq + alpha_sq * e2;
+            e2 = d.mul_add(oma_sq, alpha_sq * e2);
             j_prev += e2;
             *q = j_prev;
 

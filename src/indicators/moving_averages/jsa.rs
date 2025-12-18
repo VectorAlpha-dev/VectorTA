@@ -249,7 +249,15 @@ pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, Js
         .ok_or(JsaError::ArithmeticOverflow)?;
     let mut out = alloc_with_nan_prefix(len, warm);
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // JSA is bandwidth-bound; on AVX512-capable CPUs the explicit AVX2/AVX512
+        // kernels can underperform due to downclock versus the compiler’s scalar
+        // autovec. Prefer the scalar reference for `Auto`.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 | Kernel::Avx2 | Kernel::Avx512Batch | Kernel::Avx2Batch => {
+                Kernel::Scalar
+            }
+            other => other,
+        },
         k => k,
     };
     jsa_compute_into(data, period, first, chosen, &mut out);
@@ -323,7 +331,13 @@ pub fn jsa_with_kernel_into(
     out[..warm].fill(f64::NAN);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // See `jsa_with_kernel`: avoid AVX downclock for `Auto`.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 | Kernel::Avx2 | Kernel::Avx512Batch | Kernel::Avx2Batch => {
+                Kernel::Scalar
+            }
+            other => other,
+        },
         k => k,
     };
     jsa_compute_into(data, period, first, chosen, out);

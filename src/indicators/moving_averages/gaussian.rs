@@ -887,7 +887,11 @@ pub fn gaussian_batch_with_kernel(
     k: Kernel,
 ) -> Result<GaussianBatchOutput, GaussianError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // AVX-512 row-tiling can underperform here due to downclock; prefer AVX2 when available.
+        Kernel::Auto => match detect_best_batch_kernel() {
+            Kernel::Avx512Batch => Kernel::Avx2Batch,
+            other => other,
+        },
         other if other.is_batch() => other,
         other => return Err(GaussianError::InvalidKernelForBatch(other)),
     };
@@ -2817,12 +2821,15 @@ pub fn gaussian_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Heavy work without the GIL
-    let combos = py
-        .allow_threads(|| {
-            let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
-                k => k,
-            };
+	    let combos = py
+	        .allow_threads(|| {
+	            let kernel = match kern {
+	                Kernel::Auto => match detect_best_batch_kernel() {
+	                    Kernel::Avx512Batch => Kernel::Avx2Batch,
+	                    other => other,
+	                },
+	                k => k,
+	            };
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,

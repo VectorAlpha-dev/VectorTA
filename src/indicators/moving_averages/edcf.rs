@@ -2,16 +2,10 @@
 //!
 //! John Ehlers' Distance Coefficient Filter (EDCF) uses squared distances between successive points to build a non-linear, volatility-sensitive weighted average. Higher weights are assigned to prices following larger recent price changes, smoothing out trendless noise. Re-applying EDCF to its own output can provide multi-stage smoothing.
 //!
-//! ## WASM Performance Warning
-//! **⚠️ IMPORTANT: This indicator has severe performance limitations in WebAssembly (WASM).**
-//!
-//! EDCF requires a full-size distance buffer that scales with input length (8MB for 1M data points).
-//! The algorithm's second pass performs random access across this entire buffer, which is extremely
-//! inefficient in WASM's linear memory model. This results in EDCF being **20-60x slower** in WASM
-//! compared to native execution, while most other indicators are only 2-3x slower.
-//!
-//! For WASM/browser applications, consider using alternative smoothing indicators like ALMA, EMA,
-//! or HMA which have better memory access patterns and near-native WASM performance.
+//! ## WASM Notes
+//! EDCF now uses an **O(1) rolling-sums kernel** (O(period) working set) rather than a full-size
+//! distance buffer. This removes the historical WASM bottleneck where a large scratch buffer caused
+//! poor cache behavior and excessive memory traffic.
 //!
 //! ## Parameters
 //! - **period**: Window size (number of data points). (defaults to 15)
@@ -28,11 +22,9 @@
 //! - **`Err(EdcfError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: Fully implemented - vectorized distance calculations with 4-wide SIMD
-//! - **AVX512 kernel**: Fully implemented - optimized with 8-wide SIMD operations
-//! - **Streaming update**: O(1) per update using rolling sums of prices and squared prices
-//! - **Memory optimization**: Uses alloc_with_nan_prefix but requires full-size distance buffer (memory intensive)
-//! - **WASM caution**: Distance buffer access remains costly in WASM (see warning above)
+//! - **Scalar kernel**: O(1) per step using rolling sums (no full-size distance buffer).
+//! - **AVX2 / AVX512 kernels**: Delegate to the same rolling-sums kernel (recurrence-bound).
+//! - **Streaming update**: O(1) per update using rolling sums (matches batch from index 2·period onward).
 //!
 //! Decision: Streaming path switched to O(1) kernel using rolling sums; matches batch warmup (2·period) and returns None when denominator is zero.
 //! CUDA: Wrapper present (FP32 rolling/tiled); Python interop uses the shared CAI v3 + DLPack v1.x wrapper with primary-context RAII for correct context lifetime.
@@ -40,13 +32,10 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -59,8 +48,6 @@ use pyo3::types::PyDict;
 use rayon::prelude::*;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
-#[cfg(target_arch = "wasm32")]
-use std::cell::RefCell;
 use std::convert::AsRef;
 use std::mem::MaybeUninit;
 use thiserror::Error;
@@ -73,11 +60,8 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 
-// Thread-local storage for WASM dist buffer to avoid repeated allocations
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static WASM_DIST_BUFFER: RefCell<Vec<f64>> = RefCell::new(Vec::new());
-}
+// NOTE: This module intentionally avoids allocating any full-length scratch buffers. The core
+// kernel maintains a small O(period) working set and streams through the input once.
 
 #[derive(Debug, Clone)]
 pub enum EdcfData<'a> {
@@ -269,8 +253,10 @@ fn edcf_prepare<'a>(
     }
 
     let warm = first + 2 * period;
+    // EDCF uses a recurrence-bound O(1) rolling kernel; `Scalar` is consistently fastest in
+    // practice once AVX kernels no longer provide a meaningful advantage.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -375,51 +361,97 @@ pub fn edcf_into_slice(dst: &mut [f64], input: &EdcfInput, kern: Kernel) -> Resu
 
 #[inline(always)]
 pub fn edcf_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+    let mut buf = vec![0.0; period];
+    let mut wbuf = vec![0.0; period];
+    edcf_scalar_o1_into(data, period, first_valid, out, &mut buf, &mut wbuf);
+}
+
+#[inline(always)]
+fn edcf_scalar_o1_into(
+    data: &[f64],
+    period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+    buf: &mut [f64],
+    wbuf: &mut [f64],
+) {
+    debug_assert_eq!(buf.len(), period);
+    debug_assert_eq!(wbuf.len(), period);
+
+    // reset working sets (O(period))
+    buf.fill(0.0);
+    wbuf.fill(0.0);
+
     let len = data.len();
+    let warm = first_valid + 2 * period;
 
-    // Allocate uninitialized memory for dist buffer
-    let mut dist: Vec<f64> = Vec::with_capacity(len);
-    unsafe {
-        // Initialize only the portion that will be read before being written
-        // The computation reads from indices [j-period+1..=j] where j starts at first_valid + 2*period
-        // So we need zeros up to first_valid + period
-        let zero_end = (first_valid + period).min(len);
-        dist.set_len(zero_end);
-        dist.fill(0.0);
+    let mut head = 0usize;
+    let mut count = 0usize;
 
-        // Extend to full length without initialization
-        dist.set_len(len);
-    }
+    // streaming O(1) rolling-sums state (matches EdcfStream for finite inputs)
+    let mut sum_prev = 0.0;
+    let mut sum_prev_sq = 0.0;
+    let mut den = 0.0;
+    let mut num = 0.0;
+    let p_minus1_f = (period - 1) as f64;
 
-    unsafe {
-        let dp = data.as_ptr();
-        let wp = dist.as_mut_ptr();
+    for idx in first_valid..len {
+        let value = data[idx];
 
-        let dist_start = first_valid + period;
-        for k in dist_start..len {
-            let xk = *dp.add(k);
-            let mut sum_sq = 0.0;
-            for lb in 1..period {
-                let diff = xk - *dp.add(k - lb);
-                sum_sq = diff.mul_add(diff, sum_sq);
-            }
-            *wp.add(k) = sum_sq;
+        // Values that are about to leave the window (valid only once we've seen >= p samples).
+        let old_x = unsafe { *buf.get_unchecked(head) };
+        let old_w = unsafe { *wbuf.get_unchecked(head) };
+        let had_full_window = count >= period;
+
+        // --- 1) Compute new weight w_t in O(1) ---
+        // Only defined once we have p previous samples; otherwise keep it 0 to mirror the
+        // legacy dist-buffer behavior (weights are unused until output warmup anyway).
+        let w_new = if count >= period {
+            // w_t = (p-1)*x^2 - 2*x*sum_prev + sum_prev_sq
+            let x2 = value * value;
+            p_minus1_f.mul_add(x2, sum_prev_sq) - (2.0 * value * sum_prev)
+        } else {
+            0.0
+        };
+
+        // --- 2) Update rolling aggregates (den,num) for the last p weights ---
+        if had_full_window {
+            den -= old_w;
+            num -= old_w * old_x;
+        }
+        den += w_new;
+        num = w_new.mul_add(value, num);
+
+        // --- 3) Commit the new sample & weight to the rings ---
+        unsafe {
+            *buf.get_unchecked_mut(head) = value;
+            *wbuf.get_unchecked_mut(head) = w_new;
+        }
+        head += 1;
+        if head == period {
+            head = 0;
         }
 
-        let start_j = first_valid + 2 * period;
-        for j in start_j..len {
-            let mut num = 0.0;
-            let mut coef_sum = 0.0;
-            for i in 0..period {
-                let k = j - i;
-                let w = *wp.add(k);
-                let v = *dp.add(k);
+        // --- 4) Maintain sums of the *previous p-1* values for next step ---
+        // This keeps `sum_prev` aligned with the legacy definition:
+        // sum of the (p-1) most recent samples before the next value.
+        sum_prev += value;
+        sum_prev_sq = value.mul_add(value, sum_prev_sq);
+        if count >= (period - 1) {
+            // After bumping `head`, it points at the oldest value in the ring.
+            let drop_x = unsafe { *buf.get_unchecked(head) };
+            sum_prev -= drop_x;
+            sum_prev_sq -= drop_x * drop_x;
+        }
 
-                num = w.mul_add(v, num);
-                coef_sum += w;
-            }
-            if coef_sum != 0.0 {
-                *out.get_unchecked_mut(j) = num / coef_sum;
+        count += 1;
+
+        // Batch warmup: match the Vec-returning API (NaNs through `first_valid + 2*period`).
+        if idx >= warm {
+            if den != 0.0 {
+                out[idx] = num / den;
+            } else {
+                out[idx] = f64::NAN;
             }
         }
     }
@@ -433,261 +465,33 @@ fn edcf_scalar_into_with_scratch(
     out: &mut [f64],
     scratch: &mut Vec<f64>,
 ) {
-    let len = data.len();
-    // Ensure capacity, then expose uninit tail. We will only read initialized parts.
-    if scratch.capacity() < len {
-        scratch.reserve_exact(len - scratch.capacity());
+    // Scratch layout: [x_ring | w_ring]
+    let need = period * 2;
+    if scratch.len() < need {
+        scratch.resize(need, 0.0);
     }
-    unsafe {
-        scratch.set_len(len);
-    }
-    let zero_end = (first_valid + period).min(len);
-    scratch[..zero_end].fill(0.0);
-
-    unsafe {
-        let dp = data.as_ptr();
-        let wp = scratch.as_mut_ptr();
-
-        // Fill distances for indices that will be read
-        for k in (first_valid + period)..len {
-            let xk = *dp.add(k);
-            let mut sum_sq = 0.0;
-            for lb in 1..period {
-                let diff = xk - *dp.add(k - lb);
-                sum_sq = diff.mul_add(diff, sum_sq);
-            }
-            *wp.add(k) = sum_sq;
-        }
-
-        // Weighted average using the distance weights
-        let start_j = first_valid + 2 * period;
-        for j in start_j..len {
-            let mut num = 0.0;
-            let mut coef_sum = 0.0;
-            for i in 0..period {
-                let k = j - i;
-                let w = *wp.add(k);
-                let v = *dp.add(k);
-                num = w.mul_add(v, num);
-                coef_sum += w;
-            }
-            if coef_sum != 0.0 {
-                *out.get_unchecked_mut(j) = num / coef_sum;
-            }
-        }
-    }
+    let (buf, wbuf) = scratch.split_at_mut(period);
+    edcf_scalar_o1_into(data, period, first_valid, out, buf, wbuf);
 }
 
-// WASM-optimized version that reuses dist buffer to avoid repeated allocations
 #[cfg(target_arch = "wasm32")]
 #[inline]
 fn edcf_scalar_wasm(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    let len = data.len();
-
-    WASM_DIST_BUFFER.with(|buffer| {
-        let mut dist = buffer.borrow_mut();
-
-        // Resize buffer if needed, reusing existing capacity
-        if dist.len() < len {
-            dist.resize(len, 0.0);
-        }
-
-        // Zero out the portion that will be read before being written
-        let zero_end = (first_valid + period).min(len);
-        dist[..zero_end].fill(0.0);
-
-        unsafe {
-            let dp = data.as_ptr();
-            let wp = dist.as_mut_ptr();
-
-            let dist_start = first_valid + period;
-            for k in dist_start..len {
-                let xk = *dp.add(k);
-                let mut sum_sq = 0.0;
-                for lb in 1..period {
-                    let diff = xk - *dp.add(k - lb);
-                    sum_sq = diff.mul_add(diff, sum_sq);
-                }
-                *wp.add(k) = sum_sq;
-            }
-
-            let start_j = first_valid + 2 * period;
-            for j in start_j..len {
-                let mut num = 0.0;
-                let mut coef_sum = 0.0;
-                for i in 0..period {
-                    let k = j - i;
-                    let w = *wp.add(k);
-                    let v = *dp.add(k);
-
-                    num = w.mul_add(v, num);
-                    coef_sum += w;
-                }
-                if coef_sum != 0.0 {
-                    *out.get_unchecked_mut(j) = num / coef_sum;
-                }
-            }
-        }
-    });
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn hsum_m256d(v: __m256d) -> f64 {
-    let hi = _mm256_extractf128_pd(v, 1);
-    let lo = _mm256_castpd256_pd128(v);
-    let sum2 = _mm_add_pd(hi, lo);
-    let hi64 = _mm_unpackhi_pd(sum2, sum2);
-    _mm_cvtsd_f64(_mm_add_sd(sum2, hi64))
+    // Same O(1) rolling kernel; only allocates O(period) working set.
+    edcf_scalar(data, period, first_valid, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn edcf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    const STEP: usize = 4;
-    let len = data.len();
-    let chunks = period / STEP;
-
-    // Allocate uninitialized memory for dist buffer
-    let mut dist: Vec<f64> = Vec::with_capacity(len);
-    unsafe {
-        // Initialize only the portion that will be read before being written
-        let zero_end = (first_valid + period).min(len);
-        dist.set_len(zero_end);
-        dist.fill(0.0);
-
-        // Extend to full length without initialization
-        dist.set_len(len);
-    }
-    let dp = data.as_ptr();
-    let wp = dist.as_mut_ptr();
-
-    for k in (first_valid + period)..len {
-        let xk_vec = _mm256_broadcast_sd(&*dp.add(k));
-        let mut acc = _mm256_setzero_pd();
-
-        for blk in 0..chunks {
-            let ptr = dp.add(k - (blk + 1) * STEP);
-            let d = _mm256_loadu_pd(ptr);
-            let diff = _mm256_sub_pd(xk_vec, d);
-            acc = _mm256_fmadd_pd(diff, diff, acc);
-        }
-
-        let mut sum_tail = 0.0;
-        for lb in (chunks * STEP + 1)..period {
-            let diff = *dp.add(k) - *dp.add(k - lb);
-            sum_tail += diff * diff;
-        }
-
-        *wp.add(k) = hsum_m256d(acc) + sum_tail;
-    }
-
-    for j in (first_valid + 2 * period)..len {
-        let start_k = j + 1 - period;
-
-        let mut num_vec = _mm256_setzero_pd();
-        let mut coef_vec = _mm256_setzero_pd();
-        for blk in 0..chunks {
-            let idx = start_k + blk * STEP;
-            let d = _mm256_loadu_pd(dp.add(idx));
-            let w = _mm256_loadu_pd(wp.add(idx));
-            num_vec = _mm256_fmadd_pd(w, d, num_vec);
-            coef_vec = _mm256_add_pd(coef_vec, w);
-        }
-
-        let mut num = hsum_m256d(num_vec);
-        let mut coef = hsum_m256d(coef_vec);
-
-        for i in (chunks * STEP)..period {
-            let k = start_k + i;
-            let w = *wp.add(k);
-            num += w * *dp.add(k);
-            coef += w;
-        }
-
-        if coef != 0.0 {
-            *out.get_unchecked_mut(j) = num / coef;
-        }
-    }
+    // O(1) rolling kernel (recurrence-bound); faster than the legacy O(n·period) dist-buffer path.
+    edcf_scalar(data, period, first_valid, out);
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 pub unsafe fn edcf_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    const STEP: usize = 8;
-
-    let len = data.len();
-    let p_minus1 = period - 1;
-    let chunks = p_minus1 / STEP;
-    let tail_len = p_minus1 % STEP;
-    let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
-
-    // Allocate uninitialized memory for dist buffer
-    let mut dist: Vec<f64> = Vec::with_capacity(len);
-    unsafe {
-        // Initialize only the portion that will be read before being written
-        let zero_end = (first_valid + period).min(len);
-        dist.set_len(zero_end);
-        dist.fill(0.0);
-
-        // Extend to full length without initialization
-        dist.set_len(len);
-    }
-    let dp = data.as_ptr();
-    let wp = dist.as_mut_ptr();
-
-    for k in (first_valid + period)..len {
-        let xk_vec = _mm512_set1_pd(*dp.add(k));
-        let mut acc = _mm512_setzero_pd();
-
-        let start = k - p_minus1;
-        for blk in 0..chunks {
-            let d = _mm512_loadu_pd(dp.add(start + blk * STEP));
-            let diff = _mm512_sub_pd(xk_vec, d);
-            acc = _mm512_fmadd_pd(diff, diff, acc);
-        }
-
-        if tail_len != 0 {
-            let base = dp.add(start + chunks * STEP);
-            let d = _mm512_maskz_loadu_pd(tail_mask, base);
-            let diff = _mm512_mask_sub_pd(_mm512_setzero_pd(), tail_mask, xk_vec, d);
-            let sq = _mm512_mul_pd(diff, diff);
-            acc = _mm512_add_pd(acc, sq);
-        }
-
-        *wp.add(k) = _mm512_reduce_add_pd(acc);
-    }
-
-    for j in (first_valid + 2 * period)..len {
-        let start_k = j - p_minus1;
-
-        let mut num_vec = _mm512_setzero_pd();
-        let mut coef_vec = _mm512_setzero_pd();
-
-        for blk in 0..chunks {
-            let idx = start_k + blk * STEP;
-            let d = _mm512_loadu_pd(dp.add(idx));
-            let w = _mm512_loadu_pd(wp.add(idx));
-            num_vec = _mm512_fmadd_pd(w, d, num_vec);
-            coef_vec = _mm512_add_pd(coef_vec, w);
-        }
-
-        if tail_len != 0 {
-            let idx = start_k + chunks * STEP;
-            let d = _mm512_maskz_loadu_pd(tail_mask, dp.add(idx));
-            let w = _mm512_maskz_loadu_pd(tail_mask, wp.add(idx));
-            num_vec = _mm512_fmadd_pd(w, d, num_vec);
-            coef_vec = _mm512_add_pd(coef_vec, w);
-        }
-
-        let w0 = *wp.add(j);
-        let v0 = *dp.add(j);
-        let num = _mm512_reduce_add_pd(num_vec) + w0 * v0;
-        let coef = _mm512_reduce_add_pd(coef_vec) + w0;
-
-        if coef != 0.0 {
-            *out.get_unchecked_mut(j) = num / coef;
-        }
-    }
+    // O(1) rolling kernel (recurrence-bound); faster than the legacy O(n·period) dist-buffer path.
+    edcf_scalar(data, period, first_valid, out);
 }
 
 #[derive(Debug, Clone)]
@@ -772,9 +576,9 @@ impl EdcfStream {
         let had_full_window = self.count >= p;
 
         // --- 1) Compute new weight w_t in O(1) ---
-        // Only defined once we have p-1 previous values; otherwise keep it 0
+        // Only defined once we have p previous values; otherwise keep it 0
         // to mirror the batch kernel's early zeros in the distance buffer.
-        let w_new = if self.count >= (p - 1) {
+        let w_new = if self.count >= p {
             // w_t = (p-1)*x^2 - 2*x*sum_prev + sum_prev_sq
             let x2 = value * value;
             self.p_minus1_f.mul_add(x2, self.sum_prev_sq) - (2.0 * value * self.sum_prev)
@@ -798,16 +602,15 @@ impl EdcfStream {
         self.bump_head();
 
         // --- 4) Maintain sums of the *previous p-1* values for next step ---
-        // After evaluating w_new with the *current* previous set, we now
-        // insert x_t into that set for the next update and, if necessary, remove the oldest.
+        // After evaluating w_new with the *current* previous set, we now insert x_t into that set
+        // for the next update and remove the new oldest element so the set stays at size (p-1).
         self.sum_prev += value;
         self.sum_prev_sq = value.mul_add(value, self.sum_prev_sq);
         if self.count >= (p - 1) {
-            // remove x_{t-p+1}, which was sitting at `old_x` (head pointed to it before overwrite)
-            if had_full_window {
-                self.sum_prev -= old_x;
-                self.sum_prev_sq -= old_x * old_x;
-            }
+            // After bump_head(), `self.head` points at the oldest value in the ring.
+            let drop_x = self.buffer[self.head];
+            self.sum_prev -= drop_x;
+            self.sum_prev_sq -= drop_x * drop_x;
         }
 
         // --- 5) Advance sample count and decide output ---
@@ -921,7 +724,8 @@ pub fn edcf_batch_with_kernel(
         return Err(EdcfError::NoData);
     }
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Same rationale as the single-series path: the rolling kernel is scalar-first.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(EdcfError::InvalidKernelForBatch(other)),
     };
@@ -1108,16 +912,14 @@ fn edcf_batch_inner_into(
 
             out.par_chunks_mut(cols).enumerate().for_each(|(row, dst)| {
                 let period = combos[row].period.unwrap();
+                // Each row keeps its own small O(period) scratch (no full-length temps).
+                let mut scratch = Vec::<f64>::new();
                 match kern {
-                    Kernel::Scalar => {
-                        // For parallel execution, each thread gets its own scratch buffer
-                        let mut scratch = Vec::<f64>::new();
+                    Kernel::Scalar
+                    | Kernel::Avx2
+                    | Kernel::Avx512 => {
                         edcf_scalar_into_with_scratch(data, period, first, dst, &mut scratch);
                     }
-                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    Kernel::Avx2 => unsafe { edcf_row_avx2(data, first, period, dst) },
-                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    Kernel::Avx512 => unsafe { edcf_row_avx512(data, first, period, dst) },
                     _ => unsafe { edcf_row_scalar(data, first, period, dst) }, // wasm path
                 }
             });
@@ -1138,13 +940,9 @@ fn edcf_batch_inner_into(
             for (row, dst) in out.chunks_mut(cols).enumerate() {
                 let period = combos[row].period.unwrap();
                 match kern {
-                    Kernel::Scalar => {
+                    Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => {
                         edcf_scalar_into_with_scratch(data, period, first, dst, &mut scratch)
                     }
-                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    Kernel::Avx2 => unsafe { edcf_row_avx2(data, first, period, dst) },
-                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    Kernel::Avx512 => unsafe { edcf_row_avx512(data, first, period, dst) },
                     _ => unsafe { edcf_row_scalar(data, first, period, dst) },
                 }
             }
@@ -1929,7 +1727,7 @@ pub fn edcf_batch_py<'py>(
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
+                Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
             };
             let simd = match kernel {

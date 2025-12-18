@@ -73,11 +73,10 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_kernel,
 };
 use std::convert::AsRef;
 use std::error::Error;
-use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -397,8 +396,6 @@ pub fn ehlers_pma_with_kernel(
     let warm_trigger = warm_wma2 + 3;
 
     // allocate with minimal writes
-    let mut wma1 = alloc_with_nan_prefix(len, warm_wma1);
-    let mut wma2 = alloc_with_nan_prefix(len, warm_wma2);
     let mut predict = alloc_with_nan_prefix(len, warm_predict);
     let mut trigger = alloc_with_nan_prefix(len, warm_trigger);
 
@@ -412,39 +409,15 @@ pub fn ehlers_pma_with_kernel(
     unsafe {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         match chosen {
-            Kernel::Avx512 | Kernel::Avx512Batch => ehlers_pma_avx512(
-                data,
-                &mut wma1,
-                &mut wma2,
-                &mut predict,
-                &mut trigger,
-                warm_wma1,
-                warm_wma2,
-                warm_predict,
-                warm_trigger,
-            ),
-            Kernel::Avx2 | Kernel::Avx2Batch => ehlers_pma_avx2(
-                data,
-                &mut wma1,
-                &mut wma2,
-                &mut predict,
-                &mut trigger,
-                warm_wma1,
-                warm_wma2,
-                warm_predict,
-                warm_trigger,
-            ),
-            Kernel::Scalar | Kernel::ScalarBatch => ehlers_pma_scalar(
-                data,
-                &mut wma1,
-                &mut wma2,
-                &mut predict,
-                &mut trigger,
-                warm_wma1,
-                warm_wma2,
-                warm_predict,
-                warm_trigger,
-            ),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                ehlers_pma_avx512(data, &mut predict, &mut trigger, warm_wma1, warm_wma2, warm_trigger)
+            }
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                ehlers_pma_avx2(data, &mut predict, &mut trigger, warm_wma1, warm_wma2, warm_trigger)
+            }
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                ehlers_pma_scalar_direct(data, &mut predict, &mut trigger, warm_wma1, warm_wma2, warm_trigger)
+            }
             Kernel::Auto => unreachable!(),
         }
 
@@ -452,21 +425,88 @@ pub fn ehlers_pma_with_kernel(
         {
             // Accept ScalarBatch explicitly in no-AVX builds too
             let _ = chosen; // keep var used
-            ehlers_pma_scalar(
-                data,
-                &mut wma1,
-                &mut wma2,
-                &mut predict,
-                &mut trigger,
-                warm_wma1,
-                warm_wma2,
-                warm_predict,
-                warm_trigger,
-            );
+            ehlers_pma_scalar_direct(data, &mut predict, &mut trigger, warm_wma1, warm_wma2, warm_trigger);
         }
     }
 
     Ok(EhlersPmaOutput { predict, trigger })
+}
+
+#[inline]
+fn ehlers_pma_scalar_direct(
+    data: &[f64],
+    predict: &mut [f64],
+    trigger: &mut [f64],
+    warm_wma1: usize,
+    warm_wma2: usize,
+    warm_trigger: usize,
+) {
+    debug_assert_eq!(predict.len(), data.len());
+    debug_assert_eq!(trigger.len(), data.len());
+
+    let len = data.len();
+    if warm_wma1 >= len {
+        return;
+    }
+
+    let inv28 = 1.0 / 28.0;
+    let inv10 = 1.0 / 10.0;
+
+    // Keep the last 7 WMA1 values to compute WMA2 without allocating O(n) temporaries.
+    let mut w_ring = [0.0f64; 7];
+    let mut w_head = 0usize;
+
+    for i in warm_wma1..len {
+        // WMA1 on src lag (TradingView parity: src is data[i-1] on historical bars).
+        let w1 = (7.0 * data[i - 1]
+            + 6.0 * data[i - 2]
+            + 5.0 * data[i - 3]
+            + 4.0 * data[i - 4]
+            + 3.0 * data[i - 5]
+            + 2.0 * data[i - 6]
+            + 1.0 * data[i - 7])
+            * inv28;
+
+        w_ring[w_head] = w1;
+        w_head += 1;
+        if w_head == 7 {
+            w_head = 0;
+        }
+
+        // WMA2 becomes available once we have 7 WMA1 samples (i >= warm_wma2).
+        if i < warm_wma2 {
+            continue;
+        }
+
+        // 7*newest + ... + 1*oldest (same newest-first order as the scalar/batch reference).
+        let k0 = if w_head == 0 { 6 } else { w_head - 1 };
+        let k1 = if k0 == 0 { 6 } else { k0 - 1 };
+        let k2 = if k1 == 0 { 6 } else { k1 - 1 };
+        let k3 = if k2 == 0 { 6 } else { k2 - 1 };
+        let k4 = if k3 == 0 { 6 } else { k3 - 1 };
+        let k5 = if k4 == 0 { 6 } else { k4 - 1 };
+        let k6 = if k5 == 0 { 6 } else { k5 - 1 };
+
+        let w2 = (7.0 * w_ring[k0]
+            + 6.0 * w_ring[k1]
+            + 5.0 * w_ring[k2]
+            + 4.0 * w_ring[k3]
+            + 3.0 * w_ring[k4]
+            + 2.0 * w_ring[k5]
+            + 1.0 * w_ring[k6])
+            * inv28;
+
+        // Predict = 2*WMA1 - WMA2
+        let p = 2.0 * w1 - w2;
+        predict[i] = p;
+
+        // Trigger WMA4(predict) after warmup
+        if i >= warm_trigger {
+            trigger[i] =
+                (4.0 * p + 3.0 * predict[i - 1] + 2.0 * predict[i - 2] + 1.0 * predict[i - 3])
+                    * inv10;
+        }
+    }
 }
 
 // Scalar kernel implementation
@@ -532,28 +572,15 @@ pub fn ehlers_pma_scalar(
 #[target_feature(enable = "avx2,fma")]
 unsafe fn ehlers_pma_avx2(
     data: &[f64],
-    wma1: &mut [f64],
-    wma2: &mut [f64],
     predict: &mut [f64],
     trigger: &mut [f64],
     warm_wma1: usize,
     warm_wma2: usize,
-    warm_predict: usize,
     warm_trigger: usize,
 ) {
     // TODO: Implement AVX2 optimized version
     // For now, fall back to scalar
-    ehlers_pma_scalar(
-        data,
-        wma1,
-        wma2,
-        predict,
-        trigger,
-        warm_wma1,
-        warm_wma2,
-        warm_predict,
-        warm_trigger,
-    )
+    ehlers_pma_scalar_direct(data, predict, trigger, warm_wma1, warm_wma2, warm_trigger)
 }
 
 // AVX512 kernel stub - falls back to scalar for now
@@ -561,28 +588,15 @@ unsafe fn ehlers_pma_avx2(
 #[target_feature(enable = "avx512f")]
 unsafe fn ehlers_pma_avx512(
     data: &[f64],
-    wma1: &mut [f64],
-    wma2: &mut [f64],
     predict: &mut [f64],
     trigger: &mut [f64],
     warm_wma1: usize,
     warm_wma2: usize,
-    warm_predict: usize,
     warm_trigger: usize,
 ) {
     // TODO: Implement AVX512 optimized version
     // For now, fall back to scalar
-    ehlers_pma_scalar(
-        data,
-        wma1,
-        wma2,
-        predict,
-        trigger,
-        warm_wma1,
-        warm_wma2,
-        warm_predict,
-        warm_trigger,
-    )
+    ehlers_pma_scalar_direct(data, predict, trigger, warm_wma1, warm_wma2, warm_trigger)
 }
 
 // Kernel-aware zero-copy flat output
@@ -621,13 +635,6 @@ pub fn ehlers_pma_into_flat_with_kernel(
         });
     }
 
-    let mut tmp_mu = make_uninit_matrix(2, len);
-    // wma1 starts at first+6, wma2 at first+12
-    init_matrix_prefixes(&mut tmp_mu, len, &[first + 7, first + 13]);
-    let (wma1_mu, wma2_mu) = tmp_mu.split_at_mut(len);
-    let wma1 = unsafe { core::slice::from_raw_parts_mut(wma1_mu.as_mut_ptr() as *mut f64, len) };
-    let wma2 = unsafe { core::slice::from_raw_parts_mut(wma2_mu.as_mut_ptr() as *mut f64, len) };
-
     let (predict_flat, trigger_flat) = out.split_at_mut(cols);
 
     let warm_wma1 = first + 7;
@@ -651,56 +658,22 @@ pub fn ehlers_pma_into_flat_with_kernel(
     unsafe {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         match chosen {
-            Kernel::Avx512 | Kernel::Avx512Batch => ehlers_pma_avx512(
-                data,
-                wma1,
-                wma2,
-                predict_flat,
-                trigger_flat,
-                warm_wma1,
-                warm_wma2,
-                warm_predict,
-                warm_trigger,
-            ),
-            Kernel::Avx2 | Kernel::Avx2Batch => ehlers_pma_avx2(
-                data,
-                wma1,
-                wma2,
-                predict_flat,
-                trigger_flat,
-                warm_wma1,
-                warm_wma2,
-                warm_predict,
-                warm_trigger,
-            ),
-            Kernel::Scalar | Kernel::ScalarBatch => ehlers_pma_scalar(
-                data,
-                wma1,
-                wma2,
-                predict_flat,
-                trigger_flat,
-                warm_wma1,
-                warm_wma2,
-                warm_predict,
-                warm_trigger,
-            ),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                ehlers_pma_avx512(data, predict_flat, trigger_flat, warm_wma1, warm_wma2, warm_trigger)
+            }
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                ehlers_pma_avx2(data, predict_flat, trigger_flat, warm_wma1, warm_wma2, warm_trigger)
+            }
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                ehlers_pma_scalar_direct(data, predict_flat, trigger_flat, warm_wma1, warm_wma2, warm_trigger)
+            }
             Kernel::Auto => unreachable!(),
         }
 
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         {
             let _ = chosen; // keep var used
-            ehlers_pma_scalar(
-                data,
-                wma1,
-                wma2,
-                predict_flat,
-                trigger_flat,
-                warm_wma1,
-                warm_wma2,
-                warm_predict,
-                warm_trigger,
-            );
+            ehlers_pma_scalar_direct(data, predict_flat, trigger_flat, warm_wma1, warm_wma2, warm_trigger);
         }
     }
 
@@ -753,18 +726,11 @@ pub fn ehlers_pma_into_slices_with_kernel(
     let warm_predict = warm_wma2;
     let warm_trigger = warm_wma2 + 3;
 
-    // temporaries for wma1/wma2
-    let mut tmp_mu = make_uninit_matrix(2, len);
-    init_matrix_prefixes(&mut tmp_mu, len, &[warm_wma1, warm_wma2]);
-    let (wma1_mu, wma2_mu) = tmp_mu.split_at_mut(len);
-    let wma1 = unsafe { core::slice::from_raw_parts_mut(wma1_mu.as_mut_ptr() as *mut f64, len) };
-    let wma2 = unsafe { core::slice::from_raw_parts_mut(wma2_mu.as_mut_ptr() as *mut f64, len) };
-
     // warm prefixes
-    for v in &mut predict[..warm_predict] {
+    for v in &mut predict[..warm_predict.min(len)] {
         *v = f64::NAN;
     }
-    for v in &mut trigger[..warm_trigger] {
+    for v in &mut trigger[..warm_trigger.min(len)] {
         *v = f64::NAN;
     }
 
@@ -776,56 +742,22 @@ pub fn ehlers_pma_into_slices_with_kernel(
     unsafe {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         match chosen {
-            Kernel::Avx512 | Kernel::Avx512Batch => ehlers_pma_avx512(
-                data,
-                wma1,
-                wma2,
-                predict,
-                trigger,
-                warm_wma1,
-                warm_wma2,
-                warm_predict,
-                warm_trigger,
-            ),
-            Kernel::Avx2 | Kernel::Avx2Batch => ehlers_pma_avx2(
-                data,
-                wma1,
-                wma2,
-                predict,
-                trigger,
-                warm_wma1,
-                warm_wma2,
-                warm_predict,
-                warm_trigger,
-            ),
-            Kernel::Scalar | Kernel::ScalarBatch => ehlers_pma_scalar(
-                data,
-                wma1,
-                wma2,
-                predict,
-                trigger,
-                warm_wma1,
-                warm_wma2,
-                warm_predict,
-                warm_trigger,
-            ),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                ehlers_pma_avx512(data, predict, trigger, warm_wma1, warm_wma2, warm_trigger)
+            }
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                ehlers_pma_avx2(data, predict, trigger, warm_wma1, warm_wma2, warm_trigger)
+            }
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                ehlers_pma_scalar_direct(data, predict, trigger, warm_wma1, warm_wma2, warm_trigger)
+            }
             Kernel::Auto => unreachable!(),
         }
 
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         {
             let _ = chosen; // keep var used
-            ehlers_pma_scalar(
-                data,
-                wma1,
-                wma2,
-                predict,
-                trigger,
-                warm_wma1,
-                warm_wma2,
-                warm_predict,
-                warm_trigger,
-            );
+            ehlers_pma_scalar_direct(data, predict, trigger, warm_wma1, warm_wma2, warm_trigger);
         }
     }
     Ok(())
