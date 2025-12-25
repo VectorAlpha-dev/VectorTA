@@ -273,10 +273,16 @@ pub fn nvi_with_kernel(input: &NviInput, kernel: Kernel) -> Result<NviOutput, Nv
         });
     }
     let mut out = alloc_with_nan_prefix(close.len(), first);
-    let chosen = match kernel {
+    let mut chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
+    // Prefer AVX2 over AVX512 in Auto: AVX512 often downclocks and can underperform for this kernel.
+    // Allow explicit Avx512 selection via API.
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
+        chosen = Kernel::Avx2;
+    }
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => nvi_scalar(close, volume, first, &mut out),
@@ -357,10 +363,14 @@ pub fn nvi_into_slice(
         });
     }
 
-    let chosen = match kern {
+    let mut chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(kern, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
+        chosen = Kernel::Avx2;
+    }
 
     unsafe {
         match chosen {

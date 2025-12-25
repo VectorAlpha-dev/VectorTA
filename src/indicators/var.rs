@@ -254,18 +254,12 @@ pub fn var_with_kernel(input: &VarInput, kernel: Kernel) -> Result<VarOutput, Va
         return Err(VarError::InvalidNbdev { nbdev });
     }
 
-    // Runtime selection: keep VAR on scalar by default as SIMD showed no consistent win.
-    // Avx2/Avx512 remain accessible via explicit kernel selection for testing/benches.
     let chosen = match kernel {
-        Kernel::Auto => {
-            let k = detect_best_kernel();
-            match k {
-                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                    Kernel::Scalar
-                }
-                _ => k,
-            }
-        }
+        // AVX512 underperforms here; prefer AVX2 when available.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 => Kernel::Avx2,
+            other => other,
+        },
         other => other,
     };
 
@@ -339,17 +333,9 @@ pub fn var_into(input: &VarInput, out: &mut [f64]) -> Result<(), VarError> {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Match var_with_kernel's Auto selection behavior (short-circuit to Scalar by default)
-    let chosen = match Kernel::Auto {
-        Kernel::Auto => {
-            let k = detect_best_kernel();
-            match k {
-                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                    Kernel::Scalar
-                }
-                _ => k,
-            }
-        }
+    // Match var_with_kernel's Auto selection behavior.
+    let chosen = match detect_best_kernel() {
+        Kernel::Avx512 => Kernel::Avx2,
         other => other,
     };
 
@@ -1149,9 +1135,7 @@ pub fn var_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(VarError::InvalidKernelForBatch(k))
-        }
+        _ => return Err(VarError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,

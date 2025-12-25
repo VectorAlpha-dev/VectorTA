@@ -303,32 +303,54 @@ pub fn tema_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64
     let mut ema2 = 0.0f64; // becomes valid at start2
     let mut ema3 = 0.0f64; // becomes valid at start3
 
-    for i in first_val..n {
+    // Phase 0: EMA1 only (until EMA2 becomes valid)
+    let end0 = start2.min(n);
+    for i in first_val..end0 {
         let price = data[i];
-
-        // EMA1 update
         ema1 = ema1 * per1 + price * per;
+    }
 
-        // EMA2 warmup and update
-        if i == start2 {
-            ema2 = ema1;
-        }
-        if i >= start2 {
+    // Phase 1: EMA1 + EMA2 (from start2 until EMA3 becomes valid)
+    if start2 < n {
+        // i == start2: preserve the original warmup init + update order exactly
+        let price = data[start2];
+        ema1 = ema1 * per1 + price * per;
+        ema2 = ema1;
+        ema2 = ema2 * per1 + ema1 * per;
+
+        let end1 = start3.min(n);
+        for i in (start2 + 1)..end1 {
+            let price = data[i];
+            ema1 = ema1 * per1 + price * per;
             ema2 = ema2 * per1 + ema1 * per;
         }
 
-        // EMA3 warmup and update
-        if i == start3 {
+        // Phase 2/3: EMA1 + EMA2 + EMA3 (optional output once fully warm)
+        if start3 < n {
+            // i == start3: preserve the original warmup init + update order exactly
+            let price = data[start3];
+            ema1 = ema1 * per1 + price * per;
+            ema2 = ema2 * per1 + ema1 * per;
             ema3 = ema2;
-        }
-        if i >= start3 {
             ema3 = ema3 * per1 + ema2 * per;
-        }
 
-        // Output once all three EMAs are valid
-        if i >= start_out {
-            // Keep operation order identical to streaming path for bitwise parity
-            out[i] = 3.0 * ema1 - 3.0 * ema2 + ema3;
+            let end2 = start_out.min(n);
+            for i in (start3 + 1)..end2 {
+                let price = data[i];
+                ema1 = ema1 * per1 + price * per;
+                ema2 = ema2 * per1 + ema1 * per;
+                ema3 = ema3 * per1 + ema2 * per;
+            }
+
+            // Output once all three EMAs are valid
+            for i in start_out..n {
+                let price = data[i];
+                ema1 = ema1 * per1 + price * per;
+                ema2 = ema2 * per1 + ema1 * per;
+                ema3 = ema3 * per1 + ema2 * per;
+                // Keep operation order identical to streaming path for bitwise parity
+                out[i] = 3.0 * ema1 - 3.0 * ema2 + ema3;
+            }
         }
     }
 }

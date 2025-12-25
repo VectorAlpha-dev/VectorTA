@@ -95,14 +95,15 @@ extern "C" __global__ void avsl_batch_f32(
             const double cv = c * v;
             sum_close_f += c; sum_vol_f += v; sum_cxv_f += cv;
             sum_close_s += c; sum_vol_s += v; sum_cxv_s += cv;
-            if (i + 1 >= fast + first_valid) {
-                const int k = i + 1 - fast;
+            // Match scalar window semantics: subtract once count > period
+            if (i >= first_valid + fast) {
+                const int k = i - fast;
                 const float c_old = close[k];
                 const float v_old = volume[k];
                 sum_close_f -= c_old; sum_vol_f -= v_old; sum_cxv_f -= c_old * v_old;
             }
-            if (i + 1 >= slow + first_valid) {
-                const int k = i + 1 - slow;
+            if (i >= first_valid + slow) {
+                const int k = i - slow;
                 const float c_old = close[k];
                 const float v_old = volume[k];
                 sum_close_s -= c_old; sum_vol_s -= v_old; sum_cxv_s -= c_old * v_old;
@@ -242,14 +243,15 @@ extern "C" __global__ void avsl_many_series_one_param_f32(
             const double cv = c * v;
             sum_close_f += c; sum_vol_f += v; sum_cxv_f += cv;
             sum_close_s += c; sum_vol_s += v; sum_cxv_s += cv;
-            if (i + 1 >= f + first_valid) {
-                const int k = (i + 1 - f) * cols + col;
+            // Match scalar window semantics: subtract once count > period
+            if (i >= first_valid + f) {
+                const int k = (i - f) * cols + col;
                 const float c_old = close_tm[k];
                 const float v_old = volume_tm[k];
                 sum_close_f -= c_old; sum_vol_f -= v_old; sum_cxv_f -= c_old * v_old;
             }
-            if (i + 1 >= s + first_valid) {
-                const int k = (i + 1 - s) * cols + col;
+            if (i >= first_valid + s) {
+                const int k = (i - s) * cols + col;
                 const float c_old = close_tm[k];
                 const float v_old = volume_tm[k];
                 sum_close_s -= c_old; sum_vol_s -= v_old; sum_cxv_s -= c_old * v_old;

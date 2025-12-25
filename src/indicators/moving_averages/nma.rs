@@ -253,10 +253,18 @@ fn nma_prepare<'a>(
         });
     }
 
-    // Pre-compute ln values - allocate uninitialized for data-sized vector
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    // Allocate ln buffer up-front. For SIMD kernels, the kernel overwrites this
+    // buffer (and building it here would redundantly compute ln() twice).
     let mut ln_values = alloc_with_nan_prefix(len, 0); // No NaN prefix needed
-    for i in 0..len {
-        ln_values[i] = data[i].max(1e-10).ln();
+    if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
+        for i in 0..len {
+            ln_values[i] = data[i].max(1e-10).ln();
+        }
     }
 
     // Pre-compute sqrt differences - small vector, regular Vec is OK
@@ -266,11 +274,6 @@ fn nma_prepare<'a>(
         let s1 = ((i + 1) as f64).sqrt();
         sqrt_diffs[i] = s1 - s0;
     }
-
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
 
     Ok((data, period, first, ln_values, sqrt_diffs, chosen))
 }

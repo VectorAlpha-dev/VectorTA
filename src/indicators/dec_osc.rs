@@ -257,7 +257,7 @@ fn dec_osc_prepare<'a>(
     let period = input.get_hp_period();
     let k_val = input.get_k();
 
-    if period < 2 || period > len {
+    if period < 3 || period > len {
         return Err(DecOscError::InvalidPeriod {
             period,
             data_len: len,
@@ -274,7 +274,7 @@ fn dec_osc_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -1553,8 +1553,8 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy 1: Random price data with full hp_period range (2-200)
-        let strat_random = (2usize..=200).prop_flat_map(|hp_period| {
+        // Strategy 1: Random price data with full hp_period range (3-200)
+        let strat_random = (3usize..=200).prop_flat_map(|hp_period| {
             (
                 prop::collection::vec(
                     (100.0f64..10000.0f64)
@@ -1567,14 +1567,14 @@ mod tests {
         });
 
         // Strategy 2: Constant data (should produce oscillator near 0 after warmup)
-        let strat_constant = (2usize..=100, 0.1f64..3.0f64).prop_map(|(hp_period, k)| {
+        let strat_constant = (3usize..=100, 0.1f64..3.0f64).prop_map(|(hp_period, k)| {
             let value = 1000.0; // Use larger value to avoid division issues
             let data = vec![value; hp_period.max(10) + 20];
             (data, hp_period, k)
         });
 
         // Strategy 3: Trending data (monotonic increasing/decreasing)
-        let strat_trending = (2usize..=100, 0.1f64..3.0f64, prop::bool::ANY).prop_map(
+        let strat_trending = (3usize..=100, 0.1f64..3.0f64, prop::bool::ANY).prop_map(
             |(hp_period, k, increasing)| {
                 let len = hp_period.max(10) + 50;
                 let data: Vec<f64> = if increasing {

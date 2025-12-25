@@ -51,10 +51,12 @@ fn vama_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         vol_period: (5, 21, 4),
     };
 
-    let cpu = vama_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
-
     let cuda = CudaVama::new(0).expect("CudaVama::new");
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    // CPU reference on FP32-rounded inputs to match CUDA math and avoid
+    // max/min window tie-break divergences from extra FP64 precision.
+    let data32_as_f64: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
+    let cpu = vama_batch_with_kernel(&data32_as_f64, &sweep, Kernel::ScalarBatch)?;
     let gpu_handle = cuda
         .vama_batch_dev(&data_f32, &sweep)
         .expect("cuda vama_batch_dev");

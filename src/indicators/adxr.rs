@@ -309,10 +309,16 @@ fn adxr_prepare<'a>(
         });
     }
 
-    let chosen = match kernel {
+    let mut chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
+    // Prefer AVX2 over AVX512 for ADXR in Auto: AVX512 often downclocks and underperforms
+    // for this recurrence-heavy workload. Explicit Avx512 selection is still supported.
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
+        chosen = Kernel::Avx2;
+    }
 
     Ok((high, low, close, period, first, chosen))
 }
@@ -766,11 +772,15 @@ pub fn adxr_batch_with_kernel(
     sweep: &AdxrBatchRange,
     k: Kernel,
 ) -> Result<AdxrBatchOutput, AdxrError> {
-    let kernel = match k {
+    let mut kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => return Err(AdxrError::InvalidKernelForBatch(k)),
     };
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(k, Kernel::Auto) && matches!(kernel, Kernel::Avx512Batch) {
+        kernel = Kernel::Avx2Batch;
+    }
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,

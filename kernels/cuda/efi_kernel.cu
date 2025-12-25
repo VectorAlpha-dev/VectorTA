@@ -151,19 +151,15 @@ void efi_batch_from_diff_f32(const float* __restrict__ diffs,
     // Improved row-major variant using warp broadcast of diff[t]
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     const bool active = (combo < n_combos) && (periods[combo] > 0) && (series_len > 0) && (warm < series_len);
-
-    if (!active && __all_sync(0xffffffff, !active)) return; // whole block idle
+    const unsigned warp_mask = __ballot_sync(0xffffffff, active);
+    if (warp_mask == 0) return; // no active lanes in this warp
 
     // Prefix NaNs per-active combo
     if (active) {
         const int base = combo * series_len;
-        for (int t = threadIdx.x; t < warm; t += blockDim.x) {
-            out[base + t] = NAN;
-        }
+        // One thread owns one combo -> fill prefix sequentially (warm is typically small).
+        for (int t = 0; t < warm; ++t) { out[base + t] = NAN; }
     }
-
-    const unsigned warp_mask = __ballot_sync(0xffffffff, active);
-    if (warp_mask == 0) return; // no active lanes in this warp
 
     const int lane = threadIdx.x & 31;
     const int src_lane = __ffs(warp_mask) - 1; // first active lane
@@ -270,16 +266,12 @@ void efi_one_series_many_params_from_diff_tm_f32(
 
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     const bool active = (combo < n_combos) && (periods[combo] > 0);
-    if (!active && __all_sync(0xffffffff, !active)) return; // whole block idle
-
-    if (active) {
-        for (int t = threadIdx.x; t < warm; t += blockDim.x) {
-            out_tm[t * n_combos + combo] = NAN;
-        }
-    }
-
     const unsigned warp_mask = __ballot_sync(0xffffffff, active);
     if (warp_mask == 0) return;
+
+    if (active) {
+        for (int t = 0; t < warm; ++t) { out_tm[t * n_combos + combo] = NAN; }
+    }
     const int lane = threadIdx.x & 31;
     const int src_lane = __ffs(warp_mask) - 1;
 
@@ -323,17 +315,13 @@ void efi_one_series_many_params_from_diff_rm_f32(
 
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     const bool active = (combo < n_combos) && (periods[combo] > 0);
-    if (!active && __all_sync(0xffffffff, !active)) return;
+    const unsigned warp_mask = __ballot_sync(0xffffffff, active);
+    if (warp_mask == 0) return;
 
     if (active) {
         const int base = combo * series_len;
-        for (int t = threadIdx.x; t < warm; t += blockDim.x) {
-            out_rm[base + t] = NAN;
-        }
+        for (int t = 0; t < warm; ++t) { out_rm[base + t] = NAN; }
     }
-
-    const unsigned warp_mask = __ballot_sync(0xffffffff, active);
-    if (warp_mask == 0) return;
 
     const int lane = threadIdx.x & 31;
     const int src_lane = __ffs(warp_mask) - 1;

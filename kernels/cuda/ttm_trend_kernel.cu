@@ -65,7 +65,7 @@ __device__ __forceinline__ float2 ff2_scale(const float2 a, const float s) {
 #define TTM_TILE_TIME 256     // threads along time (x)
 #endif
 #ifndef TTM_TILE_PARAMS
-#define TTM_TILE_PARAMS 8     // threads along params (y)
+#define TTM_TILE_PARAMS 4     // threads along params (y)
 #endif
 
 extern "C" __global__

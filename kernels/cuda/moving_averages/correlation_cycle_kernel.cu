@@ -73,11 +73,12 @@ extern "C" __global__ void correlation_cycle_batch_f32_ria(
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
 
-    const float half_pi = asinf(1.0f);
     while (t < series_len) {
         float r_out = NAN, i_out = NAN, ang_out = NAN;
         if (t >= warm_ria) {
-            float sum_x = 0.f, sum_x2 = 0.f, sum_xc = 0.f, sum_xs = 0.f;
+            float mean = 0.f, m2 = 0.f;
+            float sum_xc = 0.f, sum_xs = 0.f;
+            int k = 0;
             // Window indexes are (t-1, t-2, ..., t-period)
             #pragma unroll 4
             for (int j = 0; j < period; ++j) {
@@ -85,12 +86,18 @@ extern "C" __global__ void correlation_cycle_batch_f32_ria(
                 float x = sanitize_nan(prices[idx]);
                 float c = wcos[j];
                 float s = wsin[j];
-                sum_x  += x;
-                sum_x2  = fmaf(x, x, sum_x2);
+                // Numerically stable one-pass variance (Welford): m2 = Σ (x-mean)^2
+                ++k;
+                float delta = x - mean;
+                mean += delta / (float)k;
+                float delta2 = x - mean;
+                m2 = fmaf(delta, delta2, m2);
                 sum_xc  = fmaf(x, c, sum_xc);
                 sum_xs  = fmaf(x, s, sum_xs);
             }
-            float t1 = fmaf(n, sum_x2, -(sum_x * sum_x));
+            float sum_x = mean * n;
+            float t1 = n * m2;
+            if (t1 < 0.f) t1 = 0.f;
             float r_val = 0.f, i_val = 0.f;
             if (t1 > 0.f) {
                 float root = sqrtf(t1);
@@ -107,15 +114,7 @@ extern "C" __global__ void correlation_cycle_batch_f32_ria(
             }
             r_out = r_val;
             i_out = i_val;
-            float ang;
-            if (i_val == 0.f) {
-                ang = 0.f;
-            } else {
-                ang = atanf(r_val / i_val) + half_pi;
-                ang = ang * (180.f / (float)M_PI);
-                if (i_val > 0.f) ang -= 180.f;
-            }
-            ang_out = ang;
+            ang_out = (i_val == 0.f) ? 0.f : atan2f(-i_val, r_val) * (180.f / (float)M_PI);
         }
         out_real[base + t]  = r_out;
         out_imag[base + t]  = i_out;
@@ -188,24 +187,30 @@ extern "C" __global__ void correlation_cycle_many_series_one_param_f32_ria(
     const int stride_t = gridDim.x * blockDim.x;
     const int stride_s = gridDim.y * blockDim.y; // unused; we keep s fixed in this thread
 
-    const float half_pi = asinf(1.0f);
     for (int t = t0; t < rows; t += stride_t) {
         const int out_idx = t * cols + s;
         float r_out = NAN, i_out = NAN, ang_out = NAN;
         if (t >= warm_ria) {
-            float sum_x = 0.f, sum_x2 = 0.f, sum_xc = 0.f, sum_xs = 0.f;
+            float mean = 0.f, m2 = 0.f;
+            float sum_xc = 0.f, sum_xs = 0.f;
+            int k = 0;
             #pragma unroll 4
             for (int j = 0; j < period; ++j) {
                 int tt = t - (j + 1);
                 float x = sanitize_nan(prices_tm[tt * cols + s]);
                 float c = wcos[j];
                 float si = wsin[j];
-                sum_x  += x;
-                sum_x2  = fmaf(x, x, sum_x2);
+                ++k;
+                float delta = x - mean;
+                mean += delta / (float)k;
+                float delta2 = x - mean;
+                m2 = fmaf(delta, delta2, m2);
                 sum_xc  = fmaf(x, c, sum_xc);
                 sum_xs  = fmaf(x, si, sum_xs);
             }
-            float t1 = fmaf(n, sum_x2, -(sum_x * sum_x));
+            float sum_x = mean * n;
+            float t1 = n * m2;
+            if (t1 < 0.f) t1 = 0.f;
             float r_val = 0.f, i_val = 0.f;
             if (t1 > 0.f) {
                 float root = sqrtf(t1);
@@ -220,15 +225,7 @@ extern "C" __global__ void correlation_cycle_many_series_one_param_f32_ria(
             }
             r_out = r_val;
             i_out = i_val;
-            float ang;
-            if (i_val == 0.f) {
-                ang = 0.f;
-            } else {
-                ang = atanf(r_val / i_val) + half_pi;
-                ang = ang * (180.f / (float)M_PI);
-                if (i_val > 0.f) ang -= 180.f;
-            }
-            ang_out = ang;
+            ang_out = (i_val == 0.f) ? 0.f : atan2f(-i_val, r_val) * (180.f / (float)M_PI);
         }
         out_real_tm[out_idx]  = r_out;
         out_imag_tm[out_idx]  = i_out;

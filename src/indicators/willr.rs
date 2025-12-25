@@ -1193,7 +1193,11 @@ pub fn willr_batch_with_kernel(
     k: Kernel,
 ) -> Result<WillrBatchOutput, WillrError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // AVX512 downclocks here; prefer AVX2 batch when available.
+        Kernel::Auto => match detect_best_batch_kernel() {
+            Kernel::Avx512Batch => Kernel::Avx2Batch,
+            other => other,
+        },
         other if other.is_batch() => other,
         other => return Err(WillrError::InvalidKernelForBatch(other)),
     };
@@ -2867,7 +2871,10 @@ pub fn willr_batch_py<'py>(
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
+                Kernel::Auto => match detect_best_batch_kernel() {
+                    Kernel::Avx512Batch => Kernel::Avx2Batch,
+                    other => other,
+                },
                 k => k,
             };
             let simd = match kernel {

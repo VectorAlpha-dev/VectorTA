@@ -22,6 +22,7 @@
 // Async copy (cp.async) via Cooperative Groups
 #include <cooperative_groups.h>
 #include <cooperative_groups/memcpy_async.h>
+#include <cuda/pipeline>
 namespace cg = cooperative_groups;
 
 #ifndef EHMA_USE_ASYNC
@@ -606,23 +607,69 @@ void ehma_ms1p_tiled_core_async(const float* __restrict__ prices_tm,
     // Cooperative async staging of each tile row's TY segment
     const int p0 = t0 - (period - 1);
 #if EHMA_USE_ASYNC && (__CUDA_ARCH__ >= 800)
+    // NOTE: cg::memcpy_async is a *group algorithm*; only a subset of threads calling it per row
+    // can result in a no-op copy. Use per-thread cuda::memcpy_async (cp.async) instead.
+    const bool vec_ok = (TY == 4) && ((num_series & 3) == 0) && ((s0 & 3) == 0);
     auto block = cg::this_thread_block();
-#endif
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 1> pss;
+    auto pipe = cuda::make_pipeline(block, &pss);
+
+    pipe.producer_acquire();
+    for (int dt = threadIdx.x; dt < total; dt += blockDim.x) {
+        int t = p0 + dt;
+        if (t >= 0 && t < series_len) {
+            if (vec_ok) {
+                if (threadIdx.y == 0) {
+                    const float* src = &prices_tm[t * num_series + s0];
+                    float* dst = &tile[dt * TY];
+                    cuda::memcpy_async(dst, src, sizeof(float4), pipe);
+                }
+            } else {
+                int s = s0 + threadIdx.y;
+                float* dst = &tile[dt * TY + threadIdx.y];
+                if (s < num_series) {
+                    const float* src = &prices_tm[t * num_series + s];
+                    cuda::memcpy_async(dst, src, sizeof(float), pipe);
+                } else {
+                    *dst = 0.f;
+                }
+            }
+        } else {
+            int idx = dt * TY + threadIdx.y;
+            if (idx < total * TY) tile[idx] = 0.f;
+        }
+    }
+    pipe.producer_commit();
+    pipe.consumer_wait();
+    __syncthreads();
+
+    // Compute exactly as original tiled core
+    int s = s0 + threadIdx.y;
+    int t = t0 + threadIdx.x;
+    if (s < num_series && t < series_len) {
+        int warm = first_valids[s] + period - 1;
+        int out_idx = t * num_series + s;
+        if (t < warm) {
+            out_tm[out_idx] = NAN;
+        } else {
+            int start = threadIdx.x; // within tile
+            const float* xptr = &tile[start * TY + threadIdx.y];
+            float acc = ehma_dot_stride_uncomp(xptr, TY, w, period);
+            out_tm[out_idx] = acc;
+        }
+    }
+    __syncthreads();
+    pipe.consumer_release();
+#else
     for (int dt = threadIdx.x; dt < total; dt += blockDim.x) {
         int t = p0 + dt;
         if (t >= 0 && t < series_len) {
             const float* src = &prices_tm[t * num_series + s0];
             float* dst = &tile[dt * TY];
-#if EHMA_USE_ASYNC && (__CUDA_ARCH__ >= 800)
-            int seg = num_series - s0;
-            if (seg > TY) seg = TY;
-            cg::memcpy_async(block, dst, src, sizeof(float) * seg);
-#else
             for (int j = threadIdx.y; j < TY; j += blockDim.y) {
                 int s = s0 + j;
                 dst[j] = (s < num_series) ? src[j] : 0.f;
             }
-#endif
         } else {
             for (int j = threadIdx.y; j < TY; j += blockDim.y) {
                 int idx = dt * TY + j;
@@ -630,9 +677,6 @@ void ehma_ms1p_tiled_core_async(const float* __restrict__ prices_tm,
             }
         }
     }
-#if EHMA_USE_ASYNC && (__CUDA_ARCH__ >= 800)
-    cg::wait(block);  // ensure all row copies complete
-#endif
     __syncthreads();
 
     // Compute exactly as original tiled core
@@ -647,6 +691,7 @@ void ehma_ms1p_tiled_core_async(const float* __restrict__ prices_tm,
     const float* xptr = &tile[start * TY + threadIdx.y];
     float acc = ehma_dot_stride_uncomp(xptr, TY, w, period);
     out_tm[out_idx] = acc;
+#endif
 }
 
 #define DEFINE_EHMA_MS1P_TILED_ASYNC(NAME, TX, TY)                                            \

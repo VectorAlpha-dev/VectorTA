@@ -846,7 +846,11 @@ fn lpc_compute_into(
     out_low: &mut [f64],
 ) {
     let actual_kernel = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // AVX-512 is often slower here due to sequential IIR + potential downclock; prefer AVX2.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 => Kernel::Avx2,
+            other => other,
+        },
         k => k,
     };
 

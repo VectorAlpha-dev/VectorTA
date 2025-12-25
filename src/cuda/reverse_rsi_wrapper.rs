@@ -401,14 +401,38 @@ impl CudaReverseRsi {
                 CudaReverseRsiError::InvalidInput("shmem byte size overflow".into())
             })?;
 
-        // Block size via occupancy suggestion or env override RRSI_BLOCK_X.
+        // Block size via a parallelism heuristic or env override RRSI_BLOCK_X.
+        // This kernel maps 1 thread -> 1 parameter combo and runs a long serial loop
+        // over time, so we prefer enough blocks to utilize the GPU (especially for
+        // large combo sweeps like 5k+). Occupancy-only suggestions often pick 1024
+        // which underutilizes the device for moderate `n_combos`.
         let block_x: u32 = match std::env::var("RRSI_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
                 // Feed dynamic shared memory into occupancy so suggested block size
                 // respects per-block SMEM usage.
                 let (_min_grid, suggested) = func
                     .suggested_launch_configuration(shmem_bytes, BlockSize::xyz(0, 0, 0))?;
-                suggested
+                let mut bx = suggested.max(32).min(1024);
+                let combos = n_combos as u32;
+                const TARGET_BLOCKS: u32 = 80;
+                let mut best_bx = bx;
+                let mut best_diff = {
+                    let grid = (combos + bx - 1) / bx;
+                    grid.abs_diff(TARGET_BLOCKS)
+                };
+                while bx > 32 {
+                    let next = bx / 2;
+                    let grid = (combos + next - 1) / next;
+                    let diff = grid.abs_diff(TARGET_BLOCKS);
+                    if diff <= best_diff {
+                        best_bx = next;
+                        best_diff = diff;
+                        bx = next;
+                    } else {
+                        break;
+                    }
+                }
+                best_bx
             }
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
         };
@@ -418,10 +442,6 @@ impl CudaReverseRsi {
         self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
 
         // Record selection for introspection
-        unsafe {
-            (*(self as *const _ as *mut CudaReverseRsi)).last_batch =
-                Some(BatchKernelSelected::OneD { block_x });
-        }
         unsafe {
             (*(self as *const _ as *mut CudaReverseRsi)).last_batch =
                 Some(BatchKernelSelected::OneD { block_x });

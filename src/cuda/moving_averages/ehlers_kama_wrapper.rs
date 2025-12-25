@@ -790,6 +790,11 @@ impl CudaEhlersKama {
                         shmem_bytes = 0;
                     }
                 }
+                let mut ring_len_i: i32 = if shmem_bytes == 0 {
+                    0
+                } else {
+                    (period as i32) - 1
+                };
 
                 unsafe {
                     let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -801,6 +806,7 @@ impl CudaEhlersKama {
                     let args: &mut [*mut c_void] = &mut [
                         &mut prices_ptr as *mut _ as *mut c_void,
                         &mut period_i as *mut _ as *mut c_void,
+                        &mut ring_len_i as *mut _ as *mut c_void,
                         &mut num_series_i as *mut _ as *mut c_void,
                         &mut series_len_i as *mut _ as *mut c_void,
                         &mut first_valids_ptr as *mut _ as *mut c_void,

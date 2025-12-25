@@ -375,7 +375,8 @@ fn emd_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are stubs that delegate to scalar; avoid dispatch overhead.
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((high, low, period, delta, fraction, first, chosen))
@@ -1245,19 +1246,14 @@ pub fn emd_batch_with_kernel(
     k: Kernel,
 ) -> Result<EmdBatchOutput, EmdError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // SIMD batch kernels are stubs that delegate to scalar; avoid dispatch overhead.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(EmdError::InvalidKernelForBatch(k));
         }
     };
-    let simd = match kernel {
-        Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch => Kernel::Avx2,
-        Kernel::ScalarBatch => Kernel::Scalar,
-        _ => unreachable!(),
-    };
-    emd_batch_par_slice(high, low, sweep, simd)
+    emd_batch_par_slice(high, low, sweep, kernel)
 }
 
 #[derive(Clone, Debug)]

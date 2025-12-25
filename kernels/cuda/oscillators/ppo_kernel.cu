@@ -91,11 +91,21 @@ __device__ __forceinline__ float f2_ratio(Float2 num, Float2 den) {
 
 // Warp reductions (min/max) over a 32-lane warp
 __device__ __forceinline__ int warp_max_i(int v, unsigned mask) {
-    for (int ofs = 16; ofs; ofs >>= 1) v = max(v, __shfl_down_sync(mask, v, ofs));
+    const int lane = (int)(threadIdx.x & 31);
+    for (int ofs = 16; ofs; ofs >>= 1) {
+        const int src_lane = lane + ofs;
+        const int other = __shfl_down_sync(mask, v, ofs);
+        if (src_lane < 32 && (mask & (1u << src_lane))) v = max(v, other);
+    }
     return v;
 }
 __device__ __forceinline__ int warp_min_i(int v, unsigned mask) {
-    for (int ofs = 16; ofs; ofs >>= 1) v = min(v, __shfl_down_sync(mask, v, ofs));
+    const int lane = (int)(threadIdx.x & 31);
+    for (int ofs = 16; ofs; ofs >>= 1) {
+        const int src_lane = lane + ofs;
+        const int other = __shfl_down_sync(mask, v, ofs);
+        if (src_lane < 32 && (mask & (1u << src_lane))) v = min(v, other);
+    }
     return v;
 }
 
@@ -124,11 +134,13 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
     const int base_combo = (int)blockIdx.y * combos_per_block + (int)warp * 32;
     const int combo      = base_combo + (int)lane;
 
-    // Keep all lanes participating in shuffles, but mark validity
+    // Keep all lanes participating in __ballot_sync so we can form a correct warp mask.
+    // IMPORTANT: Threads whose lane is *not* in `mask` must not call warp intrinsics with `mask`.
     const unsigned full_mask  = __activemask();
     const bool     valid_lane = (combo < n_combos);
     const unsigned mask       = __ballot_sync(full_mask, valid_lane);
     if (mask == 0u) return; // no valid lanes in this warp
+    if (!valid_lane) return; // avoid calling warp intrinsics with a mask that excludes this lane
 
     // Load params (per lane)
     int fast = 0, slow = 0;
@@ -138,18 +150,16 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
     }
     // Sanity: non-positive periods -> lane becomes inactive
     const bool periods_ok = valid_lane && (fast > 0) && (slow > 0);
-    const unsigned ok_mask = __ballot_sync(mask, periods_ok);
-    (void)ok_mask; // may be unused depending on compiler
     const float nanf = f32_nan();
 
     // Compute per-lane geometry
     int start_idx = 0;
     if (periods_ok) start_idx = first_valid + slow - 1;
 
-    // Write prefix NaNs independently (stride by warpSize on the row)
+    // Write prefix NaNs for this combo (one lane owns one row).
     if (periods_ok) {
         const int row_off = combo * len;
-        for (int t = (int)lane; t < min(start_idx, len); t += 32) {
+        for (int t = 0; t < min(start_idx, len); ++t) {
             out[row_off + t] = nanf;
         }
     }
@@ -270,7 +280,7 @@ extern "C" __global__ void ppo_batch_f32(
     const int fast = fasts[combo];
     const int slow = slows[combo];
     if (fast <= 0 || slow <= 0) return;
-    const int start_idx = first_valid + slow - 1; // warmup end index written first
+    const int warm_idx = first_valid + max(fast, slow) - 1; // require both MAs warmed up
     const int row_off = combo * len;
     const float nanf = f32_nan();
 
@@ -280,7 +290,7 @@ extern "C" __global__ void ppo_batch_f32(
         const int stride = gridDim.x * blockDim.x;
         while (t < len) {
             float y = nanf;
-            if (t >= start_idx) {
+            if (t >= warm_idx) {
                 const int tr = t + 1;
                 const double s_fast = prefix_sum[tr] - prefix_sum[tr - fast];
                 const double s_slow = prefix_sum[tr] - prefix_sum[tr - slow];
@@ -299,6 +309,7 @@ extern "C" __global__ void ppo_batch_f32(
 
     // EMA path: only thread 0 performs sequential scan; others help prefix NaN init
     // Initialize prefix [0..start_idx) to NaN in parallel
+    const int start_idx = first_valid + slow - 1; // classic EMA start index (slow warmup)
     for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < min(start_idx, len); idx += gridDim.x * blockDim.x) {
         out[row_off + idx] = nanf;
     }
@@ -373,7 +384,7 @@ extern "C" __global__ void ppo_many_series_one_param_time_major_f32(
     const int s = blockIdx.y * blockDim.y + threadIdx.y; // series/column
     if (s >= cols) return;
     const int fv = max(0, first_valids[s]);
-    const int start_idx = fv + slow - 1;
+    const int warm_idx = fv + max(fast, slow) - 1;
     const float nanf = f32_nan();
 
     if (ma_mode == 0) {
@@ -384,7 +395,7 @@ extern "C" __global__ void ppo_many_series_one_param_time_major_f32(
         const int stride = gridDim.x * blockDim.x;
         for (int t = tx; t < rows; t += stride) {
             float y = nanf;
-            if (t >= start_idx) {
+            if (t >= warm_idx) {
                 const int wr = (t * cols + s) + 1;
                 const int lfast_t = max(t - fast, fv - 1);
                 const int lslow_t = max(t - slow, fv - 1);
@@ -406,6 +417,7 @@ extern "C" __global__ void ppo_many_series_one_param_time_major_f32(
     if (!(threadIdx.x == 0)) return; // only one thread along x for recurrence
 
     // Prefix NaN init
+    const int start_idx = fv + slow - 1;
     for (int t = 0; t < min(start_idx, rows); ++t) {
         out_tm[t * cols + s] = nanf;
     }

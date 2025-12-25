@@ -32,8 +32,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -218,7 +217,8 @@ pub fn medprice_with_kernel(
     let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are currently stubs delegating to the scalar path, so Auto skips runtime detection.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -279,7 +279,8 @@ pub fn medprice_compute_into(
         .ok_or(MedpriceError::AllValuesNaN)?;
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are currently stubs delegating to the scalar path, so Auto skips runtime detection.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -432,7 +433,8 @@ pub fn medprice_batch_with_kernel(
     k: Kernel,
 ) -> Result<MedpriceBatchOutput, MedpriceError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Batch SIMD kernels are currently stubs delegating to the scalar path, so Auto skips runtime detection.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(MedpriceError::InvalidKernelForBatch(other)),
     };
@@ -559,7 +561,8 @@ fn medprice_batch_inner(
     };
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are currently stubs delegating to the scalar path, so Auto skips runtime detection.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -663,7 +666,8 @@ pub fn medprice_into_slice(
     };
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are currently stubs delegating to the scalar path, so Auto skips runtime detection.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -775,7 +779,7 @@ pub fn medprice_batch_py<'py>(
     let _combos = py
         .allow_threads(|| {
             let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
+                Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
             };
             medprice_batch_inner_into(high_slice, low_slice, kernel, true, slice_out)

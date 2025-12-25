@@ -352,7 +352,7 @@ fn devstop_prepare<'a>(
     let ma_type = input.get_ma_type();
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((
@@ -568,7 +568,7 @@ pub fn devstop_with_kernel(
 
     // Resolve kernel once
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 

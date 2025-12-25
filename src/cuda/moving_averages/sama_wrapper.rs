@@ -461,8 +461,8 @@ impl CudaSama {
 
         let func = self
             .module
-            .get_function("sama_batch_f32")
-            .map_err(|_| CudaSamaError::MissingKernelSymbol { name: "sama_batch_f32" })?;
+            .get_function("sama_batch_f32_opt")
+            .map_err(|_| CudaSamaError::MissingKernelSymbol { name: "sama_batch_f32_opt" })?;
 
         // Select kernel once for introspection/debugging
         unsafe {
@@ -538,8 +538,8 @@ impl CudaSama {
 
         let func = self
             .module
-            .get_function("sama_many_series_one_param_f32")
-            .map_err(|_| CudaSamaError::MissingKernelSymbol { name: "sama_many_series_one_param_f32" })?;
+            .get_function("sama_many_series_one_param_f32_opt")
+            .map_err(|_| CudaSamaError::MissingKernelSymbol { name: "sama_many_series_one_param_f32_opt" })?;
 
         // Introspection for benches/debug
         unsafe {

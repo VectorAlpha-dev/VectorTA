@@ -301,7 +301,7 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
         return Err(SarError::EmptyInputData);
     }
 
-    // Verify output buffer size matches input
+    // Verify output buffer size matches input (min length when arrays mismatch)
     let expected_len = high.len().min(low.len());
     if dst.len() != expected_len {
         return Err(SarError::OutputLengthMismatch {
@@ -309,6 +309,8 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
             got: dst.len(),
         });
     }
+    // Trim inputs to match the validated output length.
+    let (high, low) = (&high[..expected_len], &low[..expected_len]);
 
     let first_valid_idx = high
         .iter()
@@ -1902,6 +1904,34 @@ mod tests {
         let input = SarInput::from_slices(&high, &low, params);
         let result = sar_with_kernel(&input, kernel)?;
         assert_eq!(result.values.len(), high.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_sar_into_slice_trims_mismatched_lengths() -> Result<(), Box<dyn Error>> {
+        let high = [50000.0, 50500.0, 51000.0, 52000.0];
+        let low = [49000.0, 49500.0, 49900.0];
+        let params = SarParams::default();
+        let input = SarInput::from_slices(&high, &low, params);
+
+        let expected = sar_with_kernel(&input, Kernel::Scalar)?;
+        assert_eq!(expected.values.len(), low.len());
+
+        let mut out = vec![0.0; low.len()];
+        sar_into_slice(&mut out, &input, Kernel::Scalar)?;
+
+        for i in 0..out.len() {
+            let a = out[i];
+            let b = expected.values[i];
+            assert!(
+                (a.is_nan() && b.is_nan()) || a == b,
+                "mismatch at {}: {} vs {}",
+                i,
+                a,
+                b
+            );
+        }
+
         Ok(())
     }
 

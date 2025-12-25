@@ -131,16 +131,18 @@ extern "C" __global__ void mod_god_mode_batch_f32(
         // Laguerre RSI
         LaguerreRSI lrsi;
 
-        // CBCI helpers
+        // CBCI helpers (RSI momentum lag == n2)
+        const int rsi_mod = (n2 > 0 && n2 < MAX_RING) ? n2 : MAX_RING;
         float rsi_ring[MAX_RING];
-        for (int i = 0; i < MAX_RING; ++i) rsi_ring[i] = CUDART_NAN_F;
+        for (int i = 0; i < rsi_mod; ++i) rsi_ring[i] = CUDART_NAN_F;
         int rsi_head = 0;
         float rsi_ema = 0.f; bool rsi_ema_seed = false;
 
         // MFI (n3 ring)
+        const int mf_mod = (n3 > 0 && n3 < MAX_RING) ? n3 : MAX_RING;
         float mf_ring_mf[MAX_RING];
         signed char mf_ring_sgn[MAX_RING];
-        for (int i = 0; i < MAX_RING; ++i) { mf_ring_mf[i] = 0.f; mf_ring_sgn[i] = 0; }
+        for (int i = 0; i < mf_mod; ++i) { mf_ring_mf[i] = 0.f; mf_ring_sgn[i] = 0; }
         float mf_pos_sum = 0.f, mf_neg_sum = 0.f; int mf_head = 0; bool tp_has_prev = false; float tp_prev = 0.f;
 
         // CSI/TSI and CSI_MG state (per thread)
@@ -200,13 +202,13 @@ extern "C" __global__ void mod_god_mode_batch_f32(
                     signed char sign = (tp > tp_prev) ? 1 : ((tp < tp_prev) ? -1 : 0);
                     float mf_raw = tp * volume[i];
                     if (rsi_seeded) {
-                        int old_idx = mf_head % MAX_RING;
+                        int old_idx = mf_head % mf_mod;
                         float old_mf = mf_ring_mf[old_idx];
                         signed char old_sign = mf_ring_sgn[old_idx];
                         if (old_sign > 0) mf_pos_sum -= old_mf;
                         else if (old_sign < 0) mf_neg_sum -= old_mf;
                     }
-                    int idx = mf_head % MAX_RING;
+                    int idx = mf_head % mf_mod;
                     mf_ring_mf[idx] = mf_raw;
                     mf_ring_sgn[idx] = sign;
                     if (sign > 0) mf_pos_sum += mf_raw; else if (sign < 0) mf_neg_sum += mf_raw;
@@ -223,7 +225,7 @@ extern "C" __global__ void mod_god_mode_batch_f32(
             // CBCI = RSI momentum over n2 + EMA(RSI, n3)
             float cbci_val = CUDART_NAN_F;
             if (rsi_seeded) {
-                int oldi = rsi_head % MAX_RING;
+                int oldi = rsi_head % rsi_mod;
                 float old_rsi = rsi_ring[oldi];
                 rsi_ring[oldi] = rsi_val; // store current
                 rsi_head = (rsi_head + 1);
@@ -374,10 +376,12 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
     float prev_close = close_tm[idx(first_valid, s)];
     LaguerreRSI lrsi;
 
-    float rsi_ring[MAX_RING]; for (int i=0;i<MAX_RING;++i) rsi_ring[i]=CUDART_NAN_F;
+    const int rsi_mod = (n2 > 0 && n2 < MAX_RING) ? n2 : MAX_RING;
+    float rsi_ring[MAX_RING]; for (int i=0;i<rsi_mod;++i) rsi_ring[i]=CUDART_NAN_F;
     int rsi_head=0; float rsi_ema=0.f; bool rsi_ema_seed=false;
     float mf_ring_mf[MAX_RING]; signed char mf_ring_sgn[MAX_RING];
-    for (int i=0;i<MAX_RING;++i){ mf_ring_mf[i]=0.f; mf_ring_sgn[i]=0; }
+    const int mf_mod = (n3 > 0 && n3 < MAX_RING) ? n3 : MAX_RING;
+    for (int i=0;i<mf_mod;++i){ mf_ring_mf[i]=0.f; mf_ring_sgn[i]=0; }
     float mf_pos_sum=0.f, mf_neg_sum=0.f; int mf_head=0; bool tp_has_prev=false; float tp_prev=0.f;
 
     // CSI/TSI and CSI_MG state (per thread)
@@ -419,10 +423,10 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
                 signed char sign = (tp > tp_prev) ? 1 : ((tp < tp_prev) ? -1 : 0);
                 float mf_raw = tp * volume_tm[idx(t,s)];
                 if (rsi_seeded) {
-                    int old = mf_head % MAX_RING; float old_mf = mf_ring_mf[old]; signed char old_s = mf_ring_sgn[old];
+                    int old = mf_head % mf_mod; float old_mf = mf_ring_mf[old]; signed char old_s = mf_ring_sgn[old];
                     if (old_s > 0) mf_pos_sum -= old_mf; else if (old_s < 0) mf_neg_sum -= old_mf;
                 }
-                int cur = mf_head % MAX_RING; mf_ring_mf[cur]=mf_raw; mf_ring_sgn[cur]=sign; if (sign>0) mf_pos_sum += mf_raw; else if (sign<0) mf_neg_sum += mf_raw; mf_head++;
+                int cur = mf_head % mf_mod; mf_ring_mf[cur]=mf_raw; mf_ring_sgn[cur]=sign; if (sign>0) mf_pos_sum += mf_raw; else if (sign<0) mf_neg_sum += mf_raw; mf_head++;
                 if (rsi_seeded) mf_val = (mf_neg_sum == 0.f) ? 100.f : (100.f - 100.f/(1.f + (mf_pos_sum/mf_neg_sum)));
             }
             tp_prev = tp; tp_has_prev = true;
@@ -431,7 +435,7 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
         // CBCI
         float cbci_val = CUDART_NAN_F;
         if (rsi_seeded) {
-            int old = rsi_head % MAX_RING; float old_r = rsi_ring[old]; rsi_ring[old] = rsi_val; rsi_head++;
+            int old = rsi_head % rsi_mod; float old_r = rsi_ring[old]; rsi_ring[old] = rsi_val; rsi_head++;
             float mom = (is_finite(old_r) && is_finite(rsi_val)) ? (rsi_val - old_r) : CUDART_NAN_F;
             if (!rsi_ema_seed && is_finite(rsi_val)) { rsi_ema = rsi_val; rsi_ema_seed = true; }
             else if (is_finite(rsi_val)) { rsi_ema = ema_step(rsi_val, rsi_ema, a3, b3); }

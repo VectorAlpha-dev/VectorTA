@@ -301,7 +301,11 @@ pub fn zscore_with_kernel(
     let devtype = input.get_devtype();
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // AVX512 downclocks here; prefer AVX2 when available.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx2,
+            other => other,
+        },
         other => other,
     };
 
@@ -2546,7 +2550,11 @@ pub fn zscore_into_slice(
     let devtype = input.get_devtype();
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        // Match zscore_with_kernel's Auto selection behavior.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx2,
+            other => other,
+        },
         other => other,
     };
 

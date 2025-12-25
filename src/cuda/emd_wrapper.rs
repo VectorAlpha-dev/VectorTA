@@ -369,9 +369,11 @@ impl CudaEmd {
         let params_bytes = n
             .checked_mul(params_each)
             .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
-        let out_elems = n
+        let plane_elems = n
             .checked_mul(len)
-            .and_then(|v| v.checked_mul(3))
+            .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
+        let out_elems = plane_elems
+            .checked_mul(3)
             .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
         let out_bytes = out_elems
             .checked_mul(sz_f32)
@@ -422,7 +424,7 @@ impl CudaEmd {
                 .map_err(CudaEmdError::Cuda)?;
         }
 
-        let elems = out_elems;
+        let elems = plane_elems;
         let mut d_ub: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;
         let mut d_mb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;
         let mut d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;

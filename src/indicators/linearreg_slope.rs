@@ -776,7 +776,13 @@ fn linearreg_slope_batch_inner_into(
         let mut pky = Vec::with_capacity(data.len() + 1);
         py.push(0.0);
         pky.push(0.0);
-        for (i, &y) in data.iter().enumerate() {
+        if first > 0 {
+            // Treat leading NaNs as a warmup prefix (ignored in sums).
+            py.resize(first + 1, 0.0);
+            pky.resize(first + 1, 0.0);
+        }
+        for i in first..data.len() {
+            let y = unsafe { *data.get_unchecked(i) };
             let prev_y = unsafe { *py.get_unchecked(i) };
             let prev_ky = unsafe { *pky.get_unchecked(i) };
             py.push(prev_y + y);

@@ -21,8 +21,7 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -224,16 +223,8 @@ pub fn medium_ad_with_kernel(
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
     let chosen = match kernel {
-        Kernel::Auto => {
-            // Prefer AVX512 when available; short-circuit AVX2 to scalar (underperforms on typical periods)
-            match detect_best_kernel() {
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 => Kernel::Avx512,
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx2 => Kernel::Scalar,
-                other => other,
-            }
-        }
+        // Auto selection is scalar: AVX2 is period-dependent and AVX512 is routed to scalar for parity.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -303,18 +294,7 @@ pub fn medium_ad_into(input: &MediumAdInput, out: &mut [f64]) -> Result<(), Medi
     }
 
     // Choose kernel with the same policy used by medium_ad_with_kernel
-    let chosen = match Kernel::Auto {
-        Kernel::Auto => {
-            match detect_best_kernel() {
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 => Kernel::Avx512,
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx2 => Kernel::Scalar,
-                other => other,
-            }
-        }
-        other => other,
-    };
+    let chosen = Kernel::Scalar;
 
     // Compute directly into caller-provided buffer
     unsafe {
@@ -665,14 +645,9 @@ pub fn medium_ad_batch_with_kernel(
     k: Kernel,
 ) -> Result<MediumAdBatchOutput, MediumAdError> {
     let kernel = match k {
-        Kernel::Auto => {
-            // Prefer AVX512Batch; short-circuit AVX2Batch to ScalarBatch (underperforms on typical periods)
-            match detect_best_batch_kernel() {
-                Kernel::Avx512Batch => Kernel::Avx512Batch,
-                Kernel::Avx2Batch => Kernel::ScalarBatch,
-                other => other,
-            }
-        }
+        // Auto selection is scalar batch: AVX2/AVX512 batch kernels are period-dependent and can be slower
+        // due to downclock/branchy select_nth; explicit batch kernels remain available.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(MediumAdError::InvalidKernelForBatch(other)),
     };
@@ -2274,7 +2249,7 @@ pub fn medium_ad_batch_py<'py>(
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
+                Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
             };
             let simd = match kernel {
@@ -2550,11 +2525,7 @@ pub fn medium_ad_into_slice(
     }
 
     let first = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
-    let chosen = if kern == Kernel::Auto {
-        detect_best_kernel()
-    } else {
-        kern
-    };
+    let chosen = if kern == Kernel::Auto { Kernel::Scalar } else { kern };
 
     match chosen {
         Kernel::Scalar => medium_ad_scalar(data, period, first, dst),

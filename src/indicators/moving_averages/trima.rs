@@ -744,7 +744,7 @@ pub unsafe fn trima_avx512_short(data: &[f64], period: usize, first: usize, out:
     let inv_m2 = 1.0 / (m2 as f64);
 
     // Vectorized initial m1-sum
-    let mut sum1 = sum_u_avx512(data.as_ptr().add(first), m1);
+    let mut sum1 = sum_u_avx2(data.as_ptr().add(first), m1);
 
     let mut ring: Vec<f64> = Vec::with_capacity(m2);
     let mut sum2 = 0.0;

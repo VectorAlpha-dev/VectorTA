@@ -75,7 +75,7 @@ __inline__ __device__ void kahan_add(float x, float &sum, float &c) {
 // Set to 1 to enable the optimized path (requires tight numeric parity checks
 // in your environment/tests). Default 0 to keep legacy parity by default.
 #ifndef USE_CCI_SMEM_OPT
-#define USE_CCI_SMEM_OPT 0
+#define USE_CCI_SMEM_OPT 1
 #endif
 
 // ----------------------------------------------------------
@@ -94,25 +94,29 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     const int base   = combo * series_len;
 
-    // Fill row with NaN up-front (parallel across threads).
-    for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
-        out[base + i] = NAN;
+    if (UNLIKELY(period <= 0 || period > series_len) ||
+        UNLIKELY(first_valid < 0 || first_valid >= series_len)) {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) out[base + i] = NAN;
+        return;
     }
+    const int tail = series_len - first_valid;
+    if (UNLIKELY(tail < period)) {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) out[base + i] = NAN;
+        return;
+    }
+
+    const float inv_p = 1.0f / static_cast<float>(period);
+    const int warm = first_valid + period - 1;
+
+    // Warmup prefix [0 .. warm) = NaN.
+    for (int i = threadIdx.x; i < warm; i += blockDim.x) out[base + i] = NAN;
     __syncthreads();
 
-    if (UNLIKELY(period <= 0 || period > series_len)) return;
-    if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) return;
-    const int tail = series_len - first_valid;
-    if (UNLIKELY(tail < period)) return;
-
-    const float inv_p     = 1.0f / static_cast<float>(period);
-    const float mad_scale = 0.015f * inv_p; // denom = sum_abs * mad_scale
-    const int   warm      = first_valid + period - 1;
-
-    // Fast path: shared-memory sliding window when period fits our static buffer
+    // Fast path: keep rolling window in shared memory; FP32 arithmetic for throughput.
     if (USE_CCI_SMEM_OPT && LIKELY(period <= CCI_SMEM_MAX)) {
         __shared__ float s_win_static[CCI_SMEM_MAX];
-        float* s_win = s_win_static; // alias for clarity
+        __shared__ float s_sma;
+        float* s_win = s_win_static;
 
         // Seed window [first_valid .. first_valid+period-1]
         {
@@ -123,51 +127,54 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
         }
         __syncthreads();
 
-        // Initial rolling sum (sequential for numeric parity with legacy path)
-        float sum0 = 0.0f;
-        if (threadIdx.x == 0) {
-            for (int i = 0; i < period; ++i) sum0 += s_win[i];
-        }
-        __shared__ float s_sma;
-        if (threadIdx.x == 0) s_sma = sum0 * inv_p;
+        // Initial rolling sum (parallel) -> SMA
+        float sum_local = 0.0f;
+        for (int i = threadIdx.x; i < period; i += blockDim.x) sum_local += s_win[i];
+        float sum_total = block_reduce_sum(sum_local);
+
+        float sum = sum_total;
+        float csum = 0.0f; // Kahan compensation for rolling sum updates
+        if (threadIdx.x == 0) s_sma = sum_total * inv_p;
         __syncthreads();
 
-        // First MAD / CCI at warm (sequential; compensated abs-sum for stability)
-        if (threadIdx.x == 0) {
+        // First MAD / CCI at warm (parallel MAD reduction)
+        {
             const float sma = s_sma;
-            float sum_abs = 0.0f, cabs = 0.0f;
-            for (int i = 0; i < period; ++i) {
-                float ai = fabsf(s_win[i] - sma);
-                kahan_add(ai, sum_abs, cabs);
+            float sum_abs_local = 0.0f;
+            for (int i = threadIdx.x; i < period; i += blockDim.x) {
+                sum_abs_local += fabsf(s_win[i] - sma);
             }
-            float denom = 0.015f * (sum_abs * inv_p);
-            float px    = prices[warm];
-            out[base + warm] = (denom == 0.0f) ? 0.0f : (px - sma) / denom;
+            float sum_abs = block_reduce_sum(sum_abs_local);
+            if (threadIdx.x == 0) {
+                float denom = 0.015f * (sum_abs * inv_p);
+                float px = prices[warm];
+                out[base + warm] = (denom == 0.0f) ? 0.0f : (px - sma) / denom;
+            }
         }
         __syncthreads();
 
         // Rolling with circular buffer in shared memory
-        int   head = 0;
-        float sum  = sum0;
-        float csum = 0.0f; // Kahan compensation for rolling sum
+        int head = 0;
         for (int t = warm + 1; t < series_len; ++t) {
             if (threadIdx.x == 0) {
                 const float newv = prices[t];
                 const float oldv = s_win[head];
                 s_win[head] = newv;
                 head++; if (head == period) head = 0;
-                // compensated update for better numerical stability
                 kahan_add(newv - oldv, sum, csum);
                 s_sma = sum * inv_p;
+            }
+            __syncthreads();
 
-                const float sma = s_sma;
-                float sum_abs = 0.0f, cabs = 0.0f;
-                for (int i = 0; i < period; ++i) {
-                    float ai = fabsf(s_win[i] - sma);
-                    kahan_add(ai, sum_abs, cabs);
-                }
+            const float sma = s_sma;
+            float sum_abs_local = 0.0f;
+            for (int i = threadIdx.x; i < period; i += blockDim.x) {
+                sum_abs_local += fabsf(s_win[i] - sma);
+            }
+            float sum_abs = block_reduce_sum(sum_abs_local);
+            if (threadIdx.x == 0) {
                 float denom = 0.015f * (sum_abs * inv_p);
-                float px    = prices[t];
+                float px = prices[t];
                 out[base + t] = (denom == 0.0f) ? 0.0f : (px - sma) / denom;
             }
             __syncthreads();
@@ -251,26 +258,22 @@ extern "C" __global__ void cci_many_series_one_param_f32(
     const int warm = first_valid + period - 1;
     for (int r = 0; r < warm; ++r) col_out[r * num_series] = NAN;
 
-    // Initial rolling sum for SMA (FP64 accumulate)
-    double sum_d = 0.0;
     const float inv_p     = 1.0f / static_cast<float>(period);
-    const double inv_p_d  = 1.0 / (double)period;
     const float* p = col_in + static_cast<size_t>(first_valid) * num_series;
-    for (int k = 0; k < period; ++k, p += num_series) sum_d += (double)(*p);
-    double sma_d = sum_d * inv_p_d;
-    float sma = (float)sma_d;
+    float sum = 0.0f, csum = 0.0f;
+    for (int k = 0; k < period; ++k, p += num_series) kahan_add(*p, sum, csum);
+    float sma = sum * inv_p;
 
     // First MAD / CCI at warm
     {
-        double sum_abs_d = 0.0;
+        float sum_abs = 0.0f, cabs = 0.0f;
         const float* w = col_in + static_cast<size_t>(warm - period + 1) * num_series;
         for (int k = 0; k < period; ++k, w += num_series) {
-            double d = (double)(*w) - sma_d;
-            sum_abs_d += fabs(d);
+            kahan_add(fabsf((*w) - sma), sum_abs, cabs);
         }
-        double denom_d = 0.015 * (sum_abs_d * inv_p_d);
-        double px_d = (double)(*(col_in + static_cast<size_t>(warm) * num_series));
-        *(col_out + static_cast<size_t>(warm) * num_series) = (float)((denom_d == 0.0) ? 0.0 : (px_d - sma_d) / denom_d);
+        float denom = 0.015f * (sum_abs * inv_p);
+        float px = *(col_in + static_cast<size_t>(warm) * num_series);
+        *(col_out + static_cast<size_t>(warm) * num_series) = (denom == 0.0f) ? 0.0f : (px - sma) / denom;
     }
 
     // Rolling
@@ -278,19 +281,16 @@ extern "C" __global__ void cci_many_series_one_param_f32(
     const float* old = col_in + static_cast<size_t>(first_valid) * num_series;
     float* dst       = col_out + static_cast<size_t>(warm + 1) * num_series;
     for (int r = warm + 1; r < series_len; ++r) {
-        sum_d += (double)(*cur);
-        sum_d -= (double)(*old);
-        sma_d = sum_d * inv_p_d;
-        sma = (float)sma_d;
+        kahan_add((*cur) - (*old), sum, csum);
+        sma = sum * inv_p;
 
-        double sum_abs_d2 = 0.0;
+        float sum_abs = 0.0f, cabs = 0.0f;
         const float* w = cur - static_cast<size_t>(period - 1) * num_series;
         for (int k = 0; k < period; ++k, w += num_series) {
-            double d = (double)(*w) - sma_d;
-            sum_abs_d2 += fabs(d);
+            kahan_add(fabsf((*w) - sma), sum_abs, cabs);
         }
-        double denom_d = 0.015 * (sum_abs_d2 * inv_p_d);
-        *dst = (float)((denom_d == 0.0) ? 0.0 : (((double)(*cur)) - sma_d) / denom_d);
+        float denom = 0.015f * (sum_abs * inv_p);
+        *dst = (denom == 0.0f) ? 0.0f : ((*cur) - sma) / denom;
         cur += num_series;
         old += num_series;
         dst += num_series;

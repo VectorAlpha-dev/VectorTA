@@ -580,23 +580,9 @@ impl CudaPwma {
                 }
             }
             ManySeriesKernelPolicy::OneD { .. } => {}
-            ManySeriesKernelPolicy::Auto => {
-                if num_series >= 128 {
-                    if try_2d(128, 4).is_some() {
-                        return Ok(());
-                    }
-                    if try_2d(128, 2).is_some() {
-                        return Ok(());
-                    }
-                } else {
-                    if try_2d(128, 2).is_some() {
-                        return Ok(());
-                    }
-                    if try_2d(128, 4).is_some() {
-                        return Ok(());
-                    }
-                }
-            }
+            // The 2D tiled kernels are performance-oriented; keep them opt-in via policy
+            // until their correctness is validated across a wider set of GPUs/drivers.
+            ManySeriesKernelPolicy::Auto => {}
         }
 
         // Fallback 1D: prefer constant-memory path when available and requested

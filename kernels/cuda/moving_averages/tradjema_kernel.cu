@@ -8,6 +8,11 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
+// Precise FP64 division even when compiled with --use_fast_math.
+__device__ __forceinline__ double div_rn_f64(double num, double den) {
+    return __ddiv_rn(num, den);
+}
+
 // Force-inline for tiny hot helper
 __device__ __forceinline__ double compute_true_range(
     double high, double low, double prev_close, bool first_bar)
@@ -24,6 +29,9 @@ __device__ __forceinline__ double compute_true_range(
 // Small helpers for circular indexing without %
 __device__ __forceinline__ int inc_wrap(int x, int n) {
     ++x; return (x == n) ? 0 : x;
+}
+__device__ __forceinline__ int dec_wrap(int x, int n) {
+    return (x == 0) ? (n - 1) : (x - 1);
 }
 __device__ __forceinline__ int add_wrap(int head, int add, int n) {
     int s = head + add;
@@ -65,7 +73,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
     }
 
     const int warm  = first_valid + length - 1;
-    const double alpha = 2.0 / ((double)length + 1.0);
+    const double alpha = div_rn_f64(2.0, (double)length + 1.0);
 
     // Only write the necessary NaN prefix: [0, warm-1]
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
@@ -76,111 +84,90 @@ void tradjema_batch_f32(const float* __restrict__ high,
     // Nothing to compute (window never fully warms)
     if (warm >= series_len || threadIdx.x != 0) return;
 
-    // Shared memory layout:
-    // [ double tr_buf[length] ][ int dq_min[length] ][ int dq_max[length] ]
+    // Shared memory layout (mirrors the scalar ring-deque behavior):
+    // [ double min_vals[length] ][ double max_vals[length] ][ int min_idx[length] ][ int max_idx[length] ]
     extern __shared__ double smem[];
-    double* tr_buf = smem;
-    int* dq_min = reinterpret_cast<int*>(tr_buf + length);
-    int* dq_max = dq_min + length;
+    double* min_vals = smem;
+    double* max_vals = min_vals + length;
+    int* min_idx = reinterpret_cast<int*>(max_vals + length);
+    int* max_idx = min_idx + length;
 
-    // Deque bookkeeping (store absolute indices; ring index = abs % length)
-    int min_head = 0, min_count = 0;
-    int max_head = 0, max_count = 0;
+    int min_head = 0, min_tail = 0;
+    int max_head = 0, max_tail = 0;
 
-    auto back_pos = [length](int head, int count) {
-        int pos = head + count - 1;
-        return (pos >= length) ? pos - length : pos;
+    auto minq_push = [&](double v, int idx) {
+        int back = dec_wrap(min_tail, length);
+        // strict ">" to preserve older equal elements (matches scalar path)
+        while (min_tail != min_head && min_vals[back] > v) {
+            min_tail = back;
+            back = dec_wrap(min_tail, length);
+        }
+        min_vals[min_tail] = v;
+        min_idx[min_tail] = idx;
+        min_tail = inc_wrap(min_tail, length);
     };
-    auto get_ring = [length](int abs_idx) { return abs_idx % length; };
-
-    // Initialize TR ring and deques over the warmup window [first_valid, first_valid+length-1]
-    for (int k = 0; k < length; ++k) {
-        const int idx = first_valid + k;
-        const double prev_close = (idx == 0) ? 0.0 : (double)close[idx - 1];
-        const double high_d = (double)high[idx];
-        const double low_d  = (double)low[idx];
-        const double tr = compute_true_range(high_d, low_d, prev_close, idx == first_valid);
-
-        tr_buf[k] = tr;
-
-        // push k to min deque
-        while (min_count > 0) {
-            const int bp = back_pos(min_head, min_count);
-            const double vback = tr_buf[get_ring(dq_min[bp])];
-            if (vback >= tr) { --min_count; } else { break; }
+    auto maxq_push = [&](double v, int idx) {
+        int back = dec_wrap(max_tail, length);
+        // strict "<" to preserve older equal elements (matches scalar path)
+        while (max_tail != max_head && max_vals[back] < v) {
+            max_tail = back;
+            back = dec_wrap(max_tail, length);
         }
-        dq_min[add_wrap(min_head, min_count, length)] = k;
-        ++min_count;
+        max_vals[max_tail] = v;
+        max_idx[max_tail] = idx;
+        max_tail = inc_wrap(max_tail, length);
+    };
 
-        // push k to max deque
-        while (max_count > 0) {
-            const int bp = back_pos(max_head, max_count);
-            const double vback = tr_buf[get_ring(dq_max[bp])];
-            if (vback <= tr) { --max_count; } else { break; }
-        }
-        dq_max[add_wrap(max_head, max_count, length)] = k;
-        ++max_count;
+    // Seed window: [first_valid .. warm]
+    double last_tr = (double)high[first_valid] - (double)low[first_valid];
+    minq_push(last_tr, first_valid);
+    maxq_push(last_tr, first_valid);
+
+    for (int i = first_valid + 1; i <= warm; ++i) {
+        const double prev_close = (double)close[i - 1];
+        const double tr = compute_true_range(
+            (double)high[i], (double)low[i], prev_close, false);
+        minq_push(tr, i);
+        maxq_push(tr, i);
+        last_tr = tr;
     }
 
-    int abs_idx = length - 1;               // absolute index of current TR in ring
-    const double current_tr = tr_buf[abs_idx % length];
-    const double tr_low  = tr_buf[get_ring(dq_min[min_head])];
-    const double tr_high = tr_buf[get_ring(dq_max[max_head])];
+    const double tr_low  = min_vals[min_head];
+    const double tr_high = max_vals[max_head];
+    const double denom0 = tr_high - tr_low;
+    const double tr_adj0 = (denom0 != 0.0) ? div_rn_f64(last_tr - tr_low, denom0) : 0.0;
 
-    double tr_adj = (tr_high != tr_low) ? ((current_tr - tr_low) / (tr_high - tr_low)) : 0.0;
-
-    // Initial EMA output at 'warm' (matches CPU reference form)
+    // Initial EMA output at 'warm'
     const double src0 = (double)close[warm - 1];
-    const double a0   = alpha * fma(tr_adj, mult, 1.0);   // alpha * (1 + tr_adj*mult)
-    double y = a0 * src0;
+    const double a0 = alpha * (1.0 + tr_adj0 * mult);
+    double y = fma(src0, a0, 0.0);
     out[base + warm] = (float)y;
 
     // Main sequential loop
     for (int i = warm + 1; i < series_len; ++i) {
-        ++abs_idx;
-        const int pos = abs_idx % length;
+        const int lim = i - length;
+        while (min_head != min_tail && min_idx[min_head] <= lim) {
+            min_head = inc_wrap(min_head, length);
+        }
+        while (max_head != max_tail && max_idx[max_head] <= lim) {
+            max_head = inc_wrap(max_head, length);
+        }
 
         const double prev_close = (double)close[i - 1];
-        const double tr_new = compute_true_range(
+        const double tr = compute_true_range(
             (double)high[i], (double)low[i], prev_close, false);
 
-        // expire old indices (<= abs_idx - length)
-        while (min_count > 0 && dq_min[min_head] <= abs_idx - length) {
-            min_head = inc_wrap(min_head, length);
-            --min_count;
-        }
-        while (max_count > 0 && dq_max[max_head] <= abs_idx - length) {
-            max_head = inc_wrap(max_head, length);
-            --max_count;
-        }
+        minq_push(tr, i);
+        maxq_push(tr, i);
 
-        // push new into deques
-        while (min_count > 0) {
-            const int bp = back_pos(min_head, min_count);
-            const double vback = tr_buf[get_ring(dq_min[bp])];
-            if (vback >= tr_new) { --min_count; } else { break; }
-        }
-        dq_min[add_wrap(min_head, min_count, length)] = abs_idx;
-        ++min_count;
+        const double lo_tr = min_vals[min_head];
+        const double hi_tr = max_vals[max_head];
+        const double den = hi_tr - lo_tr;
+        const double tr_adj = (den != 0.0) ? div_rn_f64(tr - lo_tr, den) : 0.0;
+        const double a = alpha * (1.0 + tr_adj * mult);
 
-        while (max_count > 0) {
-            const int bp = back_pos(max_head, max_count);
-            const double vback = tr_buf[get_ring(dq_max[bp])];
-            if (vback <= tr_new) { --max_count; } else { break; }
-        }
-        dq_max[add_wrap(max_head, max_count, length)] = abs_idx;
-        ++max_count;
-
-        // update ring after using old values
-        tr_buf[pos] = tr_new;
-
-        const double low_w  = tr_buf[get_ring(dq_min[min_head])];
-        const double high_w = tr_buf[get_ring(dq_max[max_head])];
-        tr_adj = (high_w != low_w) ? ((tr_new - low_w) / (high_w - low_w)) : 0.0;
-
-        const double a = alpha * fma(tr_adj, mult, 1.0);
-        const double src = (double)close[i - 1];
-        y = fma(a, (src - y), y);  // one DFMA, stable update
+        const double src = prev_close; // src is close[i-1]
+        y = fma(a, (src - y), y);
         out[base + i] = (float)y;
     }
 }
@@ -225,67 +212,103 @@ void tradjema_many_series_one_param_time_major_f32(
         return;
     }
 
-    extern __shared__ double tr_buf[];
     const double mult = static_cast<double>(mult_f32);
-    const double alpha = 2.0 / (static_cast<double>(length) + 1.0);
+    const double alpha = div_rn_f64(2.0, static_cast<double>(length) + 1.0);
 
     auto at = [num_series](const float* buf, int row, int col) {
         return buf[row * num_series + col];
     };
 
-    for (int k = 0; k < length; ++k) {
-        const int idx = first_valid + k;
-        const double prev_close = (idx == 0) ? 0.0 : static_cast<double>(at(close_tm, idx - 1, series));
-        const double high_d = static_cast<double>(at(high_tm, idx, series));
-        const double low_d = static_cast<double>(at(low_tm, idx, series));
-        tr_buf[k] = compute_true_range(high_d, low_d, prev_close, idx == first_valid);
+    // Shared memory layout (mirrors the scalar ring-deque behavior):
+    // [ double min_vals[length] ][ double max_vals[length] ][ int min_idx[length] ][ int max_idx[length] ]
+    extern __shared__ double smem[];
+    double* min_vals = smem;
+    double* max_vals = min_vals + length;
+    int* min_idx = reinterpret_cast<int*>(max_vals + length);
+    int* max_idx = min_idx + length;
+
+    int min_head = 0, min_tail = 0;
+    int max_head = 0, max_tail = 0;
+
+    auto minq_push = [&](double v, int idx) {
+        int back = dec_wrap(min_tail, length);
+        while (min_tail != min_head && min_vals[back] > v) {
+            min_tail = back;
+            back = dec_wrap(min_tail, length);
+        }
+        min_vals[min_tail] = v;
+        min_idx[min_tail] = idx;
+        min_tail = inc_wrap(min_tail, length);
+    };
+    auto maxq_push = [&](double v, int idx) {
+        int back = dec_wrap(max_tail, length);
+        while (max_tail != max_head && max_vals[back] < v) {
+            max_tail = back;
+            back = dec_wrap(max_tail, length);
+        }
+        max_vals[max_tail] = v;
+        max_idx[max_tail] = idx;
+        max_tail = inc_wrap(max_tail, length);
+    };
+
+    // Seed window: [first_valid .. warm]
+    double last_tr =
+        static_cast<double>(at(high_tm, first_valid, series))
+        - static_cast<double>(at(low_tm, first_valid, series));
+    minq_push(last_tr, first_valid);
+    maxq_push(last_tr, first_valid);
+
+    for (int i = first_valid + 1; i <= warm; ++i) {
+        const double prev_close = static_cast<double>(at(close_tm, i - 1, series));
+        const double tr = compute_true_range(
+            static_cast<double>(at(high_tm, i, series)),
+            static_cast<double>(at(low_tm, i, series)),
+            prev_close,
+            false
+        );
+        minq_push(tr, i);
+        maxq_push(tr, i);
+        last_tr = tr;
     }
 
-    int head = length - 1;
-    double tr_low = tr_buf[0];
-    double tr_high = tr_buf[0];
-    for (int k = 1; k < length; ++k) {
-        const double v = tr_buf[k];
-        tr_low = fmin(tr_low, v);
-        tr_high = fmax(tr_high, v);
-    }
+    const double tr_low  = min_vals[min_head];
+    const double tr_high = max_vals[max_head];
+    const double denom0 = tr_high - tr_low;
+    const double tr_adj0 = (denom0 != 0.0) ? div_rn_f64(last_tr - tr_low, denom0) : 0.0;
 
-    double current_tr = tr_buf[head];
-    double tr_adj = (tr_high != tr_low) ? ((current_tr - tr_low) / (tr_high - tr_low)) : 0.0;
     const double src0 = static_cast<double>(at(close_tm, warm - 1, series));
-    double y = alpha * (1.0 + tr_adj * mult) * (src0 - 0.0);
+    const double a0 = alpha * (1.0 + tr_adj0 * mult);
+    double y = fma(src0, a0, 0.0);
     out_tm[warm * num_series + series] = static_cast<float>(y);
 
     for (int i = warm + 1; i < series_len; ++i) {
+        const int lim = i - length;
+        while (min_head != min_tail && min_idx[min_head] <= lim) {
+            min_head = inc_wrap(min_head, length);
+        }
+        while (max_head != max_tail && max_idx[max_head] <= lim) {
+            max_head = inc_wrap(max_head, length);
+        }
+
         const double prev_close = static_cast<double>(at(close_tm, i - 1, series));
-        const double tr_new = compute_true_range(
+        const double tr = compute_true_range(
             static_cast<double>(at(high_tm, i, series)),
             static_cast<double>(at(low_tm, i, series)),
             prev_close,
             false
         );
 
-        head = (head + 1) % length;
-        const double tr_old = tr_buf[head];
-        tr_buf[head] = tr_new;
+        minq_push(tr, i);
+        maxq_push(tr, i);
 
-        if (tr_old <= tr_low || tr_old >= tr_high) {
-            tr_low = tr_buf[0];
-            tr_high = tr_buf[0];
-            for (int k = 1; k < length; ++k) {
-                const double v = tr_buf[k];
-                tr_low = fmin(tr_low, v);
-                tr_high = fmax(tr_high, v);
-            }
-        } else {
-            tr_low = fmin(tr_low, tr_new);
-            tr_high = fmax(tr_high, tr_new);
-        }
-
-        tr_adj = (tr_high != tr_low) ? ((tr_new - tr_low) / (tr_high - tr_low)) : 0.0;
+        const double lo_tr = min_vals[min_head];
+        const double hi_tr = max_vals[max_head];
+        const double den = hi_tr - lo_tr;
+        const double tr_adj = (den != 0.0) ? div_rn_f64(tr - lo_tr, den) : 0.0;
         const double a = alpha * (1.0 + tr_adj * mult);
-        const double src = static_cast<double>(at(close_tm, i - 1, series));
-        y += a * (src - y);
+
+        const double src = prev_close;
+        y = fma(a, (src - y), y);
         out_tm[i * num_series + series] = static_cast<float>(y);
     }
 }

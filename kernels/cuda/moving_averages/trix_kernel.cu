@@ -32,6 +32,11 @@ static __device__ __forceinline__ float ema_step(float prev, float x, float a) {
     return fmaf(a, x - prev, prev);
 }
 
+// Double-precision EMA update (used to better match scalar reference on tricky series).
+static __device__ __forceinline__ double ema_step_d(double prev, double x, double a) {
+    return fma(a, x - prev, prev);
+}
+
 // -------------------------------------------
 // 1) Param-sweep over periods (one price series)
 //    Inputs are ln(price) precomputed on host for reuse across rows.
@@ -59,60 +64,61 @@ void trix_batch_f32(const float* __restrict__ logs,
     for (int i = 0; i < nan_to; ++i) out_row[i] = qn;
     if (warmup_end >= series_len) return;
 
-    const float a = 2.0f / (float(period) + 1.0f);
-    const float inv_n = 1.0f / float(period);
-    const float SCALE = 10000.0f;
+    // Promote the recurrence to FP64 for tighter parity with the scalar path.
+    const double a = 2.0 / (double(period) + 1.0);
+    const double inv_n = 1.0 / double(period);
+    const double SCALE = 10000.0;
 
     // Stage 1 seed: EMA1 via SMA of logs[first_valid .. first_valid+period)
-    float sum1 = 0.0f;
+    double sum1 = 0.0;
     for (int i = first_valid; i < first_valid + period; ++i) {
-        sum1 += logs[i];
+        sum1 += (double)logs[i];
     }
-    float ema1 = sum1 * inv_n; // at idx = first_valid + period - 1
+    double ema1 = sum1 * inv_n; // at idx = first_valid + period - 1
 
     // Build remaining EMA1 values (period-1) and accumulate for EMA2 seed
-    float sum_ema1 = ema1;
+    double sum_ema1 = ema1;
     int end2 = first_valid + 2 * period - 1;
     for (int i = first_valid + period; i < end2; ++i) {
-        ema1 = ema_step(ema1, logs[i], a);
+        ema1 = ema_step_d(ema1, (double)logs[i], a);
         sum_ema1 += ema1;
     }
 
     // Stage 2 seed: EMA2 via SMA of first `period` EMA1s
-    float ema2 = sum_ema1 * inv_n; // at idx = first_valid + 2*period - 2
+    double ema2 = sum_ema1 * inv_n; // at idx = first_valid + 2*period - 2
 
     // Build remaining EMA2 values (period-1) and accumulate for EMA3 seed
-    float sum_ema2 = ema2;
+    double sum_ema2 = ema2;
     int end3 = first_valid + 3 * period - 2;
     for (int i = end2; i < end3; ++i) {
-        ema1 = ema_step(ema1, logs[i], a);
-        ema2 = ema_step(ema2, ema1, a);
+        ema1 = ema_step_d(ema1, (double)logs[i], a);
+        ema2 = ema_step_d(ema2, ema1, a);
         sum_ema2 += ema2;
     }
 
     // Stage 3 seed: EMA3 via SMA of first `period` EMA2s
-    float ema3_prev = sum_ema2 * inv_n; // at idx = first_valid + 3*period - 3
+    double ema3_prev = sum_ema2 * inv_n; // at idx = first_valid + 3*period - 3
 
     // First TRIX sample at warmup_end (== first_valid + 3*(p-1) + 1)
     int t = warmup_end;
-    float ema3 = ema3_prev;
+    double ema3 = ema3_prev;
     {
-        const float lv = logs[t];
-        ema1 = ema_step(ema1, lv, a);
-        ema2 = ema_step(ema2, ema1, a);
-        ema3 = ema_step(ema3_prev, ema2, a);
-        out_row[t] = (ema3 - ema3_prev) * SCALE;
+        const double lv = (double)logs[t];
+        ema1 = ema_step_d(ema1, lv, a);
+        ema2 = ema_step_d(ema2, ema1, a);
+        ema3 = ema_step_d(ema3_prev, ema2, a);
+        out_row[t] = (float)((ema3 - ema3_prev) * SCALE);
         ema3_prev = ema3;
         ++t;
     }
 
     // Main time loop
     for (; t < series_len; ++t) {
-        const float lv = logs[t];
-        ema1 = ema_step(ema1, lv, a);
-        ema2 = ema_step(ema2, ema1, a);
-        ema3 = ema_step(ema3_prev, ema2, a);
-        out_row[t] = (ema3 - ema3_prev) * SCALE;
+        const double lv = (double)logs[t];
+        ema1 = ema_step_d(ema1, lv, a);
+        ema2 = ema_step_d(ema2, ema1, a);
+        ema3 = ema_step_d(ema3_prev, ema2, a);
+        out_row[t] = (float)((ema3 - ema3_prev) * SCALE);
         ema3_prev = ema3;
     }
 }

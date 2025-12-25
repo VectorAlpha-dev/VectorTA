@@ -24,7 +24,7 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 #[cfg(feature = "python")]
@@ -236,7 +236,8 @@ pub fn mean_ad_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels currently delegate to scalar, so Auto skips runtime detection.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -404,7 +405,8 @@ pub fn mean_ad_batch_with_kernel(
     k: Kernel,
 ) -> Result<MeanAdBatchOutput, MeanAdError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Batch SIMD kernels delegate to scalar, so Auto skips runtime detection.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(MeanAdError::InvalidKernelForBatch(other)),
     };
@@ -616,17 +618,12 @@ fn mean_ad_batch_inner_into(
 
     // Detect best kernel if Auto is specified
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
     let do_row = |row: usize, out_row: &mut [f64]| {
         let period = combos[row].period.unwrap();
-        // Initialize warmup period with NaN
-        let warmup_end = first + 2 * period - 2;
-        for i in 0..warmup_end.min(out_row.len()) {
-            out_row[i] = f64::NAN;
-        }
         match chosen {
             Kernel::Scalar => mean_ad_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -715,7 +712,7 @@ fn mean_ad_batch_inner(
 
     // Detect best kernel if Auto is specified
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -1913,7 +1910,8 @@ pub fn mean_ad_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels currently delegate to scalar, so Auto skips runtime detection.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

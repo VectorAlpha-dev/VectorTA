@@ -296,10 +296,18 @@ pub fn chande_with_kernel(
     let first = first_valid3(high, low, close).ok_or(ChandeError::AllValuesNaN)?;
     let period = input.get_period();
     let mult = input.get_mult();
-    let dir = input.get_direction().to_lowercase();
-    if dir != "long" && dir != "short" {
-        return Err(ChandeError::InvalidDirection { direction: dir });
-    }
+    let dir = {
+        let d = input.get_direction();
+        if d.eq_ignore_ascii_case("long") {
+            "long"
+        } else if d.eq_ignore_ascii_case("short") {
+            "short"
+        } else {
+            return Err(ChandeError::InvalidDirection {
+                direction: d.to_string(),
+            });
+        }
+    };
     if period == 0 || period > len {
         return Err(ChandeError::InvalidPeriod {
             period,
@@ -333,15 +341,15 @@ pub fn chande_with_kernel(
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                chande_scalar(high, low, close, period, mult, &dir, first, &mut out)
+                chande_scalar(high, low, close, period, mult, dir, first, &mut out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                chande_avx2(high, low, close, period, mult, &dir, first, &mut out)
+                chande_avx2(high, low, close, period, mult, dir, first, &mut out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                chande_avx512(high, low, close, period, mult, &dir, first, &mut out)
+                chande_avx512(high, low, close, period, mult, dir, first, &mut out)
             }
             _ => unreachable!(),
         }
@@ -398,10 +406,15 @@ pub fn chande_compute_into(
             valid: len - first,
         });
     }
-    let dir = direction.to_lowercase();
-    if dir != "long" && dir != "short" {
-        return Err(ChandeError::InvalidDirection { direction: dir });
-    }
+    let dir = if direction.eq_ignore_ascii_case("long") {
+        "long"
+    } else if direction.eq_ignore_ascii_case("short") {
+        "short"
+    } else {
+        return Err(ChandeError::InvalidDirection {
+            direction: direction.to_string(),
+        });
+    };
 
     let warmup = first + period - 1;
     let warmup_end = warmup.min(out.len());
@@ -427,15 +440,15 @@ pub fn chande_compute_into(
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                chande_scalar(high, low, close, period, mult, &dir, first, out)
+                chande_scalar(high, low, close, period, mult, dir, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                chande_avx2(high, low, close, period, mult, &dir, first, out)
+                chande_avx2(high, low, close, period, mult, dir, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                chande_avx512(high, low, close, period, mult, &dir, first, out)
+                chande_avx512(high, low, close, period, mult, dir, first, out)
             }
             _ => unreachable!(),
         }

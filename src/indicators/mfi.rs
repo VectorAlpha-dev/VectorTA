@@ -259,16 +259,16 @@ pub unsafe fn mfi_scalar(
         return;
     }
 
-    // Ring buffers for rolling sums (always zero-initialized)
-    let mut pos_buf = vec![0.0f64; period];
-    let mut neg_buf = vec![0.0f64; period];
+    // Ring buffers for rolling sums (always zero-initialized).
+    // Use one allocation and split it into (pos, neg) halves to reduce allocator overhead.
+    let mut ring_buf = vec![0.0f64; period * 2];
 
     // Raw pointers to avoid bounds checks in hot loops
     let tp_ptr = typical_price.as_ptr();
     let vol_ptr = volume.as_ptr();
     let out_ptr = out.as_mut_ptr();
-    let pos_ptr = pos_buf.as_mut_ptr();
-    let neg_ptr = neg_buf.as_mut_ptr();
+    let pos_ptr = ring_buf.as_mut_ptr();
+    let neg_ptr = ring_buf.as_mut_ptr().add(period);
 
     let mut pos_sum = 0.0f64;
     let mut neg_sum = 0.0f64;

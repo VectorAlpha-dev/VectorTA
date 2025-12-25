@@ -1,0 +1,1475 @@
+warning: unused import: `CkspParams`
+ --> tests\cksp_cuda.rs:3:70
+  |
+3 | use my_project::indicators::cksp::{CkspBatchBuilder, CkspBatchRange, CkspParams};
+  |                                                                      ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `KaufmanstopBatchBuilder`
+ --> tests\kaufmanstop_cuda.rs:4:36
+  |
+4 |     kaufmanstop_batch_with_kernel, KaufmanstopBatchBuilder, KaufmanstopBatchRange,
+  |                                    ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `my_project::utilities::data_loader::Candles`
+ --> tests\lpc_cuda.rs:6:5
+  |
+6 | use my_project::utilities::data_loader::Candles;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `approx_eq` is never used
+ --> src\bin\cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `VlmaBatchBuilder` and `VlmaBuilder`
+ --> tests\vlma_cuda.rs:4:47
+  |
+4 |     vlma_batch_with_kernel, vlma_with_kernel, VlmaBatchBuilder, VlmaBatchRange, VlmaBuilder,
+  |                                               ^^^^^^^^^^^^^^^^                  ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `input`
+   --> tests\kst_cuda.rs:184:13
+    |
+184 |         let input = KstInput::from_slice(&series, params);
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> tests\cwma_cuda.rs:191:9
+    |
+191 |     let mut cuda = CudaCwma::new_with_policy(
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> tests\cwma_cuda.rs:270:9
+    |
+270 |     let mut cuda = CudaCwma::new_with_policy(
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused import: `SafeZoneStopBuilder`
+ --> tests\safezonestop_cuda.rs:5:5
+  |
+5 |     SafeZoneStopBuilder, SafeZoneStopInput, SafeZoneStopParams,
+  |     ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> tests\dma_cuda_variants.rs:71:9
+   |
+71 |     let mut cuda = CudaDma::new_with_policy(0, policy).expect("cuda dma");
+   |         ----^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> tests\dma_cuda_variants.rs:138:9
+    |
+138 |     let mut cuda = CudaDma::new_with_policy(0, policy).expect("cuda dma");
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> tests\ehlers_kama_cuda.rs:206:9
+    |
+206 |     let mut cuda = CudaEhlersKama::new_with_policy(
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `my_project` (test "cksp_cuda") generated 1 warning (run `cargo fix --test "cksp_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "kaufmanstop_cuda") generated 1 warning (run `cargo fix --test "kaufmanstop_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "lpc_cuda") generated 1 warning (run `cargo fix --test "lpc_cuda"` to apply 1 suggestion)
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+warning: `my_project` (test "vlma_cuda") generated 1 warning (run `cargo fix --test "vlma_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "kst_cuda") generated 1 warning
+warning: `my_project` (test "cwma_cuda") generated 2 warnings (run `cargo fix --test "cwma_cuda"` to apply 2 suggestions)
+warning: `my_project` (test "safezonestop_cuda") generated 1 warning (run `cargo fix --test "safezonestop_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "dma_cuda_variants") generated 2 warnings (run `cargo fix --test "dma_cuda_variants"` to apply 2 suggestions)
+warning: `my_project` (test "ehlers_kama_cuda") generated 1 warning (run `cargo fix --test "ehlers_kama_cuda"` to apply 1 suggestion)
+warning: unused variable: `input`
+   --> tests\stc_cuda.rs:117:13
+    |
+117 |         let input = StcInput::from_slice(&series, params.clone());
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `my_project::utilities::data_loader::Candles`
+ --> tests\dvdiqqe_cuda.rs:6:5
+  |
+6 | use my_project::utilities::data_loader::Candles;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `ts`
+  --> tests\dvdiqqe_cuda.rs:35:9
+   |
+35 |     let ts: Vec<i64> = (0..len as i64).collect();
+   |         ^^ help: if this is intentional, prefix it with an underscore: `_ts`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `tol`
+  --> tests\dvdiqqe_cuda.rs:99:9
+   |
+99 |     let tol = 2e-2; // chained EMAs in fp32
+   |         ^^^ help: if this is intentional, prefix it with an underscore: `_tol`
+
+warning: unused import: `SqueezeMomentumBuilder`
+ --> tests\squeeze_momentum_cuda.rs:5:5
+  |
+5 |     SqueezeMomentumBuilder, SqueezeMomentumData, SqueezeMomentumInput, SqueezeMomentumParams,
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `read_candles_from_csv` and `source_type`
+ --> tests\bop_cuda.rs:4:42
+  |
+4 | use my_project::utilities::data_loader::{read_candles_from_csv, source_type};
+  |                                          ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary parentheses around assigned value
+  --> tests\stochf_cuda.rs:46:19
+   |
+46 |         let off = (0.09 + 0.01 * (x * 0.0007).cos().abs());
+   |                   ^                                      ^
+   |
+   = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+   |
+46 -         let off = (0.09 + 0.01 * (x * 0.0007).cos().abs());
+46 +         let off = 0.09 + 0.01 * (x * 0.0007).cos().abs();
+   |
+
+warning: unnecessary parentheses around assigned value
+   --> tests\stochf_cuda.rs:116:23
+    |
+116 |             let off = (0.07 + 0.01 * (x * 0.0013).cos().abs());
+    |                       ^                                      ^
+    |
+help: remove these parentheses
+    |
+116 -             let off = (0.07 + 0.01 * (x * 0.0013).cos().abs());
+116 +             let off = 0.07 + 0.01 * (x * 0.0013).cos().abs();
+    |
+
+warning: unused import: `my_project::utilities::enums::Kernel`
+ --> tests\ehlers_pma_cuda_variants.rs:6:5
+  |
+6 | use my_project::utilities::enums::Kernel;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> tests\ehlers_pma_cuda_variants.rs:69:9
+   |
+69 |     let mut cuda = CudaEhlersPma::new_with_policy(0, policy).expect("cuda pma");
+   |         ----^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> tests\ehlers_pma_cuda_variants.rs:128:9
+    |
+128 |     let mut cuda = CudaEhlersPma::new_with_policy(0, policy).expect("cuda pma");
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused import: `my_project::utilities::data_loader::Candles`
+ --> tests\stoch_cuda.rs:9:5
+  |
+9 | use my_project::utilities::data_loader::Candles;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `my_project` (test "stc_cuda") generated 1 warning
+warning: `my_project` (test "dvdiqqe_cuda") generated 3 warnings (run `cargo fix --test "dvdiqqe_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "squeeze_momentum_cuda") generated 1 warning (run `cargo fix --test "squeeze_momentum_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "bop_cuda") generated 1 warning (run `cargo fix --test "bop_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "stochf_cuda") generated 2 warnings (run `cargo fix --test "stochf_cuda"` to apply 2 suggestions)
+warning: `my_project` (test "ehlers_pma_cuda_variants") generated 3 warnings (run `cargo fix --test "ehlers_pma_cuda_variants"` to apply 3 suggestions)
+warning: `my_project` (test "stoch_cuda") generated 1 warning (run `cargo fix --test "stoch_cuda"` to apply 1 suggestion)
+warning: unused import: `my_project::utilities::enums::Kernel`
+ --> tests\marketefi_cuda.rs:6:5
+  |
+6 | use my_project::utilities::enums::Kernel;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `DtiBatchBuilder`
+ --> tests\dti_cuda.rs:3:35
+  |
+3 | use my_project::indicators::dti::{DtiBatchBuilder, DtiBatchRange, DtiParams};
+  |                                   ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `br`
+  --> tests\dti_cuda.rs:89:18
+   |
+89 |             let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
+   |                  ^^ help: if this is intentional, prefix it with an underscore: `_br`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `bs`
+  --> tests\dti_cuda.rs:89:22
+   |
+89 |             let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
+   |                      ^^ help: if this is intentional, prefix it with an underscore: `_bs`
+
+warning: unused variable: `bu`
+  --> tests\dti_cuda.rs:89:26
+   |
+89 |             let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
+   |                          ^^ help: if this is intentional, prefix it with an underscore: `_bu`
+
+warning: unused variable: `br`
+   --> tests\dti_cuda.rs:191:10
+    |
+191 |     let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
+    |          ^^ help: if this is intentional, prefix it with an underscore: `_br`
+
+warning: unused variable: `bs`
+   --> tests\dti_cuda.rs:191:14
+    |
+191 |     let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
+    |              ^^ help: if this is intentional, prefix it with an underscore: `_bs`
+
+warning: unused variable: `bu`
+   --> tests\dti_cuda.rs:191:18
+    |
+191 |     let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
+    |                  ^^ help: if this is intentional, prefix it with an underscore: `_bu`
+
+warning: variable does not need to be mutable
+   --> tests\chande_cuda.rs:152:9
+    |
+152 |     let mut cuda = CudaChande::new(0).expect("CudaChande::new");
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `my_project::utilities::data_loader::Candles`
+  --> tests\avsl_cuda.rs:10:5
+   |
+10 | use my_project::utilities::data_loader::Candles;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `my_project` (test "marketefi_cuda") generated 1 warning (run `cargo fix --test "marketefi_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "dti_cuda") generated 7 warnings (run `cargo fix --test "dti_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "chande_cuda") generated 1 warning (run `cargo fix --test "chande_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "avsl_cuda") generated 1 warning (run `cargo fix --test "avsl_cuda"` to apply 1 suggestion)
+warning: unused import: `WillrBuilder`
+ --> tests\willr_cuda.rs:4:60
+  |
+4 |     willr_with_kernel, WillrBatchBuilder, WillrBatchRange, WillrBuilder, WillrInput, WillrParams,
+  |                                                            ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `ChopParams`
+  --> tests\chop_cuda.rs:11:70
+   |
+11 | use my_project::indicators::chop::{ChopBatchBuilder, ChopBatchRange, ChopParams};
+   |                                                                      ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `dev`
+  --> tests\kvo_cuda.rs:68:10
+   |
+68 |     let (dev, combos) = cuda
+   |          ^^^ help: if this is intentional, prefix it with an underscore: `_dev`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `combos`
+  --> tests\kvo_cuda.rs:68:15
+   |
+68 |     let (dev, combos) = cuda
+   |               ^^^^^^ help: if this is intentional, prefix it with an underscore: `_combos`
+
+warning: unused variable: `params`
+   --> tests\kvo_cuda.rs:147:13
+    |
+147 |         let params = KvoParams {
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_params`
+
+warning: unused imports: `IftRsiInput` and `ift_rsi_with_kernel`
+ --> tests\ift_rsi_cuda.rs:4:32
+  |
+4 |     ift_rsi_batch_with_kernel, ift_rsi_with_kernel, IftRsiBatchRange, IftRsiBuilder, IftRsiInput,
+  |                                ^^^^^^^^^^^^^^^^^^^                                   ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary parentheses around assigned value
+  --> tests\devstop_cuda.rs:45:19
+   |
+45 |         let off = (0.35 + 0.01 * (x * 0.00031).cos().abs());
+   |                   ^                                       ^
+   |
+   = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+   |
+45 -         let off = (0.35 + 0.01 * (x * 0.00031).cos().abs());
+45 +         let off = 0.35 + 0.01 * (x * 0.00031).cos().abs();
+   |
+
+warning: variable does not need to be mutable
+  --> tests\ehma_cuda_variants.rs:73:9
+   |
+73 |     let mut cuda = CudaEhma::new_with_policy(0, policy).expect("cuda ehma");
+   |         ----^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> tests\ehma_cuda_variants.rs:127:9
+    |
+127 |     let mut cuda = CudaEhma::new_with_policy(0, policy).expect("cuda ehma");
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused import: `FoscBuilder`
+ --> tests\fosc_cuda.rs:4:63
+  |
+4 |     fosc_batch_with_kernel, fosc_with_kernel, FoscBatchRange, FoscBuilder, FoscInput, FoscParams,
+  |                                                               ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `CfoBuilder`
+ --> tests\cfo_cuda.rs:4:60
+  |
+4 |     cfo_batch_with_kernel, cfo_with_kernel, CfoBatchRange, CfoBuilder, CfoInput, CfoParams,
+  |                                                            ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `my_project` (test "willr_cuda") generated 1 warning (run `cargo fix --test "willr_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "chop_cuda") generated 1 warning (run `cargo fix --test "chop_cuda"` to apply 1 suggestion)
+warning: `my_project` (bin "cci_many_dbg" test) generated 1 warning (1 duplicate)
+warning: `my_project` (test "kvo_cuda") generated 3 warnings
+warning: `my_project` (test "ift_rsi_cuda") generated 1 warning (run `cargo fix --test "ift_rsi_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "devstop_cuda") generated 1 warning (run `cargo fix --test "devstop_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "ehma_cuda_variants") generated 2 warnings (run `cargo fix --test "ehma_cuda_variants"` to apply 2 suggestions)
+warning: `my_project` (test "fosc_cuda") generated 1 warning (run `cargo fix --test "fosc_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "cfo_cuda") generated 1 warning (run `cargo fix --test "cfo_cuda"` to apply 1 suggestion)
+warning: unused import: `my_project::utilities::data_loader::Candles`
+ --> tests\kdj_cuda.rs:9:5
+  |
+9 | use my_project::utilities::data_loader::Candles;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `MediumAdBatchBuilder` and `MediumAdParams`
+ --> tests\medium_ad_cuda.rs:4:34
+  |
+4 |     medium_ad_batch_with_kernel, MediumAdBatchBuilder, MediumAdBatchRange, MediumAdBuilder,
+  |                                  ^^^^^^^^^^^^^^^^^^^^
+5 |     MediumAdParams,
+  |     ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> tests\edcf_cuda_variants.rs:77:9
+   |
+77 |     let mut cuda = CudaEdcf::new_with_policy(0, policy).expect("cuda edcf");
+   |         ----^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `SarBatchBuilder`
+ --> tests\sar_cuda.rs:3:52
+  |
+3 | use my_project::indicators::sar::{sar_with_kernel, SarBatchBuilder, SarInput, SarParams};
+  |                                                    ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `roc_batch_slice`
+ --> tests\roc_cuda.rs:4:5
+  |
+4 |     roc_batch_slice, roc_with_kernel, RocBatchRange, RocInput, RocParams,
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `tol`
+  --> tests\roc_cuda.rs:61:9
+   |
+61 |     let tol = 5e-3;
+   |         ^^^ help: if this is intentional, prefix it with an underscore: `_tol`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `DpoBuilder`
+ --> tests\dpo_cuda.rs:4:60
+  |
+4 |     dpo_batch_with_kernel, dpo_with_kernel, DpoBatchRange, DpoBuilder, DpoInput, DpoParams,
+  |                                                            ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `sweep`
+  --> tests\dpo_cuda.rs:47:9
+   |
+47 |     let sweep = DpoBatchRange {
+   |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_sweep`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `dev`
+  --> tests\dpo_cuda.rs:58:9
+   |
+58 |     let dev = cuda
+   |         ^^^ help: if this is intentional, prefix it with an underscore: `_dev`
+
+warning: unused variable: `params`
+   --> tests\dpo_cuda.rs:119:13
+    |
+119 |         let params = DpoParams {
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_params`
+
+warning: unused import: `MacdBatchBuilder`
+ --> tests\macd_cuda.rs:3:42
+  |
+3 | use my_project::indicators::macd::{macd, MacdBatchBuilder, MacdBatchRange, MacdInput, MacdParams};
+  |                                          ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `expand_grid_count` is never used
+   --> tests\dema_cuda.rs:135:4
+    |
+135 | fn expand_grid_count(range: &DemaBatchRange) -> usize {
+    |    ^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `params`
+   --> tests\srsi_cuda.rs:119:13
+    |
+119 |         let params = SrsiParams {
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_params`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `my_project` (test "kdj_cuda") generated 1 warning (run `cargo fix --test "kdj_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "medium_ad_cuda") generated 1 warning (run `cargo fix --test "medium_ad_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "edcf_cuda_variants") generated 1 warning (run `cargo fix --test "edcf_cuda_variants"` to apply 1 suggestion)
+warning: `my_project` (test "sar_cuda") generated 1 warning (run `cargo fix --test "sar_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "roc_cuda") generated 2 warnings (run `cargo fix --test "roc_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "dpo_cuda") generated 4 warnings (run `cargo fix --test "dpo_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "macd_cuda") generated 1 warning (run `cargo fix --test "macd_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "dema_cuda") generated 1 warning
+warning: `my_project` (test "srsi_cuda") generated 1 warning
+warning: unused import: `fisher_batch_with_kernel`
+ --> tests\fisher_cuda.rs:4:5
+  |
+4 |     fisher_batch_with_kernel, fisher_with_kernel, FisherBatchBuilder, FisherBatchRange,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `input`
+   --> tests\chandelier_exit_cuda.rs:143:13
+    |
+143 |         let input = ChandelierExitInput {
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `CciCycleParams`
+ --> tests\cci_cycle_cuda.rs:4:54
+  |
+4 |     cci_cycle_batch_with_kernel, CciCycleBatchRange, CciCycleParams,
+  |                                                      ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `approx_eq` is never used
+  --> tests\cci_cycle_cuda.rs:15:4
+   |
+15 | fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
+   |    ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `TtmTrendBatchBuilder`
+ --> tests\ttm_trend_cuda.rs:2:57
+  |
+2 |     ttm_trend_batch_with_kernel, ttm_trend_with_kernel, TtmTrendBatchBuilder, TtmTrendBatchRange,
+  |                                                         ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `my_project::utilities::data_loader::Candles`
+ --> tests\ttm_trend_cuda.rs:5:5
+  |
+5 | use my_project::utilities::data_loader::Candles;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `DecOscBatchBuilder`
+ --> tests\dec_osc_cuda.rs:4:53
+  |
+4 |     dec_osc_batch_with_kernel, dec_osc_with_kernel, DecOscBatchBuilder, DecOscBatchRange,
+  |                                                     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `my_project` (test "fisher_cuda") generated 1 warning (run `cargo fix --test "fisher_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "chandelier_exit_cuda") generated 1 warning
+warning: `my_project` (test "cci_cycle_cuda") generated 2 warnings (run `cargo fix --test "cci_cycle_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "ttm_trend_cuda") generated 2 warnings (run `cargo fix --test "ttm_trend_cuda"` to apply 2 suggestions)
+warning: `my_project` (test "dec_osc_cuda") generated 1 warning (run `cargo fix --test "dec_osc_cuda"` to apply 1 suggestion)
+warning: variable does not need to be mutable
+  --> tests\rvi_cuda.rs:84:9
+   |
+84 |     let mut tm = vec![f64::NAN; cols * rows];
+   |         ----^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `approx_eq` is never used
+  --> tests\damiani_volatmeter_cuda.rs:13:4
+   |
+13 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+   |    ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> tests\ehlers_ecema_cuda_variants.rs:50:9
+   |
+50 |     let mut cuda_plain = CudaEhlersEcema::new_with_policy(
+   |         ----^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> tests\ehlers_ecema_cuda_variants.rs:68:9
+   |
+68 |     let mut cuda_tiled = CudaEhlersEcema::new_with_policy(
+   |         ----^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> tests\ehlers_ecema_cuda_variants.rs:155:9
+    |
+155 |     let mut cuda_1d = CudaEhlersEcema::new_with_policy(
+    |         ----^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> tests\ehlers_ecema_cuda_variants.rs:168:9
+    |
+168 |     let mut cuda_2d = CudaEhlersEcema::new_with_policy(
+    |         ----^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: `my_project` (test "rvi_cuda") generated 1 warning (run `cargo fix --test "rvi_cuda"` to apply 1 suggestion)
+warning: `my_project` (test "damiani_volatmeter_cuda") generated 1 warning
+warning: `my_project` (test "ehlers_ecema_cuda_variants") generated 4 warnings (run `cargo fix --test "ehlers_ecema_cuda_variants"` to apply 4 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running unittests src\lib.rs (target\debug\deps\my_project-3b58b211f02b02eb.exe)
+
+running 7170 tests
+....................................................................................... 87/7170
+....................................................................................... 174/7170
+....................................................................................... 261/7170
+....................................................................................... 348/7170
+....................................................................................... 435/7170
+....................................................................................... 522/7170
+....................................................................................... 609/7170
+....................................................................................... 696/7170
+....................................................................................... 783/7170
+....................................................................................... 870/7170
+....................................................................................... 957/7170
+....................................................................................... 1044/7170
+....................................................................................... 1131/7170
+....................................................................................... 1218/7170
+....................................................................................... 1305/7170
+....................................................................................... 1392/7170
+....................................................................................... 1479/7170
+....................................................................................... 1566/7170
+....................................................................................... 1653/7170
+....................................................................................... 1740/7170
+....................................................................................... 1827/7170
+....................................................................................... 1914/7170
+....................................................................................... 2001/7170
+....................................................................................... 2088/7170
+....................................................................................... 2175/7170
+....................................................................................... 2262/7170
+....................................................................................... 2349/7170
+....................................................................................... 2436/7170
+....................................................................................... 2523/7170
+....................................................................................... 2610/7170
+....................................................................................... 2697/7170
+....................................................................................... 2784/7170
+....................................................................................... 2871/7170
+....................................................................................... 2958/7170
+....................................................................................... 3045/7170
+....................................................................................... 3132/7170
+....................................................................................... 3219/7170
+....................................................................................... 3306/7170
+....................................................................................... 3393/7170
+....................................................................................... 3480/7170
+....................................................................................... 3567/7170
+....................................................................................... 3654/7170
+....................................................................................... 3741/7170
+....................................................................................... 3828/7170
+....................................................................................... 3915/7170
+....................................................................................... 4002/7170
+....................................................................................... 4089/7170
+....................................................................................... 4176/7170
+....................................................................................... 4263/7170
+....................................................................................... 4350/7170
+....................................................................................... 4437/7170
+....................................................................................... 4524/7170
+....................................................................................... 4611/7170
+....................................................................................... 4698/7170
+....................................................................................... 4785/7170
+....................................................................................... 4872/7170
+....................................................................................... 4959/7170
+....................................................................................... 5046/7170
+....................................................................................... 5133/7170
+....................................................................................... 5220/7170
+....................................................................................... 5307/7170
+....................................................................................... 5394/7170
+....................................................................................... 5481/7170
+....................................................................................... 5568/7170
+....................................................................................... 5655/7170
+....................................................................................... 5742/7170
+....................................................................................... 5829/7170
+....................................................................................... 5916/7170
+....................................................................................... 6003/7170
+....................................................................................... 6090/7170
+....................................................................................... 6177/7170
+....................................................................................... 6264/7170
+....................................................................................... 6351/7170
+....................................................................................... 6438/7170
+....................................................................................... 6525/7170
+....................................................................................... 6612/7170
+....................................................................................... 6699/7170
+....................................................................................... 6786/7170
+....................................................................................... 6873/7170
+....................................................................................... 6960/7170
+....................................................................................... 7047/7170
+....................................................................................... 7134/7170
+....................................
+test result: ok. 7170 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 256.66s
+
+     Running unittests src\bin\cci_dbg.rs (target\debug\deps\cci_dbg-371149f91990ce44.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\cci_many_dbg.rs (target\debug\deps\cci_many_dbg-e41fea320048d331.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\debug_aroon_gpu.rs (target\debug\deps\debug_aroon_gpu-d50d8651935ac4df.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\generate_references.rs (target\debug\deps\generate_references-3d293c65a02d9d22.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\my_project_cli-a34cf4186bfee315.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\test_binding_overhead.rs (target\debug\deps\test_binding_overhead-6e1018fd0e1bcb72.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\acosc_cuda.rs (target\debug\deps\acosc_cuda-bf2c08d28469cf7f.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\ad_cuda.rs (target\debug\deps\ad_cuda-b454df64216442e3.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests\adosc_cuda.rs (target\debug\deps\adosc_cuda-aa78079924c9bd04.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests\adx_cuda.rs (target\debug\deps\adx_cuda-5504b77cabbc8adc.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests\adxr_cuda.rs (target\debug\deps\adxr_cuda-e4fbec042ee3e700.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests\alligator_cuda.rs (target\debug\deps\alligator_cuda-eab1b191fa063c95.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+
+     Running tests\alma_cuda.rs (target\debug\deps\alma_cuda-63893ffbaf5ab314.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running tests\alma_cuda_variants.rs (target\debug\deps\alma_cuda_variants-33f0ee519561c2a4.exe)
+
+running 7 tests
+.......
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.50s
+
+     Running tests\alphatrend_cuda.rs (target\debug\deps\alphatrend_cuda-07374ee0a8abec8d.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests\ao_cuda.rs (target\debug\deps\ao_cuda-17732a2310e4d7e9.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests\apo_cuda.rs (target\debug\deps\apo_cuda-c30c1b28c8e413e8.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests\aroon_cuda.rs (target\debug\deps\aroon_cuda-14d37e6022409483.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.89s
+
+     Running tests\aroonosc_cuda.rs (target\debug\deps\aroonosc_cuda-e5c991113b489270.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests\aso_cuda.rs (target\debug\deps\aso_cuda-a3397d9bfc23cde4.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests\atr_cpu_only.rs (target\debug\deps\atr_cpu_only-15dcd28b0c3127e0.exe)
+
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\atr_cuda.rs (target\debug\deps\atr_cuda-642b38ef2477dde1.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests\avsl_cuda.rs (target\debug\deps\avsl_cuda-38224ac7fdefb0cf.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+     Running tests\bandpass_cuda.rs (target\debug\deps\bandpass_cuda-d1d34019725c457e.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests\bollinger_bands_cuda.rs (target\debug\deps\bollinger_bands_cuda-5bbd94dc63b430d1.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests\bollinger_bands_width_cuda.rs (target\debug\deps\bollinger_bands_width_cuda-85e8d4a0029c0fa5.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+     Running tests\bop_cuda.rs (target\debug\deps\bop_cuda-3bfd1f559263bcf9.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\buff_averages_cuda.rs (target\debug\deps\buff_averages_cuda-b89d5f836bec5043.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests\buff_averages_cuda_variants.rs (target\debug\deps\buff_averages_cuda_variants-913a2581a44b0fbd.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+     Running tests\cci_cuda.rs (target\debug\deps\cci_cuda-0b48c24024e5852e.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests\cci_cycle_cuda.rs (target\debug\deps\cci_cycle_cuda-ad1eb9c51b0bbb2d.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+     Running tests\cfo_cuda.rs (target\debug\deps\cfo_cuda-cb7756cb77a38df3.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests\cg_cuda.rs (target\debug\deps\cg_cuda-ce9a3c1107849910.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests\chande_cuda.rs (target\debug\deps\chande_cuda-bdb2afa3f19a0a23.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+     Running tests\chandelier_exit_cuda.rs (target\debug\deps\chandelier_exit_cuda-5fbb74504d3a941d.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests\chop_cuda.rs (target\debug\deps\chop_cuda-4eca71b852fdced3.exe)
+
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests\cksp_cuda.rs (target\debug\deps\cksp_cuda-f16b122d194b3c22.exe)
+
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests\cmo_cuda.rs (target\debug\deps\cmo_cuda-f2955d03016f8061.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests\coppock_cuda.rs (target\debug\deps\coppock_cuda-cca2bc17f5d4ddd2.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests\cora_wave_cuda.rs (target\debug\deps\cora_wave_cuda-41f1cb3787bd1e60.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests\correl_hl_cuda.rs (target\debug\deps\correl_hl_cuda-ab0e45902e1a27fa.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running tests\correlation_cycle_cuda.rs (target\debug\deps\correlation_cycle_cuda-af209c46d26cf28e.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests\cvi_cuda.rs (target\debug\deps\cvi_cuda-fb1fab1eed34c122.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests\cwma_cuda.rs (target\debug\deps\cwma_cuda-e81d0bd4002d0dc9.exe)
+
+running 5 tests
+.....
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+     Running tests\damiani_volatmeter_cuda.rs (target\debug\deps\damiani_volatmeter_cuda-0c9894f4379931f9.exe)
+
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\dec_osc_cuda.rs (target\debug\deps\dec_osc_cuda-8249737107902d9f.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests\decycler_cuda.rs (target\debug\deps\decycler_cuda-7f75e4bbb41baf16.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests\dema_cuda.rs (target\debug\deps\dema_cuda-4ea2af63f692980e.exe)
+
+running 4 tests
+....
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests\deviation_cuda.rs (target\debug\deps\deviation_cuda-133c15834da459c2.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests\devstop_cuda.rs (target\debug\deps\devstop_cuda-26d9a39bc921904e.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+     Running tests\di_cuda.rs (target\debug\deps\di_cuda-a598627996b22827.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests\dm_cuda.rs (target\debug\deps\dm_cuda-d14e4332fe9e356d.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\dma_cuda.rs (target\debug\deps\dma_cuda-b446ac5068f62918.exe)
+
+running 4 tests
+....
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+     Running tests\dma_cuda_variants.rs (target\debug\deps\dma_cuda_variants-5ce99baa02614550.exe)
+
+running 6 tests
+......
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s
+
+     Running tests\donchian_cuda.rs (target\debug\deps\donchian_cuda-7aefe410e22e613d.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests\dpo_cuda.rs (target\debug\deps\dpo_cuda-9807d2f8106819a5.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests\dti_cuda.rs (target\debug\deps\dti_cuda-e3ba8d666b47eab9.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests\dvdiqqe_cuda.rs (target\debug\deps\dvdiqqe_cuda-9e0db8897323c66c.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.12s
+
+     Running tests\dx_cuda.rs (target\debug\deps\dx_cuda-3c1bc54ea6b9cdfe.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running tests\edcf_cuda.rs (target\debug\deps\edcf_cuda-c52d93788332e592.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\edcf_cuda_variants.rs (target\debug\deps\edcf_cuda_variants-5212c885b3b3c06a.exe)
+
+running 6 tests
+......
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.13s
+
+     Running tests\efi_cuda.rs (target\debug\deps\efi_cuda-4411723e6e243f77.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests\ehlers_ecema_cuda.rs (target\debug\deps\ehlers_ecema_cuda-1b6c0c3e5cd65157.exe)
+
+running 4 tests
+....
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests\ehlers_ecema_cuda_variants.rs (target\debug\deps\ehlers_ecema_cuda_variants-de2942f9b3b9f9a8.exe)
+
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+     Running tests\ehlers_itrend_cuda.rs (target\debug\deps\ehlers_itrend_cuda-706cc65cac0048ca.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests\ehlers_kama_cuda.rs (target\debug\deps\ehlers_kama_cuda-d36264cf07f9df75.exe)
+
+running 4 tests
+....
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running tests\ehlers_pma_cuda.rs (target\debug\deps\ehlers_pma_cuda-495572079f9bdfa8.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests\ehlers_pma_cuda_variants.rs (target\debug\deps\ehlers_pma_cuda_variants-410b9d6fee652b48.exe)
+
+running 6 tests
+......
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.47s
+
+     Running tests\ehma_cuda.rs (target\debug\deps\ehma_cuda-b68726c47877fe09.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\ehma_cuda_variants.rs (target\debug\deps\ehma_cuda_variants-730379bc08f9739c.exe)
+
+running 6 tests
+......
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.31s
+
+     Running tests\ema_cuda.rs (target\debug\deps\ema_cuda-f219ae7a90ab28e6.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests\emd_cuda.rs (target\debug\deps\emd_cuda-c400bb81003b6c2b.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests\emv_cuda.rs (target\debug\deps\emv_cuda-6fd70ae7bcdc15ee.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\epma_cuda.rs (target\debug\deps\epma_cuda-6d60db25202469b3.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests\er_cuda.rs (target\debug\deps\er_cuda-14849e593657eb0f.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests\eri_cuda.rs (target\debug\deps\eri_cuda-ea5f3ad371cc8feb.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests\fisher_cuda.rs (target\debug\deps\fisher_cuda-25e0d5077a9e73a6.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests\fosc_cuda.rs (target\debug\deps\fosc_cuda-5289d02f7f359121.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running tests\frama_cuda.rs (target\debug\deps\frama_cuda-3bee6e2020f24415.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+     Running tests\fvg_trailing_stop_cuda.rs (target\debug\deps\fvg_trailing_stop_cuda-2e090cd8afc024fe.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+     Running tests\fwma_cuda.rs (target\debug\deps\fwma_cuda-edf65ec685b1f817.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests\gatorosc_cuda.rs (target\debug\deps\gatorosc_cuda-54ec2869b3bdebf4.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s
+
+     Running tests\gaussian_cuda.rs (target\debug\deps\gaussian_cuda-d3f88f223448ff4b.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests\halftrend_cuda.rs (target\debug\deps\halftrend_cuda-e5c61efdddc42a19.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests\highpass_2_pole_cuda.rs (target\debug\deps\highpass_2_pole_cuda-dff5051acbacc002.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests\highpass_cuda.rs (target\debug\deps\highpass_cuda-19130d6b91e1a036.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\hma_cuda.rs (target\debug\deps\hma_cuda-134205ecb1470f8f.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests\hwma_cuda.rs (target\debug\deps\hwma_cuda-f0b72a731d679e0b.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests\ift_rsi_cuda.rs (target\debug\deps\ift_rsi_cuda-8e9ac39b19456338.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests\jma_cuda.rs (target\debug\deps\jma_cuda-5eb90a3711acb6c5.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests\jsa_cuda.rs (target\debug\deps\jsa_cuda-c52de7fec25128f5.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests\kama_cuda.rs (target\debug\deps\kama_cuda-eb791b0317535d66.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests\kaufmanstop_cuda.rs (target\debug\deps\kaufmanstop_cuda-ef49db42f317391f.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
+
+     Running tests\kdj_cuda.rs (target\debug\deps\kdj_cuda-3351475b4034e530.exe)
+
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests\keltner_cuda.rs (target\debug\deps\keltner_cuda-eff89574c0aa23f0.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests\kst_cuda.rs (target\debug\deps\kst_cuda-f508a5f7c71bfa61.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests\kurtosis_cuda.rs (target\debug\deps\kurtosis_cuda-816b08ef232d1158.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests\kvo_cuda.rs (target\debug\deps\kvo_cuda-35b9573b786ecd7f.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests\linearreg_angle_cuda.rs (target\debug\deps\linearreg_angle_cuda-f78866f02a6f7996.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests\linearreg_intercept_cuda.rs (target\debug\deps\linearreg_intercept_cuda-37fdef9362162e52.exe)
+
+running 4 tests
+....
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests\linearreg_slope_cuda.rs (target\debug\deps\linearreg_slope_cuda-83af5b1f7934d8df.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests\linreg_cuda.rs (target\debug\deps\linreg_cuda-2609ab70ab157a63.exe)
+
+running 4 tests
+....
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running tests\lpc_cuda.rs (target\debug\deps\lpc_cuda-b38e6026ff4dbc34.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests\lrsi_cuda.rs (target\debug\deps\lrsi_cuda-38d0d17b64abef6f.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests\maaq_cuda.rs (target\debug\deps\maaq_cuda-4731394b80d604ac.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\mab_cuda.rs (target\debug\deps\mab_cuda-cb6769a338bc5b9d.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+     Running tests\macd_cuda.rs (target\debug\deps\macd_cuda-b903093ebd1f0f5d.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests\macz_cuda.rs (target\debug\deps\macz_cuda-a601105ac1ae9d31.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
+
+     Running tests\mama_cuda.rs (target\debug\deps\mama_cuda-4f3e8ff58b9de244.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests\marketefi_cuda.rs (target\debug\deps\marketefi_cuda-8d5bf9cc30b22121.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\mass_cuda.rs (target\debug\deps\mass_cuda-44cdc3af1bf371cb.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests\mean_ad_cuda.rs (target\debug\deps\mean_ad_cuda-f9b0f4ae5452394e.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests\medium_ad_cuda.rs (target\debug\deps\medium_ad_cuda-dfd969e55c54578a.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests\medprice_cuda.rs (target\debug\deps\medprice_cuda-2cb0225df82a8bae.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests\mfi_cuda.rs (target\debug\deps\mfi_cuda-3ed783421f0c535e.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests\minmax_cuda.rs (target\debug\deps\minmax_cuda-93cbc7f4d47daa76.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+
+     Running tests\mod_god_mode_cuda.rs (target\debug\deps\mod_god_mode_cuda-f0ebeb2e76f58bbd.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
+
+     Running tests\mom_cuda.rs (target\debug\deps\mom_cuda-8ef48d816af47526.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\msw_cuda.rs (target\debug\deps\msw_cuda-4730f9b79b0fdc91.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests\mwdx_cuda.rs (target\debug\deps\mwdx_cuda-162634606357a8a0.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests\nadaraya_watson_envelope_cuda.rs (target\debug\deps\nadaraya_watson_envelope_cuda-85251d8a585ecea6.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+     Running tests\nama_cuda.rs (target\debug\deps\nama_cuda-5a40981e9a49a1b9.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests\natr_cuda.rs (target\debug\deps\natr_cuda-f80e9f7b94ef13f1.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests\net_myrsi_cuda.rs (target\debug\deps\net_myrsi_cuda-04ea707fa769ee58.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+     Running tests\nma_cuda.rs (target\debug\deps\nma_cuda-31ce13c4abe99e0c.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests\nvi_cuda.rs (target\debug\deps\nvi_cuda-3e3818bd4a6599bd.exe)
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests\obv_cuda.rs (target\debug\deps\obv_cuda-267052f2ea894b20.exe)
+
+running 3 tests

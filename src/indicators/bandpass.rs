@@ -332,9 +332,9 @@ pub fn bandpass_with_kernel(
     hp_params.period = Some(hp_period);
     let hp = highpass(&HighPassInput::from_slice(data, hp_params))?.values;
 
-    // Determine warmup period from the highpass output
-    let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(0);
-    let warmup_bp = first_valid_hp.max(2); // bp calculation starts from index 2
+    // Warmup: need a finite HP triplet (hp[i], hp[i-1], hp[i-2]) to seed the 2nd-order IIR.
+    let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(len);
+    let warmup_bp = first_valid_hp.saturating_add(2).max(2).min(len);
 
     // filter constants
     let beta = (2.0 * std::f64::consts::PI / period as f64).cos();
@@ -344,17 +344,20 @@ pub fn bandpass_with_kernel(
     // Allocate bp with NaN prefix only; remainder left uninitialized to reduce writes
     let mut bp = alloc_with_nan_prefix(len, warmup_bp);
 
-    // compute bp
+    // compute bp (seed from the first finite triplet)
+    let bp_start = warmup_bp.saturating_sub(2);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                bandpass_scalar(&hp, period, alpha, beta, &mut bp)
+                bandpass_scalar(&hp[bp_start..], period, alpha, beta, &mut bp[bp_start..])
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => bandpass_avx2(&hp, period, alpha, beta, &mut bp),
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                bandpass_avx2(&hp[bp_start..], period, alpha, beta, &mut bp[bp_start..])
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                bandpass_avx512(&hp, period, alpha, beta, &mut bp)
+                bandpass_avx512(&hp[bp_start..], period, alpha, beta, &mut bp[bp_start..])
             }
             _ => unreachable!(),
         }
@@ -469,26 +472,29 @@ pub fn bandpass_into_slice(
     hp_params.period = Some(hp_period);
     let hp = highpass(&HighPassInput::from_slice(data, hp_params))?.values;
 
-    // Determine warmup period from the highpass output (consistent with bandpass_with_kernel)
-    let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(0);
-    let warm_bp = first_valid_hp.max(2);
+    // Warmup: need a finite HP triplet (hp[i], hp[i-1], hp[i-2]) to seed the 2nd-order IIR.
+    let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(len);
+    let warm_bp = first_valid_hp.saturating_add(2).max(2).min(len);
 
     // constants
     let beta = (2.0 * std::f64::consts::PI / period as f64).cos();
     let gamma = (2.0 * std::f64::consts::PI * bandwidth / period as f64).cos();
     let alpha = 1.0 / gamma - ((1.0 / (gamma * gamma)) - 1.0).sqrt();
 
-    // compute bp directly into bp_dst; do not touch prefix
+    // compute bp directly into bp_dst; seed from the first finite triplet
+    let bp_start = warm_bp.saturating_sub(2);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                bandpass_scalar(&hp, period, alpha, beta, bp_dst)
+                bandpass_scalar(&hp[bp_start..], period, alpha, beta, &mut bp_dst[bp_start..])
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => bandpass_avx2(&hp, period, alpha, beta, bp_dst),
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                bandpass_avx2(&hp[bp_start..], period, alpha, beta, &mut bp_dst[bp_start..])
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                bandpass_avx512(&hp, period, alpha, beta, bp_dst)
+                bandpass_avx512(&hp[bp_start..], period, alpha, beta, &mut bp_dst[bp_start..])
             }
             _ => unreachable!(),
         }
@@ -1315,23 +1321,30 @@ fn bandpass_batch_inner_into(
                     let ksel = m.ksel;
                     let hp = hp_cache.get(&m.hp_p).expect("hp cache missing");
 
-                    // Warmups (consistent with bandpass_with_kernel)
-                    let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(0);
-                    let warm_bp = first_valid_hp.max(2);
+                    // Warmup: need a finite HP triplet (hp[i], hp[i-1], hp[i-2]) to seed the 2nd-order IIR.
+                    let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(cols);
+                    let warm_bp = first_valid_hp.saturating_add(2).max(2).min(cols);
+                    let bp_start = warm_bp.saturating_sub(2);
 
                     // constants
                     let beta = (2.0 * std::f64::consts::PI / period as f64).cos();
                     let gamma = (2.0 * std::f64::consts::PI * bandwidth / period as f64).cos();
                     let alpha = 1.0 / gamma - ((1.0 / (gamma * gamma)) - 1.0).sqrt();
 
-                    // compute bp in place
+                    // compute bp in place (seed from the first finite triplet)
                     unsafe {
                         match ksel {
-                            Kernel::Scalar => bandpass_scalar(&hp, period, alpha, beta, bp_r),
+                            Kernel::Scalar => {
+                                bandpass_scalar(&hp[bp_start..], period, alpha, beta, &mut bp_r[bp_start..])
+                            }
                             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                            Kernel::Avx2 => bandpass_avx2(&hp, period, alpha, beta, bp_r),
+                            Kernel::Avx2 => {
+                                bandpass_avx2(&hp[bp_start..], period, alpha, beta, &mut bp_r[bp_start..])
+                            }
                             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                            Kernel::Avx512 => bandpass_avx512(&hp, period, alpha, beta, bp_r),
+                            Kernel::Avx512 => {
+                                bandpass_avx512(&hp[bp_start..], period, alpha, beta, &mut bp_r[bp_start..])
+                            }
                             _ => unreachable!(),
                         }
                     }
@@ -1410,23 +1423,30 @@ fn bandpass_batch_inner_into(
                 let ksel = m.ksel;
                 let hp = hp_cache.get(&m.hp_p).expect("hp cache missing");
 
-                // Warmups (consistent with bandpass_with_kernel)
-                let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(0);
-                let warm_bp = first_valid_hp.max(2);
+                // Warmup: need a finite HP triplet (hp[i], hp[i-1], hp[i-2]) to seed the 2nd-order IIR.
+                let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(cols);
+                let warm_bp = first_valid_hp.saturating_add(2).max(2).min(cols);
+                let bp_start = warm_bp.saturating_sub(2);
 
                 // constants
                 let beta = (2.0 * std::f64::consts::PI / period as f64).cos();
                 let gamma = (2.0 * std::f64::consts::PI * bandwidth / period as f64).cos();
                 let alpha = 1.0 / gamma - ((1.0 / (gamma * gamma)) - 1.0).sqrt();
 
-                // compute bp in place
+                // compute bp in place (seed from the first finite triplet)
                 unsafe {
                     match ksel {
-                        Kernel::Scalar => bandpass_scalar(&hp, period, alpha, beta, bp_r),
+                        Kernel::Scalar => {
+                            bandpass_scalar(&hp[bp_start..], period, alpha, beta, &mut bp_r[bp_start..])
+                        }
                         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                        Kernel::Avx2 => bandpass_avx2(&hp, period, alpha, beta, bp_r),
+                        Kernel::Avx2 => {
+                            bandpass_avx2(&hp[bp_start..], period, alpha, beta, &mut bp_r[bp_start..])
+                        }
                         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                        Kernel::Avx512 => bandpass_avx512(&hp, period, alpha, beta, bp_r),
+                        Kernel::Avx512 => {
+                            bandpass_avx512(&hp[bp_start..], period, alpha, beta, &mut bp_r[bp_start..])
+                        }
                         _ => unreachable!(),
                     }
                 }
@@ -1508,23 +1528,30 @@ fn bandpass_batch_inner_into(
             hp_params.period = Some(hp_p);
             let hp = highpass(&HighPassInput::from_slice(data, hp_params))?.values;
 
-            // Warmups (consistent with bandpass_with_kernel)
-            let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(0);
-            let warm_bp = first_valid_hp.max(2);
+            // Warmup: need a finite HP triplet (hp[i], hp[i-1], hp[i-2]) to seed the 2nd-order IIR.
+            let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(cols);
+            let warm_bp = first_valid_hp.saturating_add(2).max(2).min(cols);
+            let bp_start = warm_bp.saturating_sub(2);
 
             // constants
             let beta = (2.0 * std::f64::consts::PI / period as f64).cos();
             let gamma = (2.0 * std::f64::consts::PI * bandwidth / period as f64).cos();
             let alpha = 1.0 / gamma - ((1.0 / (gamma * gamma)) - 1.0).sqrt();
 
-            // compute bp in place
+            // compute bp in place (seed from the first finite triplet)
             unsafe {
                 match ksel {
-                    Kernel::Scalar => bandpass_scalar(&hp, period, alpha, beta, bp_r),
+                    Kernel::Scalar => {
+                        bandpass_scalar(&hp[bp_start..], period, alpha, beta, &mut bp_r[bp_start..])
+                    }
                     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    Kernel::Avx2 => bandpass_avx2(&hp, period, alpha, beta, bp_r),
+                    Kernel::Avx2 => {
+                        bandpass_avx2(&hp[bp_start..], period, alpha, beta, &mut bp_r[bp_start..])
+                    }
                     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    Kernel::Avx512 => bandpass_avx512(&hp, period, alpha, beta, bp_r),
+                    Kernel::Avx512 => {
+                        bandpass_avx512(&hp[bp_start..], period, alpha, beta, &mut bp_r[bp_start..])
+                    }
                     _ => unreachable!(),
                 }
             }

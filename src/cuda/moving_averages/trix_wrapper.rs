@@ -351,6 +351,12 @@ impl CudaTrix {
             &mut d_out,
         )?;
 
+        // IMPORTANT: this wrapper returns a VRAM handle (`DeviceArrayF32`) but does not retain
+        // the input buffers. Because kernel launches and H2D/D2D ops are async on a NON_BLOCKING
+        // stream, we must synchronize before returning to avoid dropping inputs while the kernel
+        // is still reading them (can surface as CUDA_ERROR_ILLEGAL_ADDRESS).
+        self.stream.synchronize()?;
+
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: inputs.combos.len(),
@@ -516,6 +522,10 @@ impl CudaTrix {
             &mut d_out_tm,
         )?;
 
+        // Same rationale as batch: `d_prices_tm` / `d_first_valids` are owned by this function.
+        // Ensure the kernel completes before returning a VRAM handle that outlives those inputs.
+        self.stream.synchronize()?;
+
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
             rows,
@@ -582,7 +592,9 @@ impl CudaTrix {
             logs[i] = 0.0;
         }
         for i in first_valid..series_len {
-            logs[i] = prices[i].ln();
+            // Match scalar baseline more closely: scalar computes ln() in f64 on
+            // f32-rounded prices; round the f64 log back to f32 for device.
+            logs[i] = (prices[i] as f64).ln() as f32;
         }
 
         Ok(BatchInputs {

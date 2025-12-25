@@ -305,7 +305,7 @@ pub fn reflex_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64])
 
     // Rolling sum of last `period` ssf values (before including ssf[i])
     // At i == period this equals sum(ssf[0..period-1]).
-    let mut ssf_sum = if period == 1 { ssf[0] } else { ssf[0] + ssf[1] };
+    let mut ssf_sum = ssf[0] + ssf[1];
 
     // Precompute constants for the closed‑form
     let inv_p = 1.0 / (period as f64);
@@ -316,48 +316,59 @@ pub fn reflex_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64])
     let mut ms = 0.0_f64;
 
     // Main pass
-    for i in 2..len {
-        // Indices in the ring
-        let idx = i % ring_len;
-        let idx_im1 = (i - 1) % ring_len;
-        let idx_im2 = (i - 2) % ring_len;
+    let d_ptr = data.as_ptr();
+    let o_ptr = out.as_mut_ptr();
 
-        // 2‑pole smoothing: ssf[i] = c*(x[i]+x[i-1]) + b*ssf[i-1] - a2*ssf[i-2]
-        let di = data[i];
-        let dim1 = data[i - 1];
-        let ssf_im1 = ssf[idx_im1];
-        let ssf_im2 = ssf[idx_im2];
+    // Keep explicit ring indices to avoid `% ring_len` in the hot loop.
+    // With ring_len = period + 1, we have (i - period) ≡ (i + 1) (mod ring_len),
+    // so idx_ip is always the next slot after idx.
+    let mut idx_im2 = 0usize;
+    let mut idx_im1 = 1usize;
+    let mut idx = 2usize;
 
-        let t0 = c * (di + dim1);
-        let t1 = (-a2).mul_add(ssf_im2, t0); // t0 - a2*ssf[i-2]
-        let ssf_i = b.mul_add(ssf_im1, t1); // + b*ssf[i-1]
+    unsafe {
+        let mut i = 2usize;
+        while i < len {
+            let di = *d_ptr.add(i);
+            let dim1 = *d_ptr.add(i - 1);
+            let ssf_im1 = *ssf.get_unchecked(idx_im1);
+            let ssf_im2 = *ssf.get_unchecked(idx_im2);
 
-        // Store ssf[i]
-        ssf[idx] = ssf_i;
+            let t0 = c * (di + dim1);
+            let t1 = (-a2).mul_add(ssf_im2, t0);
+            let ssf_i = b.mul_add(ssf_im1, t1);
 
-        // Build initial window: accumulate ssf_sum until i == period
-        if i < period {
-            ssf_sum += ssf_i;
-            continue;
+            *ssf.get_unchecked_mut(idx) = ssf_i;
+
+            if i < period {
+                ssf_sum += ssf_i;
+            } else {
+                let mut idx_ip = idx + 1;
+                if idx_ip == ring_len {
+                    idx_ip = 0;
+                }
+                let ssf_ip = *ssf.get_unchecked(idx_ip);
+
+                let mean_lp = ssf_sum * inv_p;
+                let my_sum = ssf_i.mul_add(beta, ssf_ip * alpha) - mean_lp;
+
+                ms = (0.96_f64).mul_add(ms, 0.04_f64 * (my_sum * my_sum));
+                if ms > 0.0 {
+                    *o_ptr.add(i) = my_sum / ms.sqrt();
+                }
+
+                ssf_sum += ssf_i - ssf_ip;
+            }
+
+            idx_im2 = idx_im1;
+            idx_im1 = idx;
+            idx += 1;
+            if idx == ring_len {
+                idx = 0;
+            }
+
+            i += 1;
         }
-
-        // Closed‑form Reflex "my_sum" (O(1))
-        let idx_ip = (i - period) % ring_len;
-        let ssf_ip = ssf[idx_ip];
-
-        // mean of the last p values (ssf[i-1]..ssf[i-p])
-        let mean_lp = ssf_sum * inv_p;
-        // my_sum = beta*ssf[i] + alpha*ssf[i-p] - mean_last_p
-        let my_sum = ssf_i.mul_add(beta, ssf_ip * alpha) - mean_lp;
-
-        // EW variance proxy & normalization (per Ehlers)
-        ms = (0.96_f64).mul_add(ms, 0.04_f64 * (my_sum * my_sum));
-        if ms > 0.0 {
-            out[i] = my_sum / ms.sqrt();
-        }
-
-        // Roll the mean of last‑p for next step: remove ssf[i-p], add ssf[i]
-        ssf_sum += ssf_i - ssf_ip;
     }
 }
 

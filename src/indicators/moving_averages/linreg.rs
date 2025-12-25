@@ -381,22 +381,24 @@ fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
     let mut idx = first + period - 1; // index of *last* element in the current window
     let mut old_idx = first; // index of the oldest element in the current window
-    while idx < len {
-        let new_val = data[idx];
-        y_sum += new_val; // include newest sample
-        xy_sum += new_val * period_f; // its x = period
+    unsafe {
+        while idx < len {
+            let new_val = *data.get_unchecked(idx);
+            y_sum += new_val; // include newest sample
+            xy_sum += new_val * period_f; // its x = period
 
-        // coefficients
-        let b = (period_f * xy_sum - x_sum * y_sum) * denom_inv;
-        let a = (y_sum - b * x_sum) * inv_period;
-        out[idx] = a + b * period_f; // forecast next point (x = period)
+            // coefficients
+            let b = (period_f * xy_sum - x_sum * y_sum) * denom_inv;
+            let a = (y_sum - b * x_sum) * inv_period;
+            *out.get_unchecked_mut(idx) = a + b * period_f; // forecast next point (x = period)
 
-        // slide window: remove oldest point and shift indices by ‑1
-        xy_sum -= y_sum; // Σ(x·y) → Σ((x‑1)·y)
-        y_sum -= data[old_idx]; // drop y_{t‑period+1}
+            // slide window: remove oldest point and shift indices by ‑1
+            xy_sum -= y_sum; // Σ(x·y) → Σ((x‑1)·y)
+            y_sum -= *data.get_unchecked(old_idx); // drop y_{t‑period+1}
 
-        idx += 1;
-        old_idx += 1;
+            idx += 1;
+            old_idx += 1;
+        }
     }
 }
 

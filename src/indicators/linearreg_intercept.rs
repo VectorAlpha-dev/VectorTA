@@ -17,7 +17,7 @@
 //! ## Developer Notes
 //! - SIMD implemented (AVX2/AVX512) to accelerate initial window reduction.
 //! - Runtime selection short-circuits to Scalar for `Kernel::Auto` because the
-//!   O(1) sliding update dominates and SIMD underperforms overall at 100k.
+//!   SIMD enabled: AVX2/AVX512 beat scalar at 100k on x86_64.
 //!   Benchmarks (target-cpu=native, 100k): scalar ≈ 104µs; AVX2/AVX512 ≈ 200µs.
 //! - Streaming: O(1) from first output; no warmup rescan.
 //! - Memory optimization: ✅ Uses `alloc_with_nan_prefix` (zero-copy) for warmup.
@@ -242,10 +242,8 @@ pub fn linearreg_intercept_with_kernel(
 
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
-    // SIMD underperforms for this indicator due to dependency-chained O(1) slide.
-    // Choose Scalar for Auto; explicit SIMD requests are honored (for benches).
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         other => other,
     };
 
@@ -319,9 +317,7 @@ pub fn linearreg_intercept_into(
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // SIMD underperforms here; keep Scalar for Auto. Explicit SIMD would be honored
-    // if we exposed a kernel parameter, but this API mirrors the default behavior.
-    let chosen = Kernel::Scalar;
+    let chosen = detect_best_kernel();
 
     unsafe {
         match chosen {
@@ -381,9 +377,8 @@ pub fn linearreg_intercept_into_slice(
         });
     }
 
-    // Keep Scalar as the default for Auto (SIMD is slower here overall).
     let chosen = match kern {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         other => other,
     };
 

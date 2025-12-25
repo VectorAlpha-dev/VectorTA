@@ -494,7 +494,10 @@ pub fn sama_scalar(
 
         // Push current index into MAX deque (monotonically decreasing values)
         while max_len > 0 {
-            let last_pos = (max_head + max_len - 1) % cap;
+            let mut last_pos = max_head + max_len - 1;
+            if last_pos >= cap {
+                last_pos -= cap;
+            }
             let last_idx = max_idx[last_pos];
             let last_val = data[last_idx];
             if last_val <= p {
@@ -503,13 +506,19 @@ pub fn sama_scalar(
                 break;
             }
         }
-        let ins_pos_max = (max_head + max_len) % cap;
+        let mut ins_pos_max = max_head + max_len;
+        if ins_pos_max >= cap {
+            ins_pos_max -= cap;
+        }
         max_idx[ins_pos_max] = i;
         max_len += 1;
 
         // Push current index into MIN deque (monotonically increasing values)
         while min_len > 0 {
-            let last_pos = (min_head + min_len - 1) % cap;
+            let mut last_pos = min_head + min_len - 1;
+            if last_pos >= cap {
+                last_pos -= cap;
+            }
             let last_idx = min_idx[last_pos];
             let last_val = data[last_idx];
             if last_val >= p {
@@ -518,7 +527,10 @@ pub fn sama_scalar(
                 break;
             }
         }
-        let ins_pos_min = (min_head + min_len) % cap;
+        let mut ins_pos_min = min_head + min_len;
+        if ins_pos_min >= cap {
+            ins_pos_min -= cap;
+        }
         min_idx[ins_pos_min] = i;
         min_len += 1;
 

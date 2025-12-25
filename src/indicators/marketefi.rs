@@ -236,7 +236,11 @@ fn marketefi_prepare<'a>(
         .ok_or(MarketefiError::AllValuesNaN)?;
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // AVX-512 can downclock and underperform vs AVX2 here; prefer AVX2 when both are available.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 => Kernel::Avx2,
+            other => other,
+        },
         k => k,
     };
     Ok((high, low, volume, first, chosen))

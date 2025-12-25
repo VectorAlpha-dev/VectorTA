@@ -351,17 +351,17 @@ pub fn aroon_osc_scalar_highlow_into(
         let scale = 100.0 / length as f64;
         for i in start_i..len {
             let start = i + 1 - window;
-            let mut highest_val = high[start];
-            let mut lowest_val = low[start];
+            let mut highest_val = unsafe { *high.get_unchecked(start) };
+            let mut lowest_val = unsafe { *low.get_unchecked(start) };
             let mut highest_idx = start;
             let mut lowest_idx = start;
             for j in (start + 1)..=i {
-                let h_val = high[j];
+                let h_val = unsafe { *high.get_unchecked(j) };
                 if h_val > highest_val {
                     highest_val = h_val;
                     highest_idx = j;
                 }
-                let l_val = low[j];
+                let l_val = unsafe { *low.get_unchecked(j) };
                 if l_val < lowest_val {
                     lowest_val = l_val;
                     lowest_idx = j;
@@ -370,7 +370,9 @@ pub fn aroon_osc_scalar_highlow_into(
             // Aroon Osc = 100/length * ( (i - low_idx) - (i - high_idx) )
             //            = 100/length * (high_idx - low_idx)
             let v = (highest_idx as f64 - lowest_idx as f64) * scale;
-            out[i] = v.max(-100.0).min(100.0);
+            unsafe {
+                *out.get_unchecked_mut(i) = v.max(-100.0).min(100.0);
+            }
         }
         return;
     }

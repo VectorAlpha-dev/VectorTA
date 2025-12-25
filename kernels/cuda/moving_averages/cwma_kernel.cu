@@ -588,6 +588,19 @@ void cwma_multi_series_one_param_time_major_f32(
             out_tm[out_idx] = NAN;
         } else {
             float s = 0.0f, c = 0.0f;
+#if CWMA_WEIGHTS_OLDEST_FIRST
+            // Process window in chronological order: [t - wlen + 1 .. t]
+            const int start = t - weight_len + 1;
+            #pragma unroll 4
+            for (int k = 0; k < weight_len; ++k) {
+                const int in_idx = (start + k) * num_series + series_idx;
+                float term = __fmaf_rn(prices_tm[in_idx], shared_weights[k], 0.0f);
+                float y = term - c;
+                float u = s + y;
+                c = (u - s) - y;
+                s = u;
+            }
+#else
             #pragma unroll 4
             for (int k = 0; k < weight_len; ++k) {
                 const int in_idx = (t - k) * num_series + series_idx;
@@ -597,6 +610,7 @@ void cwma_multi_series_one_param_time_major_f32(
                 c = (u - s) - y;
                 s = u;
             }
+#endif
             out_tm[out_idx] = __fmul_rn(s, inv_norm);
         }
         t += stride;

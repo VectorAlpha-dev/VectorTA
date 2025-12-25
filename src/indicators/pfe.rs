@@ -258,7 +258,8 @@ fn pfe_prepare<'a>(
     }
 
     let chosen = match k {
-        Kernel::Auto => detect_best_kernel(),
+        // Single-series kernel is scalar-only; avoid runtime detection overhead for Auto.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     Ok((data, period, smoothing, first, chosen))
@@ -311,7 +312,8 @@ fn pfe_compute_into(
     let mut ema_val = 0.0f64;
 
     // Rolling loop: O(n), 1 sqrt per step
-    for t in start..len {
+    let last = len - 1;
+    for t in start..last {
         let cur = data[t];
         let past = data[t - period];
         let diff = cur - past;
@@ -319,12 +321,8 @@ fn pfe_compute_into(
         // Long leg = sqrt(diff^2 + period^2)
         let long_leg = (diff.mul_add(diff, p2)).sqrt();
 
-        // Compute raw, protect against vanishing denom
-        let raw = if denom <= f64::EPSILON {
-            0.0
-        } else {
-            100.0 * (long_leg / denom)
-        };
+        // denom is a sum of sqrt(1 + d^2) terms and cannot be zero for valid inputs.
+        let raw = 100.0 * (long_leg / denom);
         let signed = if diff > 0.0 { raw } else { -raw };
 
         // EMA smoothing with standard warmup seed
@@ -340,18 +338,31 @@ fn pfe_compute_into(
         out[t] = val;
 
         // Prepare denominator for next t (t+1)
-        if t + 1 < len {
-            let old = seg[head];
-            let next = data[t + 1];
-            let new_d = next - cur; // step between t and t+1
-            let new_s = (new_d.mul_add(new_d, 1.0)).sqrt();
-            denom += new_s - old;
-            seg[head] = new_s;
-            head += 1;
-            if head == period {
-                head = 0;
-            }
+        let old = seg[head];
+        let next = data[t + 1];
+        let new_d = next - cur; // step between t and t+1
+        let new_s = (new_d.mul_add(new_d, 1.0)).sqrt();
+        denom += new_s - old;
+        seg[head] = new_s;
+        head += 1;
+        if head == period {
+            head = 0;
         }
+    }
+
+    // Final point (no denom update needed)
+    if start <= last {
+        let cur = data[last];
+        let past = data[last - period];
+        let diff = cur - past;
+        let long_leg = (diff.mul_add(diff, p2)).sqrt();
+        let raw = 100.0 * (long_leg / denom);
+        let signed = if diff > 0.0 { raw } else { -raw };
+        out[last] = if !ema_started {
+            signed
+        } else {
+            alpha.mul_add(signed, one_minus_alpha * ema_val)
+        };
     }
 }
 

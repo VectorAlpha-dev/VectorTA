@@ -128,25 +128,13 @@ void trima_batch_f32_tiled(const float* __restrict__ prices,
     const int tile_end  = t1 - 1;
     const int tile_len  = tile_end - tile_base + 1; // in [1, TILE + period - 1]
 
-#if __CUDA_ARCH__ >= 800
-    namespace cg = cooperative_groups;
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope::thread_scope_block, 1> pstate;
-    auto block = cg::this_thread_block();
-    auto pipe  = cuda::make_pipeline(block, &pstate);
-    pipe.producer_acquire();
-    for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
-        cuda::memcpy_async(block, &tile[i], &prices[tile_base + i], sizeof(float), pipe);
-    }
-    pipe.producer_commit();
-    pipe.consumer_wait();
-    __syncthreads();
-    pipe.consumer_release();
-#else
+    // NOTE: This project embeds PTX and JIT-loads it via `cust::Module::from_ptx`.
+    // We intentionally avoid `cuda::memcpy_async`/pipeline here because it has
+    // produced incorrect loads under driver JIT in some environments.
     for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
         tile[i] = prices[tile_base + i];
     }
     __syncthreads();
-#endif
 
     // Each thread computes one output in this tile (or none if out-of-range).
     const int t = t0 + threadIdx.x;

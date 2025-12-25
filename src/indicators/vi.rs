@@ -724,7 +724,11 @@ pub fn vi_batch_with_kernel(
     k: Kernel,
 ) -> Result<ViBatchOutput, ViError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // AVX512 downclocks here; prefer AVX2 batch when available.
+        Kernel::Auto => match detect_best_batch_kernel() {
+            Kernel::Avx512Batch => Kernel::Avx2Batch,
+            other => other,
+        },
         other if other.is_batch() => other,
         other => {
             return Err(ViError::InvalidKernelForBatch(other));
@@ -2501,7 +2505,11 @@ pub fn vi_batch_py<'py>(
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
             Kernel::ScalarBatch => Kernel::Scalar,
-            Kernel::Auto => detect_best_batch_kernel().to_scalar_equivalent(),
+            Kernel::Auto => match detect_best_batch_kernel() {
+                Kernel::Avx512Batch => Kernel::Avx2Batch,
+                other => other,
+            }
+            .to_scalar_equivalent(),
             _ => Kernel::Scalar,
         };
         // helper to coerce Batch→Scalar like ALMA does

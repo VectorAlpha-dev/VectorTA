@@ -239,10 +239,16 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
         });
     }
 
-    let chosen = match kernel {
+    let mut chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
+    // Prefer AVX2 over AVX512 in Auto for Aroon: on many CPUs this kernel is consistently faster
+    // than AVX512 for this workload. Explicit Avx512 selection remains available via the API.
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
+        chosen = Kernel::Avx2;
+    }
 
     // Calculate warmup period with proper handling of leading NaNs
     let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;

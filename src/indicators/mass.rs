@@ -384,38 +384,67 @@ pub fn mass_scalar(
         let rp = ring.as_mut_ptr();
 
         let mut i = first_valid_idx;
+
+        // Phase 0: EMA1 warmup only (no EMA2 yet)
+        while i < start_ema2 {
+            let hl = *hp.add(i) - *lp.add(i);
+            ema1 = ema1.mul_add(INV_ALPHA, hl * ALPHA);
+            i += 1;
+        }
+
+        // i == start_ema2: seed EMA2 from EMA1, then update EMA2 once (matches legacy ordering)
+        {
+            let hl = *hp.add(i) - *lp.add(i);
+            ema1 = ema1.mul_add(INV_ALPHA, hl * ALPHA);
+            ema2 = ema1;
+            ema2 = ema2.mul_add(INV_ALPHA, ema1 * ALPHA);
+            i += 1;
+        }
+
+        // Phase 1: EMA1 + EMA2 warmup (no ratios yet)
+        while i < start_ratio {
+            let hl = *hp.add(i) - *lp.add(i);
+            ema1 = ema1.mul_add(INV_ALPHA, hl * ALPHA);
+            ema2 = ema2.mul_add(INV_ALPHA, ema1 * ALPHA);
+            i += 1;
+        }
+
+        // Phase 2: Build sliding ratio sum (no output until the window is full)
+        while i < start_out {
+            let hl = *hp.add(i) - *lp.add(i);
+            ema1 = ema1.mul_add(INV_ALPHA, hl * ALPHA);
+            ema2 = ema2.mul_add(INV_ALPHA, ema1 * ALPHA);
+
+            let ratio = ema1 / ema2;
+            sum_ratio -= *rp.add(ring_index);
+            *rp.add(ring_index) = ratio;
+            sum_ratio += ratio;
+
+            ring_index += 1;
+            if ring_index == period {
+                ring_index = 0;
+            }
+
+            i += 1;
+        }
+
+        // Phase 3: Full window – write outputs
         while i < n {
             let hl = *hp.add(i) - *lp.add(i);
-            // ema1 = ema1 * 0.8 + hl * 0.2
             ema1 = ema1.mul_add(INV_ALPHA, hl * ALPHA);
+            ema2 = ema2.mul_add(INV_ALPHA, ema1 * ALPHA);
 
-            if i == start_ema2 {
-                ema2 = ema1;
-            }
-            if i >= start_ema2 {
-                // ema2 = ema2 * 0.8 + ema1 * 0.2
-                ema2 = ema2.mul_add(INV_ALPHA, ema1 * ALPHA);
+            let ratio = ema1 / ema2;
+            sum_ratio -= *rp.add(ring_index);
+            *rp.add(ring_index) = ratio;
+            sum_ratio += ratio;
 
-                if i >= start_ratio {
-                    let ratio = ema1 / ema2;
-
-                    // Sliding sum via ring buffer
-                    sum_ratio -= *rp.add(ring_index);
-                    *rp.add(ring_index) = ratio;
-                    sum_ratio += ratio;
-
-                    // Advance ring index without modulo
-                    ring_index += 1;
-                    if ring_index == period {
-                        ring_index = 0;
-                    }
-
-                    if i >= start_out {
-                        *outp.add(i) = sum_ratio;
-                    }
-                }
+            ring_index += 1;
+            if ring_index == period {
+                ring_index = 0;
             }
 
+            *outp.add(i) = sum_ratio;
             i += 1;
         }
     }

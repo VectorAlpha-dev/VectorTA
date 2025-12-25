@@ -393,7 +393,9 @@ fn damiani_volatmeter_prepare<'a>(
 
     // Choose kernel
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // AVX2/AVX512 paths currently delegate to the scalar kernel; keep Auto on scalar
+        // to avoid AVX-512 downclock risk and reduce dispatch overhead.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -734,7 +736,8 @@ pub fn damiani_volatmeter_batch_with_kernel(
     k: Kernel,
 ) -> Result<DamianiVolatmeterBatchOutput, DamianiVolatmeterError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Batch kernels currently delegate to the scalar row kernel; keep Auto on scalar batch.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(DamianiVolatmeterError::InvalidKernelForBatch(other)),
     };

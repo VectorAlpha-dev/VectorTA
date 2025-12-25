@@ -26,10 +26,10 @@
 #define KAMA_PREFETCH_DIST 64        // steps ahead to prefetch when enabled
 #endif
 
-// Accurate KAMA smoothing constants
-static constexpr float ALPHA_FAST = 2.0f / 3.0f;   // fast = 2
-static constexpr float ALPHA_SLOW = 2.0f / 31.0f;  // slow = 30
-static constexpr float ALPHA_DIFF = (ALPHA_FAST - ALPHA_SLOW);
+// Match the scalar Rust implementation exactly (see `ehlers_kama_scalar`):
+// s = ((0.6667 * ER) + 0.0645)^2
+static constexpr float SC_MUL = 0.6667f;
+static constexpr float SC_ADD = 0.0645f;
 
 // Kahan compensated add for improved accuracy of rolling L1 sum
 __device__ __forceinline__
@@ -121,7 +121,7 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
 
         float ef = (delta_sum > 0.0f) ? (direction / delta_sum) : 0.0f;
         ef = __saturatef(ef);
-        float sc = fmaf(ALPHA_DIFF, ef, ALPHA_SLOW);
+        float sc = fmaf(SC_MUL, ef, SC_ADD);
         sc *= sc;
 
         float prev = fmaf(sc, cur_price - prev_price, prev_price);
@@ -154,7 +154,7 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
             float ef_i = (delta_sum > 0.0f) ? (fabsf(newest - anchor) / delta_sum) : 0.0f;
             ef_i = __saturatef(ef_i);
 
-            float sc_i = fmaf(ALPHA_DIFF, ef_i, ALPHA_SLOW);
+            float sc_i = fmaf(SC_MUL, ef_i, SC_ADD);
             sc_i *= sc_i;
             prev = fmaf(sc_i, newest - prev, prev);
 
@@ -238,7 +238,7 @@ void ehlers_kama_multi_series_one_param_f32(const float* __restrict__ prices_tm,
         }
     }
 
-    float sc = fmaf((ALPHA_FAST - ALPHA_SLOW), ef, ALPHA_SLOW);
+    float sc = fmaf(SC_MUL, ef, SC_ADD);
     sc *= sc;
     prev = fmaf(sc, current - prev, prev);
     out_tm[start * stride + series_idx] = prev;
@@ -287,7 +287,7 @@ void ehlers_kama_multi_series_one_param_f32(const float* __restrict__ prices_tm,
             }
         }
 
-        float sc_t = fmaf((ALPHA_FAST - ALPHA_SLOW), ef_t, ALPHA_SLOW);
+        float sc_t = fmaf(SC_MUL, ef_t, SC_ADD);
         sc_t *= sc_t;
         prev = fmaf(sc_t, newest - prev, prev);
         out_tm[cur_idx] = prev;
@@ -302,6 +302,7 @@ void ehlers_kama_multi_series_one_param_f32(const float* __restrict__ prices_tm,
 extern "C" __global__
 void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_tm,
                                                int period,
+                                               int ring_len,
                                                int num_series,
                                                int series_len,
                                                const int* __restrict__ first_valids,
@@ -320,6 +321,11 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
     // Assumption: caller prefilled out_tm with NaN for the whole buffer.
     if (warm >= series_len) return;
 
+    // Dynamic shared ring: sized by the launcher as `tile_series * (period-1) * sizeof(float)`.
+    // We gate usage using `ring_len` so callers can disable the ring when dynamic shared
+    // allocation exceeds device limits, while keeping the same kernel entrypoint.
+    extern __shared__ float s_ring[];
+
     // Ring length is (period-1). Use shared-memory ring when within static limits,
     // else fall back to the legacy global-load path.
     const int rb_len = period - 1;
@@ -329,13 +335,13 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
     const int MAX_TILE_SERIES = 128;
     const int MAX_RING        = 128;
 
-    bool use_ring = (tile_series <= MAX_TILE_SERIES) && (rb_len > 0) && (rb_len <= MAX_RING);
+    bool use_ring = (tile_series <= MAX_TILE_SERIES) && (rb_len > 0) && (rb_len <= MAX_RING)
+        && (ring_len == rb_len);
 
     float delta_sum = 0.0f, delta_c = 0.0f;
 
     if (use_ring) {
-        __shared__ float s_ring[MAX_TILE_SERIES * MAX_RING];
-        float* ring = &s_ring[lane * MAX_RING];
+        float* ring = &s_ring[lane * rb_len];
         int head = 0;
 
         // Warmup: build the initial delta_sum and fill the ring with the last (period-1) |Δ|
@@ -361,7 +367,7 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
 
         float ef0 = (delta_sum > 0.0f) ? (dir0 / delta_sum) : 0.0f;
         ef0 = __saturatef(ef0);
-        float sc0 = fmaf(ALPHA_DIFF, ef0, ALPHA_SLOW);
+        float sc0 = fmaf(SC_MUL, ef0, SC_ADD);
         sc0 *= sc0;
 
         float prev = fmaf(sc0, cur0 - prev_px0, prev_px0);
@@ -394,7 +400,7 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
                 : 0.0f;
             ef = __saturatef(ef);
 
-            float sc = fmaf(ALPHA_DIFF, ef, ALPHA_SLOW);
+            float sc = fmaf(SC_MUL, ef, SC_ADD);
             sc *= sc;
             prev = fmaf(sc, newest - prev, prev);
 
@@ -430,7 +436,7 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
 
         float ef = (delta_sum > 0.0f) ? (direction / delta_sum) : 0.0f;
         ef = __saturatef(ef);
-        float sc = fmaf(ALPHA_DIFF, ef, ALPHA_SLOW);
+        float sc = fmaf(SC_MUL, ef, SC_ADD);
         sc *= sc;
         prev = fmaf(sc, current - prev, prev);
         out_tm[start * stride + series_idx] = prev;
@@ -467,7 +473,7 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
             float ef_t = (delta_sum > 0.0f) ? (dir / delta_sum) : 0.0f;
             ef_t = __saturatef(ef_t);
 
-            float sc_t = fmaf(ALPHA_DIFF, ef_t, ALPHA_SLOW);
+            float sc_t = fmaf(SC_MUL, ef_t, SC_ADD);
             sc_t *= sc_t;
             prev = fmaf(sc_t, newest - prev, prev);
             out_tm[cur_idx] = prev;

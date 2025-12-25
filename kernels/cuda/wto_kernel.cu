@@ -238,9 +238,11 @@ void wto_many_series_one_param_time_major_f32(
     bool   esa_init = false, d_init = false, wt1_init = false;
     double esa = 0.0, d = 0.0, wt1 = 0.0;
 
-    // WT2 via 4-sample running sum updated by subtracting the outgoing sample (read from output)
-    int    wt2_count = 0;
-    double sum_wt1 = 0.0;
+    // WT2 via rolling SMA(4) over WT1 in FP64 (matches CPU scalar/batch semantics).
+    double ring[4] = {0.0, 0.0, 0.0, 0.0};
+    double rsum = 0.0;
+    int    rlen = 0;
+    int    rpos = 0;
 
     for (int t = 0; t < rows; ++t) {
         const float  price_f32 = __ldg(prices_tm + (size_t)t * cols + series);
@@ -267,13 +269,10 @@ void wto_many_series_one_param_time_major_f32(
             wt1 = ci0; wt1_init = true;
             wt1_col[t * cols] = static_cast<float>(wt1);
 
-            if (isfinite(wt1)) { sum_wt1 += wt1; }
-            if (wt2_count < 4) { ++wt2_count; }
-            if (wt2_count == 4) {
-                const double wt2d  = 0.25 * sum_wt1;
-                wt2_col[t * cols]  = static_cast<float>(wt2d);
-                hist_col[t * cols] = static_cast<float>(wt1 - wt2d);
-            }
+            ring[0] = wt1;
+            rsum = wt1;
+            rlen = 1;
+            rpos = 1;
         } else if (t > start_ci) {
             if (isfinite(abs_diff)) { d = fma(beta_ch, d, alpha_ch * abs_diff); }
             const double denom = 0.015 * d;
@@ -285,14 +284,17 @@ void wto_many_series_one_param_time_major_f32(
             if (isfinite(ci)) { wt1 = fma(beta_av, wt1, alpha_av * ci); }
             wt1_col[t * cols] = static_cast<float>(wt1);
 
-            if (isfinite(wt1)) { sum_wt1 += wt1; }
-            if (wt2_count < 4) { ++wt2_count; }
-            else {
-                const float old_f = wt1_col[(t - 4) * cols];
-                if (isfinite(static_cast<double>(old_f))) { sum_wt1 -= static_cast<double>(old_f); }
+            if (rlen < 4) {
+                ring[rlen] = wt1;
+                rsum += wt1;
+                ++rlen;
+            } else {
+                rsum += wt1 - ring[rpos];
+                ring[rpos] = wt1;
+                rpos = (rpos + 1) & 3;
             }
-            if (wt2_count == 4) {
-                const double wt2d  = 0.25 * sum_wt1;
+            if (rlen == 4) {
+                const double wt2d  = 0.25 * rsum;
                 wt2_col[t * cols]  = static_cast<float>(wt2d);
                 hist_col[t * cols] = static_cast<float>(wt1 - wt2d);
             }

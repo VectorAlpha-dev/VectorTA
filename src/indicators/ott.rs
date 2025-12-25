@@ -427,7 +427,8 @@ fn ott_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are stubs; avoid runtime detection overhead for Auto.
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 

@@ -225,6 +225,10 @@ pub fn acosc_scalar(high: &[f64], low: &[f64], osc: &mut [f64], change: &mut [f6
     const INV5: f64 = 1.0 / 5.0;
     const INV34: f64 = 1.0 / 34.0;
     let len = high.len();
+    debug_assert_eq!(low.len(), len);
+    debug_assert_eq!(osc.len(), len);
+    debug_assert_eq!(change.len(), len);
+    debug_assert!(len >= PERIOD_SMA34 + PERIOD_SMA5);
     let mut queue5 = [0.0; PERIOD_SMA5];
     let mut queue34 = [0.0; PERIOD_SMA34];
     let mut queue5_ao = [0.0; PERIOD_SMA5];
@@ -234,70 +238,78 @@ pub fn acosc_scalar(high: &[f64], low: &[f64], osc: &mut [f64], change: &mut [f6
     let mut idx5 = 0;
     let mut idx34 = 0;
     let mut idx5_ao = 0;
-    for i in 0..PERIOD_SMA34 {
-        let med = (high[i] + low[i]) * 0.5;
-        sum34 += med;
-        queue34[i] = med;
-        if i < PERIOD_SMA5 {
-            sum5 += med;
-            queue5[i] = med;
+
+    unsafe {
+        let h_ptr = high.as_ptr();
+        let l_ptr = low.as_ptr();
+        let osc_ptr = osc.as_mut_ptr();
+        let ch_ptr = change.as_mut_ptr();
+
+        for i in 0..PERIOD_SMA34 {
+            let med = (*h_ptr.add(i) + *l_ptr.add(i)) * 0.5;
+            sum34 += med;
+            queue34[i] = med;
+            if i < PERIOD_SMA5 {
+                sum5 += med;
+                queue5[i] = med;
+            }
         }
-    }
-    for i in PERIOD_SMA34..(PERIOD_SMA34 + PERIOD_SMA5 - 1) {
-        let med = (high[i] + low[i]) * 0.5;
-        sum34 += med - queue34[idx34];
-        queue34[idx34] = med;
-        idx34 += 1;
-        if idx34 == PERIOD_SMA34 {
-            idx34 = 0;
+        for i in PERIOD_SMA34..(PERIOD_SMA34 + PERIOD_SMA5 - 1) {
+            let med = (*h_ptr.add(i) + *l_ptr.add(i)) * 0.5;
+            sum34 += med - queue34[idx34];
+            queue34[idx34] = med;
+            idx34 += 1;
+            if idx34 == PERIOD_SMA34 {
+                idx34 = 0;
+            }
+            let sma34 = sum34 * INV34;
+            sum5 += med - queue5[idx5];
+            queue5[idx5] = med;
+            idx5 += 1;
+            if idx5 == PERIOD_SMA5 {
+                idx5 = 0;
+            }
+            let sma5 = sum5 * INV5;
+            let ao = sma5 - sma34;
+            sum5_ao += ao;
+            queue5_ao[idx5_ao] = ao;
+            idx5_ao += 1;
         }
-        let sma34 = sum34 * INV34;
-        sum5 += med - queue5[idx5];
-        queue5[idx5] = med;
-        idx5 += 1;
-        if idx5 == PERIOD_SMA5 {
-            idx5 = 0;
-        }
-        let sma5 = sum5 * INV5;
-        let ao = sma5 - sma34;
-        sum5_ao += ao;
-        queue5_ao[idx5_ao] = ao;
-        idx5_ao += 1;
-    }
-    if idx5_ao == PERIOD_SMA5 {
-        idx5_ao = 0;
-    }
-    let mut prev_res = 0.0;
-    for i in (PERIOD_SMA34 + PERIOD_SMA5 - 1)..len {
-        let med = (high[i] + low[i]) * 0.5;
-        sum34 += med - queue34[idx34];
-        queue34[idx34] = med;
-        idx34 += 1;
-        if idx34 == PERIOD_SMA34 {
-            idx34 = 0;
-        }
-        let sma34 = sum34 * INV34;
-        sum5 += med - queue5[idx5];
-        queue5[idx5] = med;
-        idx5 += 1;
-        if idx5 == PERIOD_SMA5 {
-            idx5 = 0;
-        }
-        let sma5 = sum5 * INV5;
-        let ao = sma5 - sma34;
-        let old_ao = queue5_ao[idx5_ao];
-        sum5_ao += ao - old_ao;
-        queue5_ao[idx5_ao] = ao;
-        idx5_ao += 1;
         if idx5_ao == PERIOD_SMA5 {
             idx5_ao = 0;
         }
-        let sma5_ao = sum5_ao * INV5;
-        let res = ao - sma5_ao;
-        let mom = res - prev_res;
-        prev_res = res;
-        osc[i] = res;
-        change[i] = mom;
+        let mut prev_res = 0.0;
+        for i in (PERIOD_SMA34 + PERIOD_SMA5 - 1)..len {
+            let med = (*h_ptr.add(i) + *l_ptr.add(i)) * 0.5;
+            sum34 += med - queue34[idx34];
+            queue34[idx34] = med;
+            idx34 += 1;
+            if idx34 == PERIOD_SMA34 {
+                idx34 = 0;
+            }
+            let sma34 = sum34 * INV34;
+            sum5 += med - queue5[idx5];
+            queue5[idx5] = med;
+            idx5 += 1;
+            if idx5 == PERIOD_SMA5 {
+                idx5 = 0;
+            }
+            let sma5 = sum5 * INV5;
+            let ao = sma5 - sma34;
+            let old_ao = queue5_ao[idx5_ao];
+            sum5_ao += ao - old_ao;
+            queue5_ao[idx5_ao] = ao;
+            idx5_ao += 1;
+            if idx5_ao == PERIOD_SMA5 {
+                idx5_ao = 0;
+            }
+            let sma5_ao = sum5_ao * INV5;
+            let res = ao - sma5_ao;
+            let mom = res - prev_res;
+            prev_res = res;
+            *osc_ptr.add(i) = res;
+            *ch_ptr.add(i) = mom;
+        }
     }
 }
 

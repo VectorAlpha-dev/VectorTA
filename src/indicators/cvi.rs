@@ -768,8 +768,25 @@ pub fn cvi_batch_with_kernel(
     k: Kernel,
 ) -> Result<CviBatchOutput, CviError> {
     let kernel = match k {
-        // Batch Auto: prefer ScalarBatch for CVI; SIMD batch isn't beneficial without rowwise parallel math
-        Kernel::Auto => Kernel::ScalarBatch,
+        Kernel::Auto => {
+            let k = detect_best_batch_kernel();
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                // AVX2 batch is typically faster than AVX-512 for this recurrence-heavy workload (downclock).
+                if k == Kernel::Avx512Batch
+                    && std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma")
+                {
+                    Kernel::Avx2Batch
+                } else {
+                    k
+                }
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            {
+                k
+            }
+        }
         other if other.is_batch() => other,
         other => return Err(CviError::InvalidKernelForBatch(other)),
     };

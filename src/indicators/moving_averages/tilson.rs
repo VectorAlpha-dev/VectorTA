@@ -468,16 +468,17 @@ pub fn tilson_scalar(
 
     // Output
     let start_idx = first_valid + lookback_total;
-    let end_idx = len - 1;
 
     unsafe {
         // first output value
         *outp.add(start_idx) = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
 
-        // remaining values
-        let mut idx = start_idx + 1;
-        while (first_valid + today) <= end_idx {
-            let x = *dp.add(today);
+        // remaining values (pointer walk; idx == first_valid + today always holds here)
+        let mut dp_cur = dp.add(today);
+        let dp_end = dp.add(len - first_valid);
+        let mut out_cur = outp.add(start_idx + 1);
+        while dp_cur < dp_end {
+            let x = *dp_cur;
             e1 = k * x + omk * e1;
             e2 = k * e1 + omk * e2;
             e3 = k * e2 + omk * e3;
@@ -485,10 +486,10 @@ pub fn tilson_scalar(
             e5 = k * e4 + omk * e5;
             e6 = k * e5 + omk * e6;
 
-            *outp.add(idx) = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
+            *out_cur = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
 
-            today += 1;
-            idx += 1;
+            dp_cur = dp_cur.add(1);
+            out_cur = out_cur.add(1);
         }
     }
 

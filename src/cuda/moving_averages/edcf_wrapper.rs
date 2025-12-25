@@ -280,7 +280,7 @@ impl CudaEdcf {
         // Prefer the rolling tiled variant only for sufficiently long series where
         // it shows measurable wins; for short series plain kernel improves numerical
         // agreement with the CPU scalar path and keeps launch overhead low.
-        let prefer_rolling = period >= 8 && len >= (period * 4) && len >= 8192;
+        let prefer_rolling = period >= 8 && len >= period.saturating_mul(4) && len >= 8192;
         let force = Self::dist_impl_override();
 
         if force == Some("plain") || (!prefer_rolling && force.is_none()) {

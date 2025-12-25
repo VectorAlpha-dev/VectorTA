@@ -266,7 +266,8 @@ pub fn efi_with_kernel(input: &EfiInput, kernel: Kernel) -> Result<EfiOutput, Ef
 
     let warm = first_valid_diff_index(price, volume, first); // exact warmup prefix
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are stubs that delegate to scalar; avoid dispatch overhead.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -337,7 +338,8 @@ pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result
 
     let warm = first_valid_diff_index(price, volume, first);
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are stubs that delegate to scalar; avoid dispatch overhead.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -393,22 +395,23 @@ pub fn efi_scalar(
         let v_cur = *v_ptr.add(start);
         let mut prev = (p_cur - p_prev) * v_cur;
         *o_ptr.add(start) = prev;
+        let mut prev_price = p_cur;
 
         // Main loop: carry last value across invalids; update EMA on valid triples
         let mut i = start + 1;
         while i < len {
             let pc = *p_ptr.add(i);
-            let pp = *p_ptr.add(i - 1);
             let vc = *v_ptr.add(i);
 
             // Fast NaN check: (x == x) is false iff x is NaN
-            let valid = (pc == pc) & (pp == pp) & (vc == vc);
+            let valid = (pc == pc) & (prev_price == prev_price) & (vc == vc);
             if valid {
-                let diff = (pc - pp) * vc;
+                let diff = (pc - prev_price) * vc;
                 // FMA where available: alpha*diff + (1-alpha)*prev
                 prev = alpha.mul_add(diff, one_minus_alpha * prev);
             }
             *o_ptr.add(i) = prev;
+            prev_price = pc;
             i += 1;
         }
     }
@@ -604,7 +607,8 @@ pub fn efi_batch_with_kernel(
     k: Kernel,
 ) -> Result<EfiBatchOutput, EfiError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // SIMD batch kernels are stubs that delegate to scalar; avoid dispatch overhead.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(EfiError::InvalidKernelForBatch(other)),
     };

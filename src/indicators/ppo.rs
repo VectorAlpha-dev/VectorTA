@@ -268,7 +268,7 @@ pub fn ppo_with_kernel(input: &PpoInput, kernel: Kernel) -> Result<PpoOutput, Pp
 
     let fast = input.get_fast_period();
     let slow = input.get_slow_period();
-    let ma_type = input.get_ma_type();
+    let ma_type = input.params.ma_type.as_deref().unwrap_or("sma");
 
     if fast == 0 || slow == 0 || fast > len || slow > len {
         return Err(PpoError::InvalidPeriod {
@@ -294,15 +294,15 @@ pub fn ppo_with_kernel(input: &PpoInput, kernel: Kernel) -> Result<PpoOutput, Pp
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                ppo_scalar(data, fast, slow, &ma_type, first, &mut out)
+                ppo_scalar(data, fast, slow, ma_type, first, &mut out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                ppo_avx2(data, fast, slow, &ma_type, first, &mut out)
+                ppo_avx2(data, fast, slow, ma_type, first, &mut out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                ppo_avx512(data, fast, slow, &ma_type, first, &mut out)
+                ppo_avx512(data, fast, slow, ma_type, first, &mut out)
             }
             _ => unreachable!(),
         }
@@ -320,7 +320,7 @@ pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result
 
     let fast = input.get_fast_period();
     let slow = input.get_slow_period();
-    let ma_type = input.get_ma_type();
+    let ma_type = input.params.ma_type.as_deref().unwrap_or("sma");
 
     if fast == 0 || slow == 0 || fast > data.len() || slow > data.len() {
         return Err(PpoError::InvalidPeriod {
@@ -355,13 +355,13 @@ pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                ppo_scalar(data, fast, slow, &ma_type, first, dst)
+                ppo_scalar(data, fast, slow, ma_type, first, dst)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => ppo_avx2(data, fast, slow, &ma_type, first, dst),
+            Kernel::Avx2 | Kernel::Avx2Batch => ppo_avx2(data, fast, slow, ma_type, first, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                ppo_avx512(data, fast, slow, &ma_type, first, dst)
+                ppo_avx512(data, fast, slow, ma_type, first, dst)
             }
             _ => unreachable!(),
         }

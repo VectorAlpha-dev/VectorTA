@@ -288,7 +288,9 @@ pub fn kvo_with_kernel(input: &KvoInput, kernel: Kernel) -> Result<KvoOutput, Kv
 
     let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + 1);
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are currently stubs (they call the scalar implementation). Avoid
+        // runtime detection overhead for `Kernel::Auto` on the single-series API.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -388,7 +390,9 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are currently stubs (they call the scalar implementation). Avoid
+        // runtime detection overhead for `Kernel::Auto` on the single-series API.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

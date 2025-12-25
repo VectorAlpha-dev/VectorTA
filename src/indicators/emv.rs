@@ -344,29 +344,42 @@ pub fn emv_scalar(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: 
     let len = high.len().min(low.len()).min(volume.len());
     let mut last_mid = 0.5 * (high[first] + low[first]);
 
-    // Tight, safe scalar loop with hoisted loads to minimize bounds checks
-    for i in (first + 1)..len {
-        let h = high[i];
-        let l = low[i];
-        let v = volume[i];
+    // Unsafe pointer-walk to remove bounds checks in the hot loop (scalar path parity with AVX2 stub).
+    unsafe {
+        let h_ptr = high.as_ptr();
+        let l_ptr = low.as_ptr();
+        let v_ptr = volume.as_ptr();
+        let o_ptr = out.as_mut_ptr();
 
-        if h.is_nan() || l.is_nan() || v.is_nan() {
-            out[i] = f64::NAN;
-            continue;
+        let mut i = first + 1;
+        while i < len {
+            let h = *h_ptr.add(i);
+            let l = *l_ptr.add(i);
+            let v = *v_ptr.add(i);
+
+            if h.is_nan() || l.is_nan() || v.is_nan() {
+                *o_ptr.add(i) = f64::NAN;
+                i += 1;
+                continue;
+            }
+
+            // Keep arithmetic order identical to streaming path
+            let current_mid = 0.5 * (h + l);
+            let range = h - l;
+            if range == 0.0 {
+                *o_ptr.add(i) = f64::NAN;
+                last_mid = current_mid; // advance last_mid on zero-range
+                i += 1;
+                continue;
+            }
+
+            let br = v / 10000.0 / range;
+            let dmid = current_mid - last_mid;
+            *o_ptr.add(i) = dmid / br;
+            last_mid = current_mid;
+
+            i += 1;
         }
-
-        // Keep arithmetic order identical to streaming path
-        let current_mid = 0.5 * (h + l);
-        let range = h - l;
-        if range == 0.0 {
-            out[i] = f64::NAN;
-            last_mid = current_mid; // advance last_mid on zero-range
-            continue;
-        }
-
-        let br = v / 10000.0 / range;
-        out[i] = (current_mid - last_mid) / br;
-        last_mid = current_mid;
     }
 }
 

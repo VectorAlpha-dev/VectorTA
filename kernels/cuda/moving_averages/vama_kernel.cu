@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
+#include <stdint.h>
 
 extern "C" __global__
 void vama_batch_f32(const float* __restrict__ prices,
@@ -36,47 +37,29 @@ void vama_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    const float alpha = alphas[combo];
-    const float beta = betas[combo];
+    // Match CPU EMA semantics: compute alpha/beta in FP64 from the period.
+    const double alpha = 2.0 / (static_cast<double>(base_period) + 1.0);
+    const double beta  = 1.0 - alpha;
     const int base_offset = combo * series_len;
-
-    for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
-        ema_buf[base_offset + idx] = NAN;
-        out[base_offset + idx] = NAN;
-    }
-    __syncthreads();
 
     if (threadIdx.x != 0) {
         return;
     }
 
+    // The public API returns only `out` (ema is an internal detail). Avoid a full
+    // O(N) init sweep + second write pass; write warmup NaNs and computed values
+    // exactly once.
+    for (int t = 0; t < first_valid; ++t) {
+        out[base_offset + t] = NAN;
+    }
+
     const float first_price_f = prices[first_valid];
     double mean = static_cast<double>(first_price_f);
     int valid_count = 1;
-    ema_buf[base_offset + first_valid] = static_cast<float>(mean);
 
     int warm_base_end = first_valid + base_period;
     if (warm_base_end > series_len) {
         warm_base_end = series_len;
-    }
-
-    for (int i = first_valid + 1; i < warm_base_end; ++i) {
-        const float price_f = prices[i];
-        if (isfinite(price_f)) {
-            const double prev_total = mean * static_cast<double>(valid_count);
-            ++valid_count;
-            mean = (prev_total + static_cast<double>(price_f)) / static_cast<double>(valid_count);
-        }
-        ema_buf[base_offset + i] = static_cast<float>(mean);
-    }
-
-    double prev = mean;
-    for (int i = warm_base_end; i < series_len; ++i) {
-        const float price_f = prices[i];
-        if (isfinite(price_f)) {
-            prev = static_cast<double>(beta) * prev + static_cast<double>(alpha) * static_cast<double>(price_f);
-        }
-        ema_buf[base_offset + i] = static_cast<float>(prev);
     }
 
     const int max_period = (base_period > vol_period) ? base_period : vol_period;
@@ -85,48 +68,140 @@ void vama_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    for (int i = warm; i < series_len; ++i) {
-        const float mid = ema_buf[base_offset + i];
-        if (!isfinite(mid)) {
-            out[base_offset + i] = NAN;
-            continue;
-        }
+    // Monotonic deques over deviation d_t = price_t - ema_t (FP64), matching CPU semantics.
+    // Shared memory layout (dynamic):
+    //   dq_max_vals[vol_period] (double)
+    //   dq_max_idx [vol_period] (int)
+    //   dq_min_vals[vol_period] (double)  (8-byte aligned)
+    //   dq_min_idx [vol_period] (int)
+    extern __shared__ unsigned char smem_rb[];
+    double* dq_max_vals = reinterpret_cast<double*>(smem_rb);
+    int* dq_max_idx = reinterpret_cast<int*>(dq_max_vals + vol_period);
+    uintptr_t p = reinterpret_cast<uintptr_t>(dq_max_idx + vol_period);
+    p = (p + 7u) & ~uintptr_t(7u);
+    double* dq_min_vals = reinterpret_cast<double*>(p);
+    int* dq_min_idx = reinterpret_cast<int*>(dq_min_vals + vol_period);
+    int headMax = 0, tailMax = 0;
+    int headMin = 0, tailMin = 0;
 
-        int window_len = vol_period;
+    // Update deques + outputs for the running-mean warmup tail (from first_valid+1 .. warm_base_end-1)
+    // NOTE: i=first_valid already has mean=price and was written above; process it too.
+    int i = first_valid;
+    double ema_d = mean;
+    double prev = mean;
+    for (; i < warm_base_end; ++i) {
+        const float price_f = prices[i];
+        if (i != first_valid && isfinite(price_f)) {
+            const double prev_total = mean * static_cast<double>(valid_count);
+            ++valid_count;
+            mean = (prev_total + static_cast<double>(price_f)) / static_cast<double>(valid_count);
+            prev = mean;
+        }
+        ema_d = mean;
+
         const int available = i + 1 - first_valid;
-        if (available < window_len) {
-            window_len = available;
-        }
-        if (window_len <= 0) {
-            out[base_offset + i] = NAN;
-            continue;
-        }
+        const int window_len = (available < vol_period) ? available : vol_period;
         const int start = i + 1 - window_len;
 
-        double vol_up = -CUDART_INF;
-        double vol_down = CUDART_INF;
-        for (int j = start; j <= i; ++j) {
-            const float ema_j = ema_buf[base_offset + j];
-            if (!isfinite(ema_j)) {
-                continue;
-            }
-            const float price_j = prices[j];
-            if (!isfinite(price_j)) {
-                continue;
-            }
-            const double dev = static_cast<double>(price_j) - static_cast<double>(ema_j);
-            if (dev > vol_up) {
-                vol_up = dev;
-            }
-            if (dev < vol_down) {
-                vol_down = dev;
-            }
+        while (headMax != tailMax) {
+            int idx = dq_max_idx[headMax];
+            if (idx >= start) break;
+            headMax = (headMax + 1) % vol_period;
+        }
+        while (headMin != tailMin) {
+            int idx = dq_min_idx[headMin];
+            if (idx >= start) break;
+            headMin = (headMin + 1) % vol_period;
         }
 
-        if (!isfinite(vol_up) || !isfinite(vol_down)) {
-            out[base_offset + i] = mid;
+        if (isfinite(price_f) && isfinite(static_cast<float>(ema_d))) {
+            const double d = static_cast<double>(price_f) - ema_d;
+
+            while (headMax != tailMax) {
+                int last = (tailMax == 0 ? vol_period - 1 : tailMax - 1);
+                if (dq_max_vals[last] <= d) {
+                    tailMax = last;
+                } else break;
+            }
+            dq_max_vals[tailMax] = d;
+            dq_max_idx[tailMax] = i;
+            tailMax = (tailMax + 1) % vol_period;
+
+            while (headMin != tailMin) {
+                int last = (tailMin == 0 ? vol_period - 1 : tailMin - 1);
+                if (dq_min_vals[last] >= d) {
+                    tailMin = last;
+                } else break;
+            }
+            dq_min_vals[tailMin] = d;
+            dq_min_idx[tailMin] = i;
+            tailMin = (tailMin + 1) % vol_period;
+        }
+
+        if (i < warm) {
+            out[base_offset + i] = NAN;
+        } else if (!isfinite(static_cast<float>(ema_d)) || headMax == tailMax || headMin == tailMin) {
+            out[base_offset + i] = static_cast<float>(ema_d);
         } else {
-            out[base_offset + i] = mid + static_cast<float>(0.5) * static_cast<float>(vol_up + vol_down);
+            const double adj = 0.5 * (dq_max_vals[headMax] + dq_min_vals[headMin]);
+            out[base_offset + i] = static_cast<float>(ema_d + adj);
+        }
+    }
+
+    // EMA phase (from first_valid+base_period onwards)
+    for (; i < series_len; ++i) {
+        const float price_f = prices[i];
+        if (isfinite(price_f)) {
+            prev = fma(beta, prev, alpha * static_cast<double>(price_f));
+        }
+        ema_d = prev;
+
+        const int available = i + 1 - first_valid;
+        const int window_len = (available < vol_period) ? available : vol_period;
+        const int start = i + 1 - window_len;
+
+        while (headMax != tailMax) {
+            int idx = dq_max_idx[headMax];
+            if (idx >= start) break;
+            headMax = (headMax + 1) % vol_period;
+        }
+        while (headMin != tailMin) {
+            int idx = dq_min_idx[headMin];
+            if (idx >= start) break;
+            headMin = (headMin + 1) % vol_period;
+        }
+
+        if (isfinite(price_f) && isfinite(static_cast<float>(ema_d))) {
+            const double d = static_cast<double>(price_f) - ema_d;
+
+            while (headMax != tailMax) {
+                int last = (tailMax == 0 ? vol_period - 1 : tailMax - 1);
+                if (dq_max_vals[last] <= d) {
+                    tailMax = last;
+                } else break;
+            }
+            dq_max_vals[tailMax] = d;
+            dq_max_idx[tailMax] = i;
+            tailMax = (tailMax + 1) % vol_period;
+
+            while (headMin != tailMin) {
+                int last = (tailMin == 0 ? vol_period - 1 : tailMin - 1);
+                if (dq_min_vals[last] >= d) {
+                    tailMin = last;
+                } else break;
+            }
+            dq_min_vals[tailMin] = d;
+            dq_min_idx[tailMin] = i;
+            tailMin = (tailMin + 1) % vol_period;
+        }
+
+        if (i < warm) {
+            out[base_offset + i] = NAN;
+        } else if (!isfinite(static_cast<float>(ema_d)) || headMax == tailMax || headMin == tailMin) {
+            out[base_offset + i] = static_cast<float>(ema_d);
+        } else {
+            const double adj = 0.5 * (dq_max_vals[headMax] + dq_min_vals[headMin]);
+            out[base_offset + i] = static_cast<float>(ema_d + adj);
         }
     }
 }

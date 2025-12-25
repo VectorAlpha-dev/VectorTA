@@ -114,12 +114,17 @@ extern "C" __global__ void macz_batch_f32(
             const int t1 = t + 1;
             const int t0 = t + 1 - lz;
             if (!window_has_nan(pref_close_nan, t1, t0)) {
+                const double ssum = window_sum(pref_close_sum, t1, t0);
                 const double ssum2 = window_sum(pref_close_sumsq, t1, t0);
-                double var = (ssum2 / (double)lz) - (mean_vwap * mean_vwap);
+                const double e = ssum / (double)lz;
+                const double e2 = ssum2 / (double)lz;
+                double var = fma(-2.0 * mean_vwap, e, e2) + (mean_vwap * mean_vwap);
                 if (var > 0.0) {
                     const double std = sqrt(var);
                     const double x = (double)close[t];
                     z = (x - mean_vwap) / std;
+                } else {
+                    z = 0.0;
                 }
             }
         }
@@ -274,11 +279,14 @@ extern "C" __global__ void macz_many_series_one_param_time_major_f32(
             const int t1 = t + 1, t0 = t + 1 - lz;
             if (!window_has_nan(pcn, t1, t0)) {
                 const double s2 = window_sum(pcsq, t1, t0) / (double)lz;
-                const double var = s2 - mean_vwap * mean_vwap;
+                const double s1 = window_sum(pcs, t1, t0) / (double)lz;
+                const double var = fma(-2.0 * mean_vwap, s1, s2) + (mean_vwap * mean_vwap);
                 if (var > 0.0) {
                     const double std = sqrt(var);
                     const double x = (double)close_tm[at(t)];
                     z = (x - mean_vwap) / std;
+                } else {
+                    z = 0.0;
                 }
             }
         }

@@ -50,10 +50,11 @@ fn ehlers_kama_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
         period: (5, 120, 5),
     };
 
-    let cpu = ehlers_kama_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
-
     let cuda = CudaEhlersKama::new(0).expect("CudaEhlersKama::new");
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    // Quantize CPU baseline inputs to the CUDA FP32 input domain.
+    let data_q: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
+    let cpu = ehlers_kama_batch_with_kernel(&data_q, &sweep, Kernel::ScalarBatch)?;
     let gpu = cuda
         .ehlers_kama_batch_dev(&data_f32, &sweep)
         .expect("cuda ehlers_kama_batch_dev");
@@ -108,10 +109,13 @@ fn ehlers_kama_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
     };
 
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
+    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
+    // Quantize CPU baseline inputs to the CUDA FP32 input domain.
+    let data_tm_q: Vec<f64> = data_tm_f32.iter().map(|&v| v as f64).collect();
     for j in 0..num_series {
         let mut series = vec![f64::NAN; series_len];
         for t in 0..series_len {
-            series[t] = data_tm[t * num_series + j];
+            series[t] = data_tm_q[t * num_series + j];
         }
         let out = EhlersKamaBuilder::new()
             .period(period)
@@ -122,7 +126,6 @@ fn ehlers_kama_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
     }
 
     let cuda = CudaEhlersKama::new(0).expect("CudaEhlersKama::new");
-    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let gpu = cuda
         .ehlers_kama_multi_series_one_param_time_major_dev(
             &data_tm_f32,
@@ -184,10 +187,13 @@ fn ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu(
     };
 
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
+    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
+    // Quantize CPU baseline inputs to the CUDA FP32 input domain.
+    let data_tm_q: Vec<f64> = data_tm_f32.iter().map(|&v| v as f64).collect();
     for j in 0..num_series {
         let mut series = vec![f64::NAN; series_len];
         for t in 0..series_len {
-            series[t] = data_tm[t * num_series + j];
+            series[t] = data_tm_q[t * num_series + j];
         }
         let out = EhlersKamaBuilder::new()
             .period(period)
@@ -205,7 +211,6 @@ fn ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu(
         },
     )
     .expect("CudaEhlersKama::new_with_policy");
-    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let gpu = cuda
         .ehlers_kama_multi_series_one_param_time_major_dev(
             &data_tm_f32,

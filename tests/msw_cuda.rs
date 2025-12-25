@@ -40,11 +40,11 @@ fn msw_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let sweep = MswBatchRange { period: (5, 40, 5) };
 
-    // CPU baseline
-    let cpu = msw_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
-
-    // GPU
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
+    let price_q: Vec<f64> = price_f32.iter().map(|&v| v as f64).collect();
+
+    let cpu = msw_batch_with_kernel(&price_q, &sweep, Kernel::ScalarBatch)?;
+
     let cuda = CudaMsw::new(0).expect("CudaMsw::new");
     let (dev, combos) = cuda
         .msw_batch_dev(&price_f32, &sweep)

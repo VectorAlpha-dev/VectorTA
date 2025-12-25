@@ -765,28 +765,30 @@ fn nama_core_with_tr(src: &[f64], period: usize, first: usize, tr: &[f64], out: 
     let mut ring: Vec<f64> = vec![0.0; period];
     let mut wr: usize = 0;
     let mut eff_sum = 0.0;
+    let period_minus_1 = period - 1;
+
+    let sp = src.as_ptr();
+    let trp = tr.as_ptr();
+    let op = out.as_mut_ptr();
+    let rp = ring.as_mut_ptr();
 
     // Warm-up
     for j in first..=i0 {
         push_max(&mut dq_max, src, j);
         push_min(&mut dq_min, src, j);
-        let v = tr[j];
-        ring[wr] = v;
+        let v = unsafe { *trp.add(j) };
+        unsafe { *rp.add(wr) = v };
         wr += 1;
         eff_sum += v;
     }
     wr = 0;
 
     // First output at i0
-    {
-        let hi = src[*dq_max.front().unwrap()];
-        let lo = src[*dq_min.front().unwrap()];
-        let alpha = if eff_sum != 0.0 {
-            (hi - lo) / eff_sum
-        } else {
-            0.0
-        };
-        out[i0] = alpha * src[i0];
+    unsafe {
+        let hi = *sp.add(*dq_max.front().unwrap_unchecked());
+        let lo = *sp.add(*dq_min.front().unwrap_unchecked());
+        let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+        *op.add(i0) = alpha * *sp.add(i0);
     }
 
     // Slide
@@ -795,28 +797,27 @@ fn nama_core_with_tr(src: &[f64], period: usize, first: usize, tr: &[f64], out: 
         let j = i;
         push_max(&mut dq_max, src, j);
         push_min(&mut dq_min, src, j);
-        let win_start = j + 1 - period;
+        let win_start = j - period_minus_1;
         pop_old(&mut dq_max, win_start);
         pop_old(&mut dq_min, win_start);
 
-        let old = ring[wr];
-        let add = tr[j];
+        let old = unsafe { *rp.add(wr) };
+        let add = unsafe { *trp.add(j) };
         eff_sum = eff_sum + add - old;
-        ring[wr] = add;
+        unsafe { *rp.add(wr) = add };
         wr += 1;
         if wr == period {
             wr = 0;
         }
 
-        let hi = src[*dq_max.front().unwrap()];
-        let lo = src[*dq_min.front().unwrap()];
-        let alpha = if eff_sum != 0.0 {
-            (hi - lo) / eff_sum
-        } else {
-            0.0
-        };
-        let prev_y = out[i - 1];
-        out[i] = (src[j] - prev_y).mul_add(alpha, prev_y);
+        unsafe {
+            let hi = *sp.add(*dq_max.front().unwrap_unchecked());
+            let lo = *sp.add(*dq_min.front().unwrap_unchecked());
+            let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+            let prev_y = *op.add(i - 1);
+            let x = *sp.add(j);
+            *op.add(i) = (x - prev_y).mul_add(alpha, prev_y);
+        }
         i += 1;
     }
 }

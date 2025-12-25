@@ -299,13 +299,13 @@ fn run_registered_benches(c: &mut Criterion) {
             }
         }
         let prep = scen.prep;
-        let mut state = prep();
-        // Pre-warm: run for a short, configurable time to stabilize clocks.
-        active_warmup(&mut *state);
         let inner = scen.inner_iters.unwrap_or(1);
         if inner > 1 {
             // Normalize to per-launch timing using iter_custom (divide elapsed by `inner`).
             group.bench_function(BenchmarkId::new(scen.bench_id, scen.indicator), |b| {
+                let mut state = prep();
+                // Pre-warm: run for a short, configurable time to stabilize clocks.
+                active_warmup(&mut *state);
                 b.iter_custom(|iters| {
                     let total = iters.saturating_mul(inner as u64);
                     let start = Instant::now();
@@ -321,6 +321,9 @@ fn run_registered_benches(c: &mut Criterion) {
             });
         } else {
             group.bench_function(BenchmarkId::new(scen.bench_id, scen.indicator), |b| {
+                let mut state = prep();
+                // Pre-warm: run for a short, configurable time to stabilize clocks.
+                active_warmup(&mut *state);
                 b.iter(|| state.launch())
             });
         }

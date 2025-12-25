@@ -58,8 +58,11 @@ class TestDpo:
             msg="DPO last 5 values mismatch"
         )
         
-        # Compare full output with Rust
-        compare_with_rust('dpo', result, 'close', {'period': 5})
+        # Compare full output with Rust.
+        # DPO can produce values extremely close to 0 where tiny FMA/rounding
+        # differences between build artifacts show up at ~1e-11. Keep this
+        # strict but avoid flaking on sub-ulp noise.
+        compare_with_rust('dpo', result, 'close', {'period': 5}, rtol=1e-10, atol=2e-11)
     
     def test_dpo_default_candles(self, test_data):
         """Test DPO with default parameters - mirrors check_dpo_default_candles"""

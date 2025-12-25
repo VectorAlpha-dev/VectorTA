@@ -1514,6 +1514,7 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
 
     // RSI momentum ring for CBCI
     let mut rsi_ring: Vec<f64> = vec![f64::NAN; n2.max(1)];
+    let rsi_len = rsi_ring.len();
     let mut rsi_ring_head: usize = 0;
     let mut rsi_ema = 0.0_f64;
     let mut rsi_ema_seed = false;
@@ -1560,6 +1561,7 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     let mut mf_neg_sum = 0.0_f64;
     let mut mf_ring_mf: Vec<f64> = vec![0.0; n3.max(1)];
     let mut mf_ring_sgn: Vec<i8> = vec![0; n3.max(1)];
+    let mf_len = mf_ring_mf.len();
     let mut mf_head: usize = 0;
     let mut tp_prev: f64 = 0.0_f64;
     let mut tp_has_prev = false;
@@ -1604,10 +1606,7 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
         return Ok(());
     }
 
-    for i in 0..len {
-        if i < first {
-            continue;
-        }
+    for i in first..len {
 
         // === TCI chain ===
         let c_i = close[i];
@@ -1721,7 +1720,10 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
                 } else if sign < 0 {
                     mf_neg_sum += mf_raw;
                 }
-                mf_head = (mf_head + 1) % n3.max(1);
+                mf_head += 1;
+                if mf_head == mf_len {
+                    mf_head = 0;
+                }
                 if rsi_seeded {
                     mf_val = if mf_neg_sum == 0.0 {
                         100.0
@@ -1741,7 +1743,10 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
         if rsi_seeded {
             let old = rsi_ring[rsi_ring_head];
             rsi_ring[rsi_ring_head] = rsi_val;
-            rsi_ring_head = (rsi_ring_head + 1) % n2.max(1);
+            rsi_ring_head += 1;
+            if rsi_ring_head == rsi_len {
+                rsi_ring_head = 0;
+            }
             let mom = if old.is_finite() && rsi_val.is_finite() {
                 rsi_val - old
             } else {
@@ -1926,7 +1931,10 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
                     } else {
                         let old = sig_ring[sig_head];
                         sig_ring[sig_head] = wt;
-                        sig_head = (sig_head + 1) % SIGP;
+                        sig_head += 1;
+                        if sig_head == SIGP {
+                            sig_head = 0;
+                        }
                         sig_sum += wt - old;
                         dst_signal[i] = sig_sum / (SIGP as f64);
                     }

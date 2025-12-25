@@ -206,7 +206,7 @@ pub enum AtrError {
     InvalidLength { length: usize },
     #[error("Inconsistent slice lengths for ATR calculation: high={high_len}, low={low_len}, close={close_len}")]
     InconsistentSliceLengths { high_len: usize, low_len: usize, close_len: usize },
-    #[error("No candles available for ATR calculation.")]
+    #[error("atr: No candles available for ATR calculation.")]
     NoCandlesAvailable,
     #[error("Not enough data to calculate ATR: length={length}, data length={data_len}")]
     NotEnoughData { length: usize, data_len: usize },

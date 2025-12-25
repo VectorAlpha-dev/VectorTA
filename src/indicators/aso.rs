@@ -442,10 +442,16 @@ fn aso_prepare<'a>(
         });
     }
 
-    let chosen = match kernel {
+    let mut chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
+    // Prefer AVX2 over AVX512 in Auto for ASO: AVX512 is typically not faster here and can
+    // underperform AVX2 for larger inputs on many CPUs. Explicit Avx512 remains available.
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
+        chosen = Kernel::Avx2;
+    }
 
     Ok((open, high, low, close, period, mode, first, chosen))
 }
@@ -1060,11 +1066,17 @@ pub fn aso_batch_with_kernel(
     let bears_out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard_e.as_mut_ptr() as *mut f64, guard_e.len()) };
 
-    let actual = match k {
+    let mut actual = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => k,
         other => return Err(AsoError::InvalidKernelForBatch(other)),
     };
+    // ASO batch kernels are currently slower than the scalar batch implementation for typical
+    // parameter grids on many CPUs; keep explicit AVX batch selection available.
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(k, Kernel::Auto) && matches!(actual, Kernel::Avx2Batch | Kernel::Avx512Batch) {
+        actual = Kernel::ScalarBatch;
+    }
 
     // Per-row closure
     let do_row = |row: usize, bulls_row: &mut [f64], bears_row: &mut [f64]| {

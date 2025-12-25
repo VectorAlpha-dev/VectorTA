@@ -1,0 +1,1530 @@
+=== acosc_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.84s
+     Running tests/acosc_cuda.rs (target/debug/deps/acosc_cuda-80a336ae0370d8b0)
+
+running 3 tests
+test acosc_cuda_batch_matches_cpu ... ok
+test acosc_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+=== ad_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.84s
+     Running tests/ad_cuda.rs (target/debug/deps/ad_cuda-4b98434002bed430)
+
+running 3 tests
+test ad_cuda_many_series_time_major_matches_cpu ... ok
+test ad_cuda_series_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+=== adosc_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.88s
+     Running tests/adosc_cuda.rs (target/debug/deps/adosc_cuda-668eb0d90db765dd)
+
+running 3 tests
+test adosc_cuda_batch_matches_cpu ... ok
+test adosc_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+=== adx_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.83s
+     Running tests/adx_cuda.rs (target/debug/deps/adx_cuda-daa080030a4428dd)
+
+running 3 tests
+test adx_cuda_batch_matches_cpu ... ok
+test adx_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+=== adxr_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.83s
+     Running tests/adxr_cuda.rs (target/debug/deps/adxr_cuda-fa2273a8470b5c12)
+
+running 3 tests
+test adxr_cuda_batch_matches_cpu ... ok
+test adxr_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+=== alligator_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.74s
+     Running tests/alligator_cuda.rs (target/debug/deps/alligator_cuda-892303fd0f63f773)
+
+running 3 tests
+test alligator_cuda_batch_matches_cpu ... ok
+test alligator_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+
+=== alma_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.85s
+     Running tests/alma_cuda.rs (target/debug/deps/alma_cuda-ef44f86d858e97f3)
+
+running 3 tests
+test alma_cuda_many_series_one_param_matches_cpu ... ok
+test alma_cuda_one_series_many_params_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+
+=== alma_cuda_variants ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.77s
+     Running tests/alma_cuda_variants.rs (target/debug/deps/alma_cuda_variants-7b9cd68fc152d8eb)
+
+running 7 tests
+test alma_batch_plain_matches_cpu ... ok
+test alma_batch_tiled_1x_matches_cpu ... ok
+test alma_batch_tiled_2x_matches_cpu ... ok
+test alma_many_series_1d_matches_cpu ... ok
+test alma_many_series_2d_ty2_matches_cpu ... ok
+test alma_many_series_2d_ty4_matches_cpu ... ok
+test cuda_feature_off_compiles ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.56s
+
+=== alphatrend_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.88s
+     Running tests/alphatrend_cuda.rs (target/debug/deps/alphatrend_cuda-72df08b285e335ec)
+
+running 3 tests
+test alphatrend_cuda_batch_matches_cpu ... ok
+test alphatrend_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+=== ao_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.76s
+     Running tests/ao_cuda.rs (target/debug/deps/ao_cuda-887d4f626211693a)
+
+running 3 tests
+test ao_cuda_batch_matches_cpu ... ok
+test ao_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+=== apo_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.77s
+     Running tests/apo_cuda.rs (target/debug/deps/apo_cuda-4212faca1f8211f2)
+
+running 3 tests
+test apo_cuda_batch_matches_cpu ... ok
+test apo_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+=== aroon_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.79s
+     Running tests/aroon_cuda.rs (target/debug/deps/aroon_cuda-177ba9aee76126bc)
+
+running 3 tests
+test aroon_cuda_batch_matches_cpu ... ok
+test aroon_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+
+=== aroonosc_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.88s
+     Running tests/aroonosc_cuda.rs (target/debug/deps/aroonosc_cuda-56f7adbe066b28f3)
+
+running 3 tests
+test aroonosc_cuda_batch_matches_cpu ... ok
+test aroonosc_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+=== aso_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.84s
+     Running tests/aso_cuda.rs (target/debug/deps/aso_cuda-309c86447d4b6250)
+
+running 3 tests
+test aso_cuda_batch_matches_cpu ... ok
+test aso_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+=== atr_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.81s
+     Running tests/atr_cuda.rs (target/debug/deps/atr_cuda-13b61e4a993a7fe5)
+
+running 3 tests
+test atr_cuda_batch_matches_cpu ... ok
+test atr_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+=== avsl_cuda ===
+warning: unused import: `my_project::utilities::data_loader::Candles`
+  --> tests/avsl_cuda.rs:10:5
+   |
+10 | use my_project::utilities::data_loader::Candles;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (test "avsl_cuda") generated 1 warning (run `cargo fix --test "avsl_cuda"` to apply 1 suggestion)
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.76s
+     Running tests/avsl_cuda.rs (target/debug/deps/avsl_cuda-8dfcfde470588a93)
+
+running 3 tests
+test avsl_cuda_batch_matches_cpu ... ok
+test avsl_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_guard ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+
+=== bandpass_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.88s
+     Running tests/bandpass_cuda.rs (target/debug/deps/bandpass_cuda-4fa7c6bf6b9609d4)
+
+running 3 tests
+test bandpass_cuda_batch_matches_cpu ... ok
+test bandpass_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+=== bollinger_bands_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.73s
+     Running tests/bollinger_bands_cuda.rs (target/debug/deps/bollinger_bands_cuda-50b66de5caa12950)
+
+running 3 tests
+test bollinger_bands_cuda_batch_matches_cpu ... ok
+test bollinger_bands_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+=== bollinger_bands_width_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.83s
+     Running tests/bollinger_bands_width_cuda.rs (target/debug/deps/bollinger_bands_width_cuda-78b94c19d4f6a3e2)
+
+running 3 tests
+test bollinger_bands_width_cuda_batch_matches_cpu ... ok
+test bollinger_bands_width_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+=== bop_cuda ===
+warning: unused imports: `read_candles_from_csv` and `source_type`
+ --> tests/bop_cuda.rs:4:42
+  |
+4 | use my_project::utilities::data_loader::{read_candles_from_csv, source_type};
+  |                                          ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (test "bop_cuda") generated 1 warning (run `cargo fix --test "bop_cuda"` to apply 1 suggestion)
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.85s
+     Running tests/bop_cuda.rs (target/debug/deps/bop_cuda-f403f2a51f489e60)
+
+running 3 tests
+test bop_cuda_batch_matches_cpu ... ok
+test bop_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+=== buff_averages_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.83s
+     Running tests/buff_averages_cuda.rs (target/debug/deps/buff_averages_cuda-5a027fc255563c78)
+
+running 3 tests
+test buff_averages_cuda_batch_matches_cpu ... ok
+test buff_averages_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+=== buff_averages_cuda_variants ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.84s
+     Running tests/buff_averages_cuda_variants.rs (target/debug/deps/buff_averages_cuda_variants-a93b3a0aa1c621c2)
+
+running 3 tests
+test buff_averages_cuda_plain_matches_cpu ... ok
+test buff_averages_cuda_tiled128_matches_cpu ... ok
+test buff_averages_cuda_tiled256_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+=== cci_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.80s
+     Running tests/cci_cuda.rs (target/debug/deps/cci_cuda-0b88f7c81e1de40f)
+
+running 3 tests
+test cci_cuda_batch_matches_cpu ... ok
+test cci_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+=== cci_cycle_cuda ===
+warning: unused import: `CciCycleParams`
+ --> tests/cci_cycle_cuda.rs:4:54
+  |
+4 |     cci_cycle_batch_with_kernel, CciCycleBatchRange, CciCycleParams,
+  |                                                      ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: function `approx_eq` is never used
+  --> tests/cci_cycle_cuda.rs:15:4
+   |
+15 | fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
+   |    ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (test "cci_cycle_cuda") generated 2 warnings (run `cargo fix --test "cci_cycle_cuda"` to apply 1 suggestion)
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.82s
+     Running tests/cci_cycle_cuda.rs (target/debug/deps/cci_cycle_cuda-98cb981eff19cd4d)
+
+running 3 tests
+test cci_cycle_cuda_batch_matches_cpu_shape ... ok
+test cci_cycle_cuda_batch_produces_values_after_warmup ... [cci_cycle_cuda] no rows produced many finite values post-warmup; shape ok
+ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s
+
+=== cfo_cuda ===
+warning: unused import: `CfoBuilder`
+ --> tests/cfo_cuda.rs:4:60
+  |
+4 |     cfo_batch_with_kernel, cfo_with_kernel, CfoBatchRange, CfoBuilder, CfoInput, CfoParams,
+  |                                                            ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (test "cfo_cuda") generated 1 warning (run `cargo fix --test "cfo_cuda"` to apply 1 suggestion)
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.86s
+     Running tests/cfo_cuda.rs (target/debug/deps/cfo_cuda-838fdf3b21d42c24)
+
+running 3 tests
+test cfo_cuda_batch_matches_cpu ... ok
+test cfo_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+=== cg_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.82s
+     Running tests/cg_cuda.rs (target/debug/deps/cg_cuda-815d2a7d2ce3aad5)
+
+running 3 tests
+test cg_cuda_batch_matches_cpu ... ok
+test cg_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+=== chande_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: variable does not need to be mutable
+   --> tests/chande_cuda.rs:152:9
+    |
+152 |     let mut cuda = CudaChande::new(0).expect("CudaChande::new");
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+warning: `my_project` (test "chande_cuda") generated 1 warning (run `cargo fix --test "chande_cuda"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.86s
+     Running tests/chande_cuda.rs (target/debug/deps/chande_cuda-954479ec55d58c3b)
+
+running 3 tests
+test chande_cuda_batch_matches_cpu ... ok
+test chande_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+
+=== chandelier_exit_cuda ===
+warning: unused variable: `input`
+   --> tests/chandelier_exit_cuda.rs:143:13
+    |
+143 |         let input = ChandelierExitInput {
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (test "chandelier_exit_cuda") generated 1 warning
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.80s
+     Running tests/chandelier_exit_cuda.rs (target/debug/deps/chandelier_exit_cuda-230ca4d7ea47060e)
+
+running 3 tests
+test chandelier_exit_cuda_batch_matches_cpu ... ok
+test chandelier_exit_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+=== chop_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: unused import: `ChopParams`
+  --> tests/chop_cuda.rs:11:70
+   |
+11 | use my_project::indicators::chop::{ChopBatchBuilder, ChopBatchRange, ChopParams};
+   |                                                                      ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+warning: `my_project` (test "chop_cuda") generated 1 warning (run `cargo fix --test "chop_cuda"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.85s
+     Running tests/chop_cuda.rs (target/debug/deps/chop_cuda-ba3bac27110e85fe)
+
+running 2 tests
+test chop_cuda_batch_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+=== cksp_cuda ===
+warning: unused import: `CkspParams`
+ --> tests/cksp_cuda.rs:3:70
+  |
+3 | use my_project::indicators::cksp::{CkspBatchBuilder, CkspBatchRange, CkspParams};
+  |                                                                      ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (test "cksp_cuda") generated 1 warning (run `cargo fix --test "cksp_cuda"` to apply 1 suggestion)
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.84s
+     Running tests/cksp_cuda.rs (target/debug/deps/cksp_cuda-ddcaa34d682f0eb9)
+
+running 2 tests
+test cksp_cuda_batch_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+=== cmo_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.81s
+     Running tests/cmo_cuda.rs (target/debug/deps/cmo_cuda-bda4c5f7388af390)
+
+running 3 tests
+test cmo_cuda_batch_matches_cpu ... ok
+test cmo_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+
+=== coppock_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.83s
+     Running tests/coppock_cuda.rs (target/debug/deps/coppock_cuda-ad37074af192d01a)
+
+running 3 tests
+test coppock_cuda_batch_matches_cpu ... ok
+test coppock_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+=== cora_wave_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.79s
+     Running tests/cora_wave_cuda.rs (target/debug/deps/cora_wave_cuda-f6302eb1f23c2db1)
+
+running 3 tests
+test cora_wave_cuda_many_series_one_param_matches_cpu ... ok
+test cora_wave_cuda_one_series_many_params_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+=== correlation_cycle_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.82s
+     Running tests/correlation_cycle_cuda.rs (target/debug/deps/correlation_cycle_cuda-83ba04eb6cf545f6)
+
+running 3 tests
+test correlation_cycle_cuda_batch_matches_cpu ... ok
+test correlation_cycle_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+
+=== correl_hl_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.78s
+     Running tests/correl_hl_cuda.rs (target/debug/deps/correl_hl_cuda-58949abe98c00c18)
+
+running 3 tests
+test correl_hl_cuda_batch_matches_cpu ... ok
+test correl_hl_cuda_many_series_one_param_matches_cpu ... ok
+test cuda_feature_off_noop ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+=== cvi_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.78s
+     Running tests/cvi_cuda.rs (target/debug/deps/cvi_cuda-57ee58d45174fab6)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test cvi_cuda_batch_matches_cpu ... ok
+test cvi_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+=== cwma_cuda ===
+warning: variable does not need to be mutable
+   --> tests/cwma_cuda.rs:191:9
+    |
+191 |     let mut cuda = CudaCwma::new_with_policy(
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> tests/cwma_cuda.rs:270:9
+    |
+270 |     let mut cuda = CudaCwma::new_with_policy(
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (test "cwma_cuda") generated 2 warnings (run `cargo fix --test "cwma_cuda"` to apply 2 suggestions)
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.80s
+     Running tests/cwma_cuda.rs (target/debug/deps/cwma_cuda-40a286001dea903f)
+
+running 5 tests
+test cuda_feature_off_noop ... ok
+test cwma_cuda_batched_tiled_matches_cpu ... ok
+test cwma_cuda_many_series_one_param_matches_cpu ... ok
+test cwma_cuda_many_series_tiled2d_matches_cpu ... ok
+test cwma_cuda_one_series_many_params_matches_cpu ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+=== damiani_volatmeter_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: function `approx_eq` is never used
+  --> tests/damiani_volatmeter_cuda.rs:13:4
+   |
+13 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+   |    ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+warning: `my_project` (test "damiani_volatmeter_cuda") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.80s
+     Running tests/damiani_volatmeter_cuda.rs (target/debug/deps/damiani_volatmeter_cuda-563661db1127c777)
+
+running 2 tests
+test cuda_feature_off_noop ... ok
+test damiani_cuda_batch_matches_cpu ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+=== dec_osc_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: unused import: `DecOscBatchBuilder`
+ --> tests/dec_osc_cuda.rs:4:53
+  |
+4 |     dec_osc_batch_with_kernel, dec_osc_with_kernel, DecOscBatchBuilder, DecOscBatchRange,
+  |                                                     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+warning: `my_project` (test "dec_osc_cuda") generated 1 warning (run `cargo fix --test "dec_osc_cuda"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.80s
+     Running tests/dec_osc_cuda.rs (target/debug/deps/dec_osc_cuda-4452823d90f7c710)
+
+running 3 tests
+test cuda_feature_off_noop_dec_osc ... ok
+test dec_osc_cuda_batch_matches_cpu ... ok
+test dec_osc_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+=== decycler_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.74s
+     Running tests/decycler_cuda.rs (target/debug/deps/decycler_cuda-15c89f43ddbdf91b)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test decycler_cuda_batch_matches_cpu ... ok
+test decycler_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+=== dema_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: function `expand_grid_count` is never used
+   --> tests/dema_cuda.rs:135:4
+    |
+135 | fn expand_grid_count(range: &DemaBatchRange) -> usize {
+    |    ^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+warning: `my_project` (test "dema_cuda") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.77s
+     Running tests/dema_cuda.rs (target/debug/deps/dema_cuda-edda3661078aa03c)
+
+running 4 tests
+test cuda_feature_off_noop ... ok
+test dema_cuda_batch_matches_cpu ... ok
+test dema_cuda_host_copy_matches_cpu ... ok
+test dema_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
+
+=== deviation_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.72s
+     Running tests/deviation_cuda.rs (target/debug/deps/deviation_cuda-e36463aef5c409fb)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test deviation_cuda_batch_matches_cpu ... ok
+test deviation_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+=== devstop_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: unnecessary parentheses around assigned value
+  --> tests/devstop_cuda.rs:45:19
+   |
+45 |         let off = (0.35 + 0.01 * (x * 0.00031).cos().abs());
+   |                   ^                                       ^
+   |
+   = note: `#[warn(unused_parens)]` on by default
+help: remove these parentheses
+   |
+45 -         let off = (0.35 + 0.01 * (x * 0.00031).cos().abs());
+45 +         let off = 0.35 + 0.01 * (x * 0.00031).cos().abs();
+   |
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+warning: `my_project` (test "devstop_cuda") generated 1 warning (run `cargo fix --test "devstop_cuda"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.79s
+     Running tests/devstop_cuda.rs (target/debug/deps/devstop_cuda-c446d47160f21f8d)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test devstop_cuda_batch_matches_cpu ... ok
+test devstop_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+
+=== di_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.78s
+     Running tests/di_cuda.rs (target/debug/deps/di_cuda-bb0fb25af5e17e43)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test di_cuda_batch_matches_cpu ... ok
+test di_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+=== dma_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.76s
+     Running tests/dma_cuda.rs (target/debug/deps/dma_cuda-fb93d0e1c52da09c)
+
+running 4 tests
+test cuda_feature_off_noop ... ok
+test dma_cuda_batch_ema_matches_cpu ... ok
+test dma_cuda_batch_wma_matches_cpu ... ok
+test dma_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+
+=== dma_cuda_variants ===
+warning: variable does not need to be mutable
+  --> tests/dma_cuda_variants.rs:71:9
+   |
+71 |     let mut cuda = CudaDma::new_with_policy(0, policy).expect("cuda dma");
+   |         ----^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> tests/dma_cuda_variants.rs:138:9
+    |
+138 |     let mut cuda = CudaDma::new_with_policy(0, policy).expect("cuda dma");
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (test "dma_cuda_variants") generated 2 warnings (run `cargo fix --test "dma_cuda_variants"` to apply 2 suggestions)
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.82s
+     Running tests/dma_cuda_variants.rs (target/debug/deps/dma_cuda_variants-b68b71794a3e0d50)
+
+running 6 tests
+test cuda_feature_off_compiles ... ok
+test dma_batch_plain_matches_cpu ... ok
+test dma_batch_tiled_matches_cpu ... ok
+test dma_many_series_1d_matches_cpu ... ok
+test dma_many_series_2d_ty2_matches_cpu ... ok
+test dma_many_series_2d_ty4_matches_cpu ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.63s
+
+=== dm_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.78s
+     Running tests/dm_cuda.rs (target/debug/deps/dm_cuda-f5e606c111862e08)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test dm_cuda_batch_matches_cpu ... [dm] batch kernel: block_x=768 rows=8 len=8192
+ok
+test dm_cuda_many_series_one_param_matches_cpu ... [dm] many-series kernel: block_x=768 cols=8 rows=1024 period=14
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+=== donchian_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.76s
+     Running tests/donchian_cuda.rs (target/debug/deps/donchian_cuda-73d187137c87358c)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test donchian_cuda_batch_matches_cpu ... ok
+test donchian_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+
+=== dpo_cuda ===
+warning: unused import: `DpoBuilder`
+ --> tests/dpo_cuda.rs:4:60
+  |
+4 |     dpo_batch_with_kernel, dpo_with_kernel, DpoBatchRange, DpoBuilder, DpoInput, DpoParams,
+  |                                                            ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused variable: `sweep`
+  --> tests/dpo_cuda.rs:47:9
+   |
+47 |     let sweep = DpoBatchRange {
+   |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_sweep`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `dev`
+  --> tests/dpo_cuda.rs:58:9
+   |
+58 |     let dev = cuda
+   |         ^^^ help: if this is intentional, prefix it with an underscore: `_dev`
+
+warning: unused variable: `params`
+   --> tests/dpo_cuda.rs:119:13
+    |
+119 |         let params = DpoParams {
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_params`
+
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (test "dpo_cuda") generated 4 warnings (run `cargo fix --test "dpo_cuda"` to apply 1 suggestion)
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.77s
+     Running tests/dpo_cuda.rs (target/debug/deps/dpo_cuda-a5a510352ca62469)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test dpo_cuda_batch_matches_cpu ... ok
+test dpo_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+=== dti_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: unused import: `DtiBatchBuilder`
+ --> tests/dti_cuda.rs:3:35
+  |
+3 | use my_project::indicators::dti::{DtiBatchBuilder, DtiBatchRange, DtiParams};
+  |                                   ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused variable: `br`
+  --> tests/dti_cuda.rs:89:18
+   |
+89 |             let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
+   |                  ^^ help: if this is intentional, prefix it with an underscore: `_br`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `bs`
+  --> tests/dti_cuda.rs:89:22
+   |
+89 |             let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
+   |                      ^^ help: if this is intentional, prefix it with an underscore: `_bs`
+
+warning: unused variable: `bu`
+  --> tests/dti_cuda.rs:89:26
+   |
+89 |             let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
+   |                          ^^ help: if this is intentional, prefix it with an underscore: `_bu`
+
+warning: unused variable: `br`
+   --> tests/dti_cuda.rs:191:10
+    |
+191 |     let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
+    |          ^^ help: if this is intentional, prefix it with an underscore: `_br`
+
+warning: unused variable: `bs`
+   --> tests/dti_cuda.rs:191:14
+    |
+191 |     let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
+    |              ^^ help: if this is intentional, prefix it with an underscore: `_bs`
+
+warning: unused variable: `bu`
+   --> tests/dti_cuda.rs:191:18
+    |
+191 |     let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
+    |                  ^^ help: if this is intentional, prefix it with an underscore: `_bu`
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+warning: `my_project` (test "dti_cuda") generated 7 warnings (run `cargo fix --test "dti_cuda"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.77s
+     Running tests/dti_cuda.rs (target/debug/deps/dti_cuda-9439106332d46145)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test dti_cuda_batch_matches_cpu ... ok
+test dti_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+=== dvdiqqe_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: unused import: `my_project::utilities::data_loader::Candles`
+ --> tests/dvdiqqe_cuda.rs:6:5
+  |
+6 | use my_project::utilities::data_loader::Candles;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused variable: `ts`
+  --> tests/dvdiqqe_cuda.rs:35:9
+   |
+35 |     let ts: Vec<i64> = (0..len as i64).collect();
+   |         ^^ help: if this is intentional, prefix it with an underscore: `_ts`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tol`
+  --> tests/dvdiqqe_cuda.rs:99:9
+   |
+99 |     let tol = 2e-2; // chained EMAs in fp32
+   |         ^^^ help: if this is intentional, prefix it with an underscore: `_tol`
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+warning: `my_project` (test "dvdiqqe_cuda") generated 3 warnings (run `cargo fix --test "dvdiqqe_cuda"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.77s
+     Running tests/dvdiqqe_cuda.rs (target/debug/deps/dvdiqqe_cuda-d8e9f5c5b7ec0b45)
+
+running 3 tests
+test dvdiqqe_cuda_batch_matches_cpu ... ok
+test dvdiqqe_cuda_feature_off_noop ... ok
+test dvdiqqe_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s
+
+=== dx_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.74s
+     Running tests/dx_cuda.rs (target/debug/deps/dx_cuda-f03a159e44ef921a)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test dx_cuda_batch_matches_cpu ... ok
+test dx_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
+
+=== edcf_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.75s
+     Running tests/edcf_cuda.rs (target/debug/deps/edcf_cuda-ccda882c7558cdf1)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test edcf_cuda_batch_device_reuse_matches_cpu ... ok
+test edcf_cuda_batch_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+=== edcf_cuda_variants ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: variable does not need to be mutable
+  --> tests/edcf_cuda_variants.rs:77:9
+   |
+77 |     let mut cuda = CudaEdcf::new_with_policy(0, policy).expect("cuda edcf");
+   |         ----^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+warning: `my_project` (test "edcf_cuda_variants") generated 1 warning (run `cargo fix --test "edcf_cuda_variants"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.73s
+     Running tests/edcf_cuda_variants.rs (target/debug/deps/edcf_cuda_variants-4b6efaf172790a49)
+
+running 6 tests
+test cuda_feature_off_compiles ... ok
+test edcf_batch_plain_matches_cpu ... ok
+test edcf_batch_tiled_matches_cpu ... ok
+test edcf_many_series_1d_matches_cpu ... ok
+test edcf_many_series_2d_ty2_matches_cpu ... ok
+test edcf_many_series_2d_ty4_matches_cpu ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+
+=== efi_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.73s
+     Running tests/efi_cuda.rs (target/debug/deps/efi_cuda-4b5bc0f99de50682)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test efi_cuda_batch_matches_cpu ... ok
+test efi_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+=== ehlers_ecema_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.77s
+     Running tests/ehlers_ecema_cuda.rs (target/debug/deps/ehlers_ecema_cuda-d6067a0a62a51a58)
+
+running 4 tests
+test cuda_feature_off_noop ... ok
+test ehlers_ecema_cuda_batch_matches_cpu ... ok
+test ehlers_ecema_cuda_batch_pine_confirmed_matches_cpu ... ok
+test ehlers_ecema_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+
+=== ehlers_ecema_cuda_variants ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: variable does not need to be mutable
+  --> tests/ehlers_ecema_cuda_variants.rs:50:9
+   |
+50 |     let mut cuda_plain = CudaEhlersEcema::new_with_policy(
+   |         ----^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+  --> tests/ehlers_ecema_cuda_variants.rs:68:9
+   |
+68 |     let mut cuda_tiled = CudaEhlersEcema::new_with_policy(
+   |         ----^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> tests/ehlers_ecema_cuda_variants.rs:155:9
+    |
+155 |     let mut cuda_1d = CudaEhlersEcema::new_with_policy(
+    |         ----^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> tests/ehlers_ecema_cuda_variants.rs:168:9
+    |
+168 |     let mut cuda_2d = CudaEhlersEcema::new_with_policy(
+    |         ----^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+warning: `my_project` (test "ehlers_ecema_cuda_variants") generated 4 warnings (run `cargo fix --test "ehlers_ecema_cuda_variants"` to apply 4 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.78s
+     Running tests/ehlers_ecema_cuda_variants.rs (target/debug/deps/ehlers_ecema_cuda_variants-3cb335ff6f7734a7)
+
+running 2 tests
+test ecema_cuda_variants_batch_plain_and_tiled_match_cpu ... ok
+test ecema_cuda_variants_many_series_1d_and_2d_match_cpu ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+=== ehlers_itrend_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.76s
+     Running tests/ehlers_itrend_cuda.rs (target/debug/deps/ehlers_itrend_cuda-b8d508a0f5106e49)
+
+running 3 tests
+test cuda_feature_off_noop ... ok
+test ehlers_itrend_cuda_batch_matches_cpu ... ok
+test ehlers_itrend_cuda_many_series_one_param_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+=== ehlers_kama_cuda ===
+warning: function `approx_eq` is never used
+ --> src/bin/cci_many_dbg.rs:2:4
+  |
+2 | fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+  |    ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: variable does not need to be mutable
+   --> tests/ehlers_kama_cuda.rs:200:9
+    |
+200 |     let mut cuda = CudaEhlersKama::new_with_policy(
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: `my_project` (bin "cci_many_dbg") generated 1 warning
+warning: `my_project` (test "ehlers_kama_cuda") generated 1 warning (run `cargo fix --test "ehlers_kama_cuda"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.77s
+     Running tests/ehlers_kama_cuda.rs (target/debug/deps/ehlers_kama_cuda-89263a59f5ad28bb)
+
+running 4 tests
+test cuda_feature_off_noop ... ok
+test ehlers_kama_cuda_batch_matches_cpu ... 
+thread 'ehlers_kama_cuda_batch_matches_cpu' panicked at tests/ehlers_kama_cuda.rs:55:39:
+CudaEhlersKama::new: Cuda(InvalidPtx)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test ehlers_kama_cuda_many_series_one_param_matches_cpu ... 
+thread 'ehlers_kama_cuda_many_series_one_param_matches_cpu' panicked at tests/ehlers_kama_cuda.rs:124:39:
+CudaEhlersKama::new: Cuda(InvalidPtx)
+FAILED
+test ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu ... 
+thread 'ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu' panicked at tests/ehlers_kama_cuda.rs:207:6:
+CudaEhlersKama::new_with_policy: Cuda(InvalidPtx)
+FAILED
+
+failures:
+
+failures:
+    ehlers_kama_cuda_batch_matches_cpu
+    ehlers_kama_cuda_many_series_one_param_matches_cpu
+    ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+
+error: test failed, to rerun pass `--test ehlers_kama_cuda`

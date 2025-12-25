@@ -7,6 +7,7 @@
 #endif
 
 #include <cuda_runtime.h>
+#include <float.h>
 #include <math.h>
 
 // Read-only cache hint wrapper
@@ -15,6 +16,12 @@
 #else
   #define LDG(ptr) (*(ptr))
 #endif
+
+// Explicit flush-to-zero for subnormals (match common CUDA FTZ behavior and
+// avoid denom underflow -> 0/0 NaNs when ranges are extremely tiny).
+__device__ __forceinline__ float ftz_f32(float x) {
+    return (fabsf(x) < FLT_MIN) ? 0.0f : x;
+}
 
 // --------- helpers ---------
 struct Deque {
@@ -130,16 +137,18 @@ void srsi_batch_f32(const float* __restrict__ rsi,
 
     // No deque priming; compute hi/lo by scanning rsi over the window
     for (int i = stoch_warmup; i < series_len; ++i) {
-        const float rv = LDG(&rsi[i]);
+        const float rv = ftz_f32(LDG(&rsi[i]));
         float hi = -1e30f;
         float lo =  1e30f;
         const int start = i - sp + 1;
         for (int t = start; t <= i; ++t) {
-            const float v = LDG(&rsi[t]);
+            const float v = ftz_f32(LDG(&rsi[t]));
             hi = fmaxf(hi, v);
             lo = fminf(lo, v);
         }
-        float fk = (hi > lo) ? ((rv - lo) * 100.0f) / (hi - lo) : 50.0f;
+        const float denom = hi - lo;
+        // Guard against FTZ: if denom underflows to 0/subnormal, treat as no-range.
+        float fk = (denom >= FLT_MIN) ? ((rv - lo) * 100.0f) / denom : 50.0f;
 
         // ring update (increment-wrap; no modulo)
         if (cnt_k < kp) { sum_k += fk; ring_k[head_k] = fk; ++cnt_k; if (++head_k == kp) head_k = 0; }
@@ -207,22 +216,34 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     float* ring_k  = (float*)(min_val + stoch_period);
     float* ring_d  = (float*)(ring_k + k_period);
 
-    // Prime RSI ring with first (stoch_period-1) RSI values
+    // Prime RSI ring with RSI[t] for t in [rsi_warmup, stoch_warmup)
+    // (stoch_period-1 values). Important: do NOT apply Wilder update at t=rsi_warmup;
+    // the seed already includes the last delta up to rsi_warmup.
     int rpos = 0; int rcnt = 0;
     float rsi = 50.0f;
     if (rsi_warmup < rows) {
         rsi = (avg_loss == 0.0f) ? 100.0f : (100.0f - 100.0f / (1.0f + avg_gain / avg_loss));
     }
-    for (int t = rsi_warmup; t < rsi_warmup + stoch_period - 1 && t < rows; ++t) {
-        float x = LDG(&prices_tm[t * stride + s]);
-        const float prevp = LDG(&prices_tm[(t - 1) * stride + s]);
-        const float ch = x - prevp;
-        const float gain = (ch > 0.0f ? ch : 0.0f);
-        const float loss = (ch < 0.0f ? -ch : 0.0f);
-        avg_gain = fmaf(gain - avg_gain, alpha, avg_gain);
-        avg_loss = fmaf(loss - avg_loss, alpha, avg_loss);
-        rsi = (avg_loss == 0.0f) ? 100.0f : (100.0f - 100.0f / (1.0f + avg_gain / avg_loss));
-        rsi_ring[rpos] = rsi; rpos = (rpos + 1 == stoch_period ? 0 : rpos + 1); if (rcnt < stoch_period) ++rcnt;
+    rsi = ftz_f32(rsi);
+    if (stoch_period > 1) {
+        rsi_ring[rpos] = rsi;
+        rpos = (rpos + 1 == stoch_period ? 0 : rpos + 1);
+        if (rcnt < stoch_period) ++rcnt;
+
+        for (int t = rsi_warmup + 1; t < rsi_warmup + stoch_period - 1 && t < rows; ++t) {
+            float x = LDG(&prices_tm[t * stride + s]);
+            const float prevp = LDG(&prices_tm[(t - 1) * stride + s]);
+            const float ch = x - prevp;
+            const float gain = (ch > 0.0f ? ch : 0.0f);
+            const float loss = (ch < 0.0f ? -ch : 0.0f);
+            avg_gain = fmaf(gain - avg_gain, alpha, avg_gain);
+            avg_loss = fmaf(loss - avg_loss, alpha, avg_loss);
+            rsi = (avg_loss == 0.0f) ? 100.0f : (100.0f - 100.0f / (1.0f + avg_gain / avg_loss));
+            rsi = ftz_f32(rsi);
+            rsi_ring[rpos] = rsi;
+            rpos = (rpos + 1 == stoch_period ? 0 : rpos + 1);
+            if (rcnt < stoch_period) ++rcnt;
+        }
     }
 
     float sum_k = 0.0f, sum_d = 0.0f; int head_k = 0, head_d = 0, cnt_k = 0, cnt_d = 0;
@@ -238,6 +259,7 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         avg_gain = fmaf(gain - avg_gain, alpha, avg_gain);
         avg_loss = fmaf(loss - avg_loss, alpha, avg_loss);
         rsi = (avg_loss == 0.0f) ? 100.0f : (100.0f - 100.0f / (1.0f + avg_gain / avg_loss));
+        rsi = ftz_f32(rsi);
         // Update RSI ring and compute hi/lo by scanning ring + current
         rsi_ring[rpos] = rsi; rpos = (rpos + 1 == stoch_period ? 0 : rpos + 1); if (rcnt < stoch_period) ++rcnt;
         float hi = rsi, lo = rsi;
@@ -248,7 +270,9 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
             lo = fminf(lo, v);
         }
 
-        float fk = (isfinite(hi) && isfinite(lo) && hi > lo) ? ((rsi - lo) * 100.0f) / (hi - lo) : 50.0f;
+        const float denom = hi - lo;
+        // Guard against FTZ: if denom underflows to 0/subnormal, treat as no-range.
+        float fk = (isfinite(hi) && isfinite(lo) && denom >= FLT_MIN) ? ((rsi - lo) * 100.0f) / denom : 50.0f;
 
         if (cnt_k < k_period) { sum_k += fk; ring_k[head_k] = fk; ++cnt_k; if (++head_k == k_period) head_k = 0; }
         else                   { sum_k += fk - ring_k[head_k]; ring_k[head_k] = fk; if (++head_k == k_period) head_k = 0; }

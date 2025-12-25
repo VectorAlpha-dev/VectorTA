@@ -1,0 +1,8 @@
+[0m[38;5;8m[[0m2025-12-23T21:05:27Z [0m[32mINFO [0m sccache::server[0m[38;5;8m][0m start_server: 127.0.0.1:4226
+[0m[38;5;8m[[0m2025-12-23T21:05:27Z [0m[32mINFO [0m sccache::server[0m[38;5;8m][0m No scheduler address configured, disabling distributed sccache
+[0m[38;5;8m[[0m2025-12-23T21:05:27Z [0m[34mDEBUG[0m sccache::cache::cache[0m[38;5;8m][0m Init disk cache with dir "C:\\Rust Projects\\my_project\\.sccache", size 21474836480
+[0m[38;5;8m[[0m2025-12-23T21:05:27Z [0m[32mINFO [0m sccache::server[0m[38;5;8m][0m server has setup with ReadWrite
+[0m[38;5;8m[[0m2025-12-23T21:05:27Z [0m[36mTRACE[0m sccache::server[0m[38;5;8m][0m binding TCP 127.0.0.1:4226
+[0m[38;5;8m[[0m2025-12-23T21:05:27Z [0m[32mINFO [0m sccache::server[0m[38;5;8m][0m server started, listening on 127.0.0.1:4226
+sccache: error: failed to open file `\\.\pipe\240d3a8fd9a54c6cbbd670dd2f450c88`
+sccache: caused by: Access is denied. (os error 5)

@@ -1496,7 +1496,17 @@ fn bollinger_bands_batch_inner(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(BollingerBandsError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let mut max_p = 0usize;
+    for c in &combos {
+        let p = c.period.unwrap();
+        if p == 0 {
+            return Err(BollingerBandsError::InvalidPeriod {
+                period: 0,
+                data_len: data.len(),
+            });
+        }
+        max_p = max_p.max(p);
+    }
     if data.len() - first < max_p {
         return Err(BollingerBandsError::NotEnoughValidData {
             needed: max_p,
@@ -1546,33 +1556,21 @@ fn bollinger_bands_batch_inner(
         let p = combos[row].period.unwrap();
         let du = combos[row].devup.unwrap();
         let dd = combos[row].devdn.unwrap();
-        let mt = combos[row].matype.clone().unwrap();
+        let mt = combos[row].matype.as_deref().unwrap_or("sma");
         let dt = combos[row].devtype.unwrap();
 
-        let ma_data = MaData::Slice(data);
-        let dev_input = DevInput::from_slice(
-            data,
-            DevParams {
-                period: Some(p),
-                devtype: Some(dt),
-            },
-        );
+        // Fast path: for SMA + stddev, the scalar rolling kernel is consistently best.
+        if mt.eq_ignore_ascii_case("sma") && dt == 0 {
+            bb_row_scalar_classic_sma(data, p, dt, du, dd, first, out_u, out_m, out_l);
+            return;
+        }
 
         match kern {
-            Kernel::Scalar => {
-                let first = data.iter().position(|x| !x.is_nan()).unwrap();
-                bb_row_scalar(data, &mt, p, dt, du, dd, first, out_u, out_m, out_l);
-            }
+            Kernel::Scalar => bb_row_scalar(data, mt, p, dt, du, dd, first, out_u, out_m, out_l),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => {
-                let first = data.iter().position(|x| !x.is_nan()).unwrap();
-                bb_row_avx2(data, &mt, p, dt, du, dd, first, out_u, out_m, out_l);
-            }
+            Kernel::Avx2 => bb_row_avx2(data, mt, p, dt, du, dd, first, out_u, out_m, out_l),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => {
-                let first = data.iter().position(|x| !x.is_nan()).unwrap();
-                bb_row_avx512(data, &mt, p, dt, du, dd, first, out_u, out_m, out_l);
-            }
+            Kernel::Avx512 => bb_row_avx512(data, mt, p, dt, du, dd, first, out_u, out_m, out_l),
             _ => unreachable!(),
         };
     };
@@ -1666,7 +1664,17 @@ pub fn bollinger_bands_batch_inner_into(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(BollingerBandsError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let mut max_p = 0usize;
+    for c in &combos {
+        let p = c.period.unwrap();
+        if p == 0 {
+            return Err(BollingerBandsError::InvalidPeriod {
+                period: 0,
+                data_len: data.len(),
+            });
+        }
+        max_p = max_p.max(p);
+    }
     if data.len() - first < max_p {
         return Err(BollingerBandsError::NotEnoughValidData {
             needed: max_p,
@@ -1683,11 +1691,15 @@ pub fn bollinger_bands_batch_inner_into(
         return Err(BollingerBandsError::OutputLengthMismatch { expected: total, got: out_upper.len().min(out_middle.len()).min(out_lower.len()) });
     }
 
-    let do_row = |row: usize, out_u: &mut [f64], out_m: &mut [f64], out_l: &mut [f64]| unsafe {
+    let do_row = |row: usize,
+                  out_u: &mut [f64],
+                  out_m: &mut [f64],
+                  out_l: &mut [f64]|
+     -> Result<(), BollingerBandsError> {
         let p = combos[row].period.unwrap();
         let du = combos[row].devup.unwrap();
         let dd = combos[row].devdn.unwrap();
-        let mt = combos[row].matype.clone().unwrap();
+        let mt = combos[row].matype.as_deref().unwrap_or("sma");
         let dt = combos[row].devtype.unwrap();
 
         // Fill NaN prefix
@@ -1699,9 +1711,7 @@ pub fn bollinger_bands_batch_inner_into(
         }
 
         // Compute into buffers
-        let _ = bollinger_bands_compute_into(
-            data, p, du, dd, &mt, dt, first, kern, out_u, out_m, out_l,
-        );
+        bollinger_bands_compute_into(data, p, du, dd, mt, dt, first, kern, out_u, out_m, out_l)
     };
 
     if parallel {
@@ -1712,7 +1722,7 @@ pub fn bollinger_bands_batch_inner_into(
                 .zip(out_middle.par_chunks_mut(cols))
                 .zip(out_lower.par_chunks_mut(cols))
                 .enumerate()
-                .for_each(|(row, ((u, m), l))| do_row(row, u, m, l));
+                .try_for_each(|(row, ((u, m), l))| do_row(row, u, m, l))?;
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -1723,7 +1733,7 @@ pub fn bollinger_bands_batch_inner_into(
                 .zip(out_lower.chunks_mut(cols))
                 .enumerate()
             {
-                do_row(row, u, m, l);
+                do_row(row, u, m, l)?;
             }
         }
     } else {
@@ -1733,7 +1743,7 @@ pub fn bollinger_bands_batch_inner_into(
             .zip(out_lower.chunks_mut(cols))
             .enumerate()
         {
-            do_row(row, u, m, l);
+            do_row(row, u, m, l)?;
         }
     }
 

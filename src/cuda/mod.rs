@@ -4,6 +4,9 @@
 //! runtime detection helpers and submodules for GPU-accelerated indicators.
 
 #[cfg(feature = "cuda")]
+use std::sync::OnceLock;
+
+#[cfg(feature = "cuda")]
 pub mod ad_wrapper;
 #[cfg(feature = "cuda")]
 pub mod adx_wrapper;
@@ -416,6 +419,8 @@ pub use vosc_wrapper::{
 pub fn cuda_available() -> bool {
     #[cfg(feature = "cuda")]
     {
+        static CUDA_AVAILABLE_CACHED: OnceLock<bool> = OnceLock::new();
+
         // Local iteration safety: when building with placeholder PTX or when explicitly
         // asked to skip CUDA probes, report unavailable to let tests skip gracefully.
         if std::env::var("CUDA_PLACEHOLDER_ON_FAIL").ok().as_deref() == Some("1")
@@ -423,41 +428,171 @@ pub fn cuda_available() -> bool {
         {
             return false;
         }
-        use cust::{device::Device, function::BlockSize, function::GridSize, module::Module, prelude::CudaFlags, stream::{Stream, StreamFlags}};
-        // Initialize the CUDA driver and query devices. Keep this defensive so
-        // it never panics when CUDA is missing.
-        if cust::init(CudaFlags::empty()).is_err() {
-            return false;
-        }
-        let ndev = match Device::num_devices() { Ok(n) => n, Err(_) => 0 };
-        if ndev == 0 { return false; }
-        // Probe a minimal kernel launch so test suites can confidently run.
-        // Some environments expose a device but cannot JIT/launch PTX (e.g., mismatched drivers).
-        // Launch a no-op kernel via a tiny PTX module; if it fails, treat CUDA as unavailable.
-        const PROBE_PTX: &str = r#"
-            .version 7.0
-            .target compute_52
-            .address_size 64
-            .visible .entry probe() {
-                ret;
-            }
-        "#;
-        let device = match Device::get_device(0) { Ok(d) => d, Err(_) => return false };
-        let context = match cust::context::Context::new(device) { Ok(c) => c, Err(_) => return false };
-        let module = match Module::from_ptx(PROBE_PTX, &[]) { Ok(m) => m, Err(_) => return false };
-        let func = match module.get_function("probe") { Ok(f) => f, Err(_) => return false };
-        let stream = match Stream::new(StreamFlags::NON_BLOCKING, None) { Ok(s) => s, Err(_) => return false };
-        unsafe {
-            let args: &mut [*mut std::ffi::c_void] = &mut [];
-            if stream.launch(&func, GridSize::xy(1, 1), BlockSize::xyz(1, 1, 1), 0, args).is_err() {
+        *CUDA_AVAILABLE_CACHED.get_or_init(|| {
+            use cust::{
+                device::Device,
+                function::BlockSize,
+                function::GridSize,
+                module::Module,
+                prelude::CudaFlags,
+                stream::{Stream, StreamFlags},
+            };
+
+            let debug = std::env::var("CUDA_PROBE_DEBUG").ok().as_deref() == Some("1");
+
+            // Initialize the CUDA driver and query devices. Keep this defensive so
+            // it never panics when CUDA is missing.
+            if let Err(err) = cust::init(CudaFlags::empty()) {
+                if debug {
+                    eprintln!("cuda_available: cust::init failed: {err:?}");
+                }
                 return false;
             }
-        }
-        if stream.synchronize().is_err() {
-            return false;
-        }
-        drop(context);
-        true
+
+            let ndev = match Device::num_devices() {
+                Ok(n) => n,
+                Err(err) => {
+                    if debug {
+                        eprintln!("cuda_available: Device::num_devices failed: {err:?}");
+                    }
+                    0
+                }
+            };
+            if ndev == 0 {
+                if debug {
+                    eprintln!("cuda_available: no CUDA devices reported");
+                }
+                return false;
+            }
+
+            // Probe a minimal kernel launch so test suites can confidently run.
+            // Some environments expose a device but cannot JIT/launch PTX (e.g., mismatched drivers).
+            //
+            // Probe PTX: keep this tiny and try a few PTX versions to stay compatible
+            // across a wide range of installed NVIDIA drivers/toolkits.
+            //
+            // NOTE: Some newer driver stacks are pickier about very old PTX versions.
+            // Try newest-first to avoid false "no device" skips in CI/dev environments.
+            const PROBE_PTXS: [&str; 3] = [
+                r#"
+                    .version 9.0
+                    .target sm_52
+                    .address_size 64
+                    .visible .entry probe() {
+                        ret;
+                    }
+                "#,
+                r#"
+                    .version 8.0
+                    .target sm_52
+                    .address_size 64
+                    .visible .entry probe() {
+                        ret;
+                    }
+                "#,
+                r#"
+                    .version 7.0
+                    .target compute_52
+                    .address_size 64
+                    .visible .entry probe() {
+                        ret;
+                    }
+                "#,
+            ];
+
+            let device = match Device::get_device(0) {
+                Ok(d) => d,
+                Err(err) => {
+                    if debug {
+                        eprintln!("cuda_available: Device::get_device(0) failed: {err:?}");
+                    }
+                    return false;
+                }
+            };
+
+            // IMPORTANT: Creating/dropping CUDA contexts is not cheap and can be
+            // fragile under heavy parallel test execution. Cache the result of
+            // this probe so it only runs once per process.
+            let _context = match cust::context::Context::new(device) {
+                Ok(c) => c,
+                Err(err) => {
+                    if debug {
+                        eprintln!("cuda_available: Context::new failed: {err:?}");
+                    }
+                    return false;
+                }
+            };
+
+            let mut module_opt = None;
+            if debug {
+                eprintln!(
+                    "cuda_available: trying PTX probe module load ({} candidates)",
+                    PROBE_PTXS.len()
+                );
+            }
+            for (idx, &ptx) in PROBE_PTXS.iter().enumerate() {
+                match Module::from_ptx(ptx, &[]) {
+                    Ok(m) => {
+                        module_opt = Some(m);
+                        if debug {
+                            eprintln!("cuda_available: probe PTX loaded (candidate #{idx})");
+                        }
+                        break;
+                    }
+                    Err(err) => {
+                        if debug {
+                            eprintln!(
+                                "cuda_available: probe PTX load failed (candidate #{idx}): {err:?}"
+                            );
+                        }
+                    }
+                }
+            }
+            let module = match module_opt {
+                Some(m) => m,
+                None => return false,
+            };
+            let func = match module.get_function("probe") {
+                Ok(f) => f,
+                Err(err) => {
+                    if debug {
+                        eprintln!("cuda_available: module.get_function(\"probe\") failed: {err:?}");
+                    }
+                    return false;
+                }
+            };
+            let stream = match Stream::new(StreamFlags::NON_BLOCKING, None) {
+                Ok(s) => s,
+                Err(err) => {
+                    if debug {
+                        eprintln!("cuda_available: Stream::new failed: {err:?}");
+                    }
+                    return false;
+                }
+            };
+            unsafe {
+                let args: &mut [*mut std::ffi::c_void] = &mut [];
+                if let Err(err) = stream.launch(
+                    &func,
+                    GridSize::xy(1, 1),
+                    BlockSize::xyz(1, 1, 1),
+                    0,
+                    args,
+                ) {
+                    if debug {
+                        eprintln!("cuda_available: stream.launch failed: {err:?}");
+                    }
+                    return false;
+                }
+            }
+            if let Err(err) = stream.synchronize() {
+                if debug {
+                    eprintln!("cuda_available: stream.synchronize failed: {err:?}");
+                }
+                return false;
+            }
+            true
+        })
     }
 
     #[cfg(not(feature = "cuda"))]

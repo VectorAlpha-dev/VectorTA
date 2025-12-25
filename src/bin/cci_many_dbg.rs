@@ -1,4 +1,5 @@
 #[cfg(feature = "cuda")]
+#[allow(dead_code)]
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() { return true; }
     (a - b).abs() <= tol

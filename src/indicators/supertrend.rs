@@ -400,30 +400,7 @@ pub fn supertrend_with_kernel(
     input: &SuperTrendInput,
     kernel: Kernel,
 ) -> Result<SuperTrendOutput, SuperTrendError> {
-    // Use classic kernel for default parameters
-    let (high, low, close) = input.as_hlc();
-    let period = input.get_period();
-    let factor = input.get_factor();
-
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
-
-    // Use classic kernel for default parameters with scalar kernel
-    if chosen == Kernel::Scalar && period == 10 && (factor - 3.0).abs() < f64::EPSILON {
-        let len = high.len();
-        let mut trend = alloc_with_nan_prefix(len, 0);
-        let mut changed = alloc_with_nan_prefix(len, 0);
-
-        unsafe {
-            supertrend_scalar_classic(high, low, close, period, factor, &mut trend, &mut changed)?;
-        }
-
-        return Ok(SuperTrendOutput { trend, changed });
-    }
-
-    // Regular implementation
+    // Regular implementation (always) — precompute ATR and run the tight scalar core.
     let (high, low, close, period, factor, first_valid_idx, atr_values, chosen) =
         supertrend_prepare(input, kernel)?;
 

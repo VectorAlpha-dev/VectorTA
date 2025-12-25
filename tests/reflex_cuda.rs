@@ -44,10 +44,10 @@ fn reflex_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::e
 
     let sweep = ReflexBatchRange { period: (4, 64, 7) };
 
-    let cpu = reflex_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
-
     let cuda = CudaReflex::new(0).expect("CudaReflex::new");
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    let data32_as_f64: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
+    let cpu = reflex_batch_with_kernel(&data32_as_f64, &sweep, Kernel::ScalarBatch)?;
     let gpu_handle = cuda
         .reflex_batch_dev(&data_f32, &sweep)
         .expect("cuda reflex_batch_dev");
@@ -97,11 +97,13 @@ fn reflex_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
 
     let period = 18usize;
 
+    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
+
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     for j in 0..num_series {
         let mut series = vec![f64::NAN; series_len];
         for t in 0..series_len {
-            series[t] = data_tm[t * num_series + j];
+            series[t] = data_tm_f32[t * num_series + j] as f64;
         }
         let out = ReflexBuilder::default()
             .period(period)
@@ -113,7 +115,6 @@ fn reflex_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     }
 
     let cuda = CudaReflex::new(0).expect("CudaReflex::new");
-    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let gpu_handle = cuda
         .reflex_many_series_one_param_time_major_dev(&data_tm_f32, num_series, series_len, period)
         .expect("cuda reflex_many_series_one_param_time_major_dev");

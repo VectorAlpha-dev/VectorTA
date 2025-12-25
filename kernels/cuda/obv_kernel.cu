@@ -130,21 +130,26 @@ void obv_batch_f32_pass1_tilescan(
     // Shared memory for warp prefixes
     constexpr int NUM_WARPS = (OBV_BLOCK_SIZE + 31) / 32;
     __shared__ FPair warp_buf[NUM_WARPS];
+    __shared__ FPair seg_sum_shared;
 
-    // Prepare per-thread local scan (within the thread's ITEMS)
-    FPair prefix_local[ITEMS];
-    #pragma unroll
-    for (int j = 0; j < ITEMS; ++j) prefix_local[j] = make_zero_pair();
+    // Running sum of all prior segments (each segment is blockDim.x items).
+    FPair seg_base = make_zero_pair();
 
-    FPair running = make_zero_pair();
     int lane  = tid & 31;
     unsigned full = 0xFFFFFFFFu;
 
-    // Load/compute in micro-batches spaced by blockDim.x (coalesced).
+    // Scan each coalesced segment (j) in time order, carrying seg_base forward.
     #pragma unroll
     for (int j = 0; j < ITEMS; ++j) {
         int i = tile_beg + j * blockDim.x + tid;
         float inc = 0.0f;
+
+        // NOTE: All lanes must participate in warp shuffles. We pre-load close[i]
+        // (or 0 for out-of-range) and compute the shuffle unconditionally, then
+        // only use it when i is in-range and past warmup.
+        float ci = 0.0f;
+        if (i < series_len) ci = close[i];
+        float cim1_warp = __shfl_up_sync(full, ci, 1);
 
         if (i < series_len) {
             if (i < fv) {
@@ -153,10 +158,8 @@ void obv_batch_f32_pass1_tilescan(
                 out[base + i] = 0.0f;
             } else {
                 // Compute sign(close[i] - close[i-1]) * volume[i]
-                float ci = close[i];
                 // obtain close[i-1] via warp shuffle; lane 0 falls back to global
-                float cim1 = (lane > 0) ? __shfl_up_sync(full, ci, 1)
-                                        : ((i > 0) ? close[i - 1] : ci);
+                float cim1 = (lane > 0) ? cim1_warp : ((i > 0) ? close[i - 1] : ci);
                 // branchless sign in {-1,0,+1}
                 int gt = (ci > cim1);
                 int lt = (ci < cim1);
@@ -164,41 +167,28 @@ void obv_batch_f32_pass1_tilescan(
                 inc = sgn * volume[i];
             }
         }
-        running = fp_add_f(running, inc);
-        prefix_local[j] = running; // thread-local inclusive prefix
+
+        // Inclusive scan of this segment across threads (time order within segment).
+        FPair v = {inc, 0.0f};
+        FPair excl = block_exclusive_offset<NUM_WARPS>(v, warp_buf);
+        FPair incl = fp_add_pair(excl, v);
+        FPair full_prefix = fp_add_pair(seg_base, incl);
+
+        if (i < series_len && i > fv) {
+            out[base + i] = fp_collapse(full_prefix);
+        }
+
+        // Segment total (sum over all threads) is the last thread's inclusive value.
+        if (tid == (blockDim.x - 1)) {
+            seg_sum_shared = incl;
+        }
+        __syncthreads();
+        seg_base = fp_add_pair(seg_base, seg_sum_shared);
     }
 
-    // thread_total is the last element of the local prefix
-    FPair thread_total = prefix_local[ITEMS - 1];
-
-    // Compute exclusive block offset for this thread
-    FPair block_off = block_exclusive_offset<NUM_WARPS>(thread_total, warp_buf);
-
-    // Add block offset to each local prefix and write out
-    #pragma unroll
-    for (int j = 0; j < ITEMS; ++j) {
-        int i = tile_beg + j * blockDim.x + tid;
-        if (i >= series_len) break;
-        if (i <= fv) continue; // we already wrote NaN or 0
-        FPair v = fp_add_pair(prefix_local[j], block_off);
-        out[base + i] = fp_collapse(v);
-    }
-
-    // One thread computes and stores the total for this tile
-    // Recover final tile sum from the last element written in this tile
-    int last_i = tile_end - 1;
-    int last_tid = last_i - tile_beg;
-    int last_thread = last_tid % blockDim.x;
-    int last_slot   = last_tid / blockDim.x;
-    __shared__ FPair tile_sum_shared;
-    if (tid == last_thread) {
-        FPair last_local = prefix_local[last_slot];
-        FPair my_total = fp_add_pair(last_local, block_off);
-        tile_sum_shared = my_total;
-    }
-    __syncthreads();
+    // Total tile sum (used by pass2) is the sum of all segments.
     if (tid == 0) {
-        block_sums[bid] = tile_sum_shared;
+        block_sums[bid] = seg_base;
     }
 }
 

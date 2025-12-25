@@ -227,16 +227,7 @@ pub fn donchian_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => {
-            #[cfg(target_arch = "wasm32")]
-            {
-                detect_best_kernel()
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                detect_best_kernel()
-            }
-        }
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 

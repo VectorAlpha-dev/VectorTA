@@ -39,8 +39,7 @@ use crate::cuda::oscillators::CudaCci;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -1234,6 +1233,25 @@ fn cci_batch_inner(
     let cols = data.len();
     let rows = combos.len();
 
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(CciError::AllValuesNaN)?;
+    let mut max_p = 0usize;
+    for c in &combos {
+        let p = c.period.unwrap();
+        if p == 0 || p > cols {
+            return Err(CciError::InvalidPeriod { period: p, data_len: cols });
+        }
+        max_p = max_p.max(p);
+    }
+    if cols - first < max_p {
+        return Err(CciError::NotEnoughValidData {
+            needed: max_p,
+            valid: cols - first,
+        });
+    }
+
     // Guard potential overflow in matrix allocation.
     rows.checked_mul(cols).ok_or(CciError::InvalidRange {
         start: sweep.period.0,
@@ -1243,33 +1261,19 @@ fn cci_batch_inner(
 
     // 1. Allocate *uninitialised* matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
+    let out_ptr = buf_mu.as_mut_ptr() as *mut f64;
+    let out_len = buf_mu.len();
+    let out_cap = buf_mu.capacity();
+    let out: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_len) };
 
-    // 2. Fill the NaN warm-up prefix row-wise
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| data.iter().position(|x| !x.is_nan()).unwrap_or(0) + c.period.unwrap() - 1)
-        .collect();
-    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    // 2. Compute into it in place
+    // Safety: the batch compute fills [first+period-1..] per row and we write NaN prefixes.
+    // Errors are pre-validated above to avoid leaking the backing buffer.
+    let _ = cci_batch_inner_into(data, sweep, kern, parallel, out)?;
 
-    // 3. Convert &[MaybeUninit<f64>] → &mut [f64]
-    //    *after* the prefixes are written but *before*
-    //    the compute kernels run – they will write the rest.
-    let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
-    let out: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
-    };
-
-    // 4. Compute into it in place
-    cci_batch_inner_into(data, sweep, kern, parallel, out)?;
-
-    // 5. Reclaim the buffer as a normal Vec<f64> for the return value
-    let values = unsafe {
-        Vec::from_raw_parts(
-            buf_guard.as_mut_ptr() as *mut f64,
-            buf_guard.len(),
-            buf_guard.capacity(),
-        )
-    };
+    // 3. Reclaim the buffer as a normal Vec<f64> for the return value
+    let values = unsafe { Vec::from_raw_parts(out_ptr, out_len, out_cap) };
+    core::mem::forget(buf_mu);
 
     Ok(CciBatchOutput {
         values,
@@ -1300,7 +1304,14 @@ fn cci_batch_inner_into(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(CciError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let mut max_p = 0usize;
+    for c in &combos {
+        let p = c.period.unwrap();
+        if p == 0 || p > data.len() {
+            return Err(CciError::InvalidPeriod { period: p, data_len: data.len() });
+        }
+        max_p = max_p.max(p);
+    }
     if data.len() - first < max_p {
         return Err(CciError::NotEnoughValidData {
             needed: max_p,

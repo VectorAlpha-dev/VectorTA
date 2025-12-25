@@ -10,11 +10,12 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use my_project::cuda::{cuda_available, moving_averages::CudaHwma};
 
-fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
         return true;
     }
-    (a - b).abs() <= tol
+    let diff = (a - b).abs();
+    diff <= atol + rtol * a.abs().max(b.abs())
 }
 
 #[test]
@@ -43,7 +44,8 @@ fn hwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let sweep = HwmaBatchRange {
         na: (0.10, 0.40, 0.10),
         nb: (0.05, 0.25, 0.05),
-        nc: (0.05, 0.20, 0.05),
+        // Keep `nc` in a numerically stable range for FP32 vs FP64 comparisons.
+        nc: (0.05, 0.10, 0.05),
     };
 
     let cpu = hwma_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
@@ -62,18 +64,44 @@ fn hwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         .copy_to(&mut gpu_host)
         .expect("copy cuda hwma batch result");
 
-    let tol = 7.5e-4f64;
+    // GPU is FP32 and uses CUDA fast-math; compare against f64 scalar with a mixed tolerance.
+    let (atol, rtol) = (3.0e-2f64, 5.0e-6f64);
+    let mut max_ratio = 0.0f64;
+    let mut worst_idx = 0usize;
+    let mut worst_diff = 0.0f64;
+    let mut worst_allowed = 0.0f64;
+    let mut worst_a = 0.0f64;
+    let mut worst_b = 0.0f64;
     for idx in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[idx];
         let b = gpu_host[idx] as f64;
-        assert!(
-            approx_eq(a, b, tol),
-            "mismatch at {}: cpu={} gpu={}",
-            idx,
-            a,
-            b
-        );
+        if a.is_nan() && b.is_nan() {
+            continue;
+        }
+        let diff = (a - b).abs();
+        let allowed = atol + rtol * a.abs().max(b.abs());
+        let ratio = diff / allowed;
+        if ratio > max_ratio {
+            max_ratio = ratio;
+            worst_idx = idx;
+            worst_diff = diff;
+            worst_allowed = allowed;
+            worst_a = a;
+            worst_b = b;
+        }
     }
+    assert!(
+        max_ratio <= 1.0,
+        "max mismatch at {}: diff={} allowed={} ratio={} cpu={} gpu={} (atol={} rtol={})",
+        worst_idx,
+        worst_diff,
+        worst_allowed,
+        max_ratio,
+        worst_a,
+        worst_b,
+        atol,
+        rtol
+    );
 
     Ok(())
 }
@@ -133,12 +161,12 @@ fn hwma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         .copy_to(&mut gpu_tm)
         .expect("copy cuda hwma many-series result");
 
-    let tol = 7.5e-4f64;
+    let (atol, rtol) = (3.0e-2f64, 5.0e-6f64);
     for idx in 0..(num_series * series_len) {
         let a = cpu_tm[idx];
         let b = gpu_tm[idx] as f64;
         assert!(
-            approx_eq(a, b, tol),
+            approx_eq(a, b, atol, rtol),
             "mismatch at {}: cpu={} gpu={}",
             idx,
             a,

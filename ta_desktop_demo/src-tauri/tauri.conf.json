@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "TA Desktop Demo",
+        "create": false,
         "width": 1280,
         "height": 720
       }

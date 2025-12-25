@@ -525,7 +525,8 @@ pub fn mom_batch_with_kernel(
     k: Kernel,
 ) -> Result<MomBatchOutput, MomError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Disable SIMD selection by default; see decision note at top of module.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(MomError::InvalidKernelForBatch(other)),
     };

@@ -100,13 +100,15 @@ fn net_myrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         }
     }
 
+    let data_tm32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
+
     // CPU per-series baseline
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     let p = NetMyrsiParams { period: Some(14) };
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
         for r in 0..rows {
-            series[r] = data_tm[r * cols + s];
+            series[r] = data_tm32[r * cols + s] as f64;
         }
         let out = net_myrsi_with_kernel(
             &NetMyrsiInput::from_slice(&series, p.clone()),
@@ -118,7 +120,6 @@ fn net_myrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         }
     }
 
-    let data_tm32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaNetMyrsi::new(0).expect("CudaNetMyrsi::new");
     let dev = cuda
         .net_myrsi_many_series_one_param_time_major_dev(&data_tm32, cols, rows, &p)
@@ -131,10 +132,15 @@ fn net_myrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
 
     let tol = 1e-3;
     for idx in 0..gpu_tm.len() {
+        let c = cpu_tm[idx];
+        let g = gpu_tm[idx] as f64;
         assert!(
-            approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, tol),
-            "mismatch at {}",
-            idx
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={} diff={}",
+            idx,
+            c,
+            g,
+            (c - g).abs()
         );
     }
     Ok(())

@@ -24,8 +24,7 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -257,7 +256,9 @@ fn trix_prepare<'a>(
         });
     }
     let chosen = match k {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD is disabled for single-series TRIX (sequential triple EMA + ln()).
+        // Short-circuit Auto to scalar to avoid runtime detection overhead.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     let alpha = 2.0 / (period as f64 + 1.0);
@@ -711,7 +712,9 @@ pub fn trix_batch_with_kernel(
     k: Kernel,
 ) -> Result<TrixBatchOutput, TrixError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Batch kernels are currently scalar (row-parallel) and ignore SIMD selections.
+        // Short-circuit Auto to scalarbatch to avoid runtime detection overhead.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(TrixError::InvalidKernelForBatch(k));
@@ -1340,7 +1343,7 @@ pub fn trix_batch_py<'py>(
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
+                Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
             };
             let simd = match kernel {
@@ -1469,7 +1472,7 @@ pub fn trix_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = TrixInput::from_slice(data, params);
     let mut output = vec![f64::NAN; data.len()];
-    trix_into_slice(&mut output, &input, detect_best_kernel())
+    trix_into_slice(&mut output, &input, Kernel::Scalar)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(output)
 }
@@ -1512,12 +1515,12 @@ pub fn trix_into(
         let input = TrixInput::from_slice(data, params);
         if in_ptr == out_ptr {
             let mut tmp = vec![f64::NAN; len];
-            trix_into_slice(&mut tmp, &input, detect_best_kernel())
+            trix_into_slice(&mut tmp, &input, Kernel::Scalar)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             std::slice::from_raw_parts_mut(out_ptr, len).copy_from_slice(&tmp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            trix_into_slice(out, &input, detect_best_kernel())
+            trix_into_slice(out, &input, Kernel::Scalar)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
     }
@@ -1549,7 +1552,7 @@ pub fn trix_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> 
         period: config.period_range,
     };
 
-    let output = trix_batch_inner(data, &sweep, detect_best_kernel(), false)
+    let output = trix_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let periods: Vec<usize> = output.combos.iter().map(|p| p.period.unwrap()).collect();
@@ -1597,7 +1600,7 @@ pub fn trix_batch_into(
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
         // Use the existing batch function that writes directly to output
-        trix_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+        trix_batch_inner_into(data, &sweep, Kernel::Scalar, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         Ok(num_combos)

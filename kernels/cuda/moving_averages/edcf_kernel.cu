@@ -19,6 +19,41 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
+#include "../ds_float2.cuh"
+
+// Robust double-single renormalization (no |hi| >= |lo| assumption).
+__device__ __forceinline__ dsf ds_renorm_full(float s, float e) {
+    float t  = s + e;
+    float z  = t - s;
+    float lo = (s - (t - z)) + (e - z);
+    return {t, lo};
+}
+
+__device__ __forceinline__ dsf ds_add_full(dsf a, dsf b) {
+    // Knuth TwoSum on hi parts + accumulate lo parts; renormalize without ordering assumptions.
+    float s  = a.hi + b.hi;
+    float z  = s - a.hi;
+    float e  = (a.hi - (s - z)) + (b.hi - z);
+    e += a.lo + b.lo;
+    return ds_renorm_full(s, e);
+}
+
+__device__ __forceinline__ dsf ds_scale_full(dsf a, float s) {
+    float p  = a.hi * s;
+    float e  = fmaf(a.hi, s, -p) + a.lo * s;
+    return ds_renorm_full(p, e);
+}
+
+__device__ __forceinline__ dsf ds_mul_full(dsf a, dsf b) {
+    float p  = a.hi * b.hi;
+    float e  = fmaf(a.hi, b.hi, -p);
+    e += a.hi * b.lo + a.lo * b.hi;
+    e += a.lo * b.lo;
+    return ds_renorm_full(p, e);
+}
+
+__device__ __forceinline__ dsf ds_neg_full(dsf a) { return {-a.hi, -a.lo}; }
+__device__ __forceinline__ dsf ds_sub_full(dsf a, dsf b) { return ds_add_full(a, ds_neg_full(b)); }
 
 extern "C" __global__
 void edcf_compute_dist_f32(const float* __restrict__ prices,
@@ -88,28 +123,18 @@ __device__ __forceinline__ void edcf_compute_dist_rolling_tiled_f32(const float*
 
     // Initialize rolling sums for the first output at j0
     if (threadIdx.x == 0) {
-        // Kahan/Neumaier-compensated accumulators for s1=sum(x), s2=sum(x^2)
-        float s1 = 0.f, c1 = 0.f;
-        float s2 = 0.f, c2 = 0.f;
+        // Use double-single (float2) accumulators to avoid catastrophic cancellation:
+        // w = m*x^2 - 2*x*sum(prev) + sum(prev^2) is small for near-flat data yet involves
+        // subtracting large terms; DS keeps enough mantissa to preserve small weights.
+        dsf sum1 = ds_set(0.f);
+        dsf sum2 = ds_set(0.f);
         #pragma unroll 1
         for (int i = 0; i < m; ++i) {
             const float v  = sh_prices[i];
-            const float v2 = v * v;
-
-            // Kahan for s1
-            float y = v - c1;
-            float t = s1 + y;
-            c1 = (t - s1) - y;
-            s1 = t;
-
-            // Kahan for s2
-            float y2 = v2 - c2;
-            float t2 = s2 + y2;
-            c2 = (t2 - s2) - y2;
-            s2 = t2;
+            const dsf dv = ds_set(v);
+            sum1 = ds_add_full(sum1, dv);
+            sum2 = ds_add_full(sum2, ds_mul_full(dv, dv));
         }
-        float sum1 = s1 + c1;
-        float sum2 = s2 + c2;
 
         // Emit zeros for [base..j0-1] (tile head before warm)
         for (int k = base; k < j0; ++k) if (k <= j1) dist[k] = 0.0f;
@@ -119,15 +144,20 @@ __device__ __forceinline__ void edcf_compute_dist_rolling_tiled_f32(const float*
         #pragma unroll 1
         for (int u = 0; u < out_cnt; ++u) {
             const float xk   = sh_prices[m + u];
-            const float xk2  = xk * xk;
-            const float w    = __fmaf_rn((float)m, xk2, __fmaf_rn(-2.f * xk, sum1, sum2));
+            const dsf xk_ds  = ds_set(xk);
+            const dsf xk2_ds = ds_mul_full(xk_ds, xk_ds);
+            dsf w_ds = ds_add_full(ds_scale_full(xk2_ds, (float)m), sum2);
+            w_ds = ds_add_full(w_ds, ds_scale_full(ds_mul_full(xk_ds, sum1), -2.f));
+            float w = w_ds.hi + w_ds.lo;
+            // Distance weights are a sum of squared differences and must be >= 0.
+            w = fmaxf(w, 0.0f);
             dist[j0 + u] = w;
 
             // Advance window: remove sh_prices[u], add xk
             const float v_out  = sh_prices[u];
-            const float v_out2 = v_out * v_out;
-            sum1 += (xk - v_out);
-            sum2 += (xk2 - v_out2);
+            sum1 = ds_add_full(sum1, ds_set(xk - v_out));
+            const dsf v_out2_ds = ds_mul_full(ds_set(v_out), ds_set(v_out));
+            sum2 = ds_add_full(sum2, ds_sub_full(xk2_ds, v_out2_ds));
         }
     }
 }
@@ -244,7 +274,7 @@ __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* _
         int gidx = start + i;
         float4 pv = make_float4(0.f, 0.f, 0.f, 0.f);
         float4 dv = make_float4(0.f, 0.f, 0.f, 0.f);
-        if (gidx >= 0 && gidx + 3 < len && ((gidx & 3) == 0)) {
+        if (gidx >= first_valid && gidx + 3 < len && ((gidx & 3) == 0)) {
             const float4* __restrict__ p4 = reinterpret_cast<const float4*>(prices + gidx);
             const float4* __restrict__ d4 = reinterpret_cast<const float4*>(dist + gidx);
             pv = *p4; dv = *d4;
@@ -253,7 +283,15 @@ __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* _
             for (int k = 0; k < 4; ++k) {
                 int idx = gidx + k;
                 float p = 0.f, w = 0.f;
-                if (idx >= 0 && idx < len) { p = prices[idx]; w = dist[idx]; }
+                if (idx >= 0 && idx < len) {
+                    if (idx >= first_valid) {
+                        p = prices[idx];
+                        w = dist[idx];
+                    } else {
+                        p = 0.f;
+                        w = 0.f;
+                    }
+                }
                 ((float*)&pv)[k] = p; ((float*)&dv)[k] = w;
             }
         }
@@ -263,7 +301,15 @@ __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* _
     for (int t = vec_elems + threadIdx.x; t < tile_elems; t += blockDim.x) {
         int gidx = start + t;
         float p = 0.f, w = 0.f;
-        if (gidx >= 0 && gidx < len) { p = prices[gidx]; w = dist[gidx]; }
+        if (gidx >= 0 && gidx < len) {
+            if (gidx >= first_valid) {
+                p = prices[gidx];
+                w = dist[gidx];
+            } else {
+                p = 0.f;
+                w = 0.f;
+            }
+        }
         sh_prices[t] = p;
         sh_dist[t]   = w;
     }
@@ -460,7 +506,11 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
     for (int t = threadIdx.x; t < p_len; t += blockDim.x) {
         int ti = p_start + t;
         float v = 0.f;
-        if (ti >= 0 && ti < rows) { v = prices_tm[ti * stride + s]; }
+        if (ti >= 0 && ti < rows) {
+            // Treat leading warmup values (ti < first_valid) as zeros so they don't
+            // poison prefix sums via 0*NaN propagation.
+            v = (ti >= first_valid) ? prices_tm[ti * stride + s] : 0.f;
+        }
         sh_prices[t] = v;
     }
     __syncthreads();
@@ -472,6 +522,14 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
 
     for (int u = threadIdx.x; u < d_len; u += blockDim.x) {
         int k = d_start + u;
+        // Match scalar semantics: weights are defined only once we have `period` prior samples.
+        // For k < first_valid + period, treat distance weights as 0 so early warmup values
+        // don't pollute prefix sums via large dummy distances.
+        const int start = first_valid + period;
+        if (k < start) {
+            sh_dist[u] = 0.f;
+            continue;
+        }
         float xk;
         if (k >= 0 && (k - (p_start)) >= 0 && (k - p_start) < p_len) {
             xk = sh_prices[(k - p_start)];

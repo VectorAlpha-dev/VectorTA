@@ -802,14 +802,14 @@ pub fn zlema_batch_with_kernel(
         _ => Kernel::ScalarBatch, // Fallback for any unknown kernels
     };
 
-    // Disable SIMD for batch: sequential EMA across rows; negligible wins observed
-    let simd = match kernel {
-        Kernel::Avx512Batch => Kernel::Scalar,
-        Kernel::Avx2Batch => Kernel::Scalar,
-        Kernel::ScalarBatch => Kernel::Scalar,
-        _ => unreachable!(),
+    // Disable SIMD for batch: ZLEMA is sequential and period-varying; negligible wins observed
+    // and AVX-512 downclock can dominate. Keep the kernel parameter for API parity but execute
+    // the scalar batch path.
+    let kernel = match kernel {
+        Kernel::Avx512Batch | Kernel::Avx2Batch => Kernel::ScalarBatch,
+        other => other,
     };
-    zlema_batch_par_slice(data, sweep, simd)
+    zlema_batch_par_slice(data, sweep, kernel)
 }
 
 #[derive(Clone, Debug)]

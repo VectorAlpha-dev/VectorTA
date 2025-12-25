@@ -244,7 +244,9 @@ pub fn kurtosis_with_kernel(
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are currently stubs (they call the scalar implementation). Avoid
+        // runtime detection overhead for `Kernel::Auto` on the single-series API.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -311,7 +313,9 @@ pub fn kurtosis_into_slice(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are currently stubs (they call the scalar implementation). Avoid
+        // runtime detection overhead for `Kernel::Auto` on the single-series API.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -434,7 +438,8 @@ pub fn kurtosis_batch_with_kernel(
     k: Kernel,
 ) -> Result<KurtosisBatchOutput, KurtosisError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Batch SIMD kernels are currently stubbed via the single-series scalar implementation.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(KurtosisError::InvalidKernelForBatch(other)),
     };

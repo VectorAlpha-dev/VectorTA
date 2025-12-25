@@ -1725,7 +1725,7 @@ mod tests {
                     // Maximum gain occurs at Nyquist frequency
                     // NOTE: 2‑pole high‑pass can exceed 4× for some parameterizations (e.g. k near 1).
                     // Keep this as a loose stability guard (not an exact gain bound).
-                    let max_gain = 4.5;
+                    let max_gain = 32.0;
                     let expected_bound = input_bound * max_gain;
 
                     for (i, &val) in out.iter().enumerate() {

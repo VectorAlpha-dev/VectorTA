@@ -267,10 +267,11 @@ pub fn ift_rsi_with_kernel(
             valid: len - first,
         });
     }
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
+    // SIMD kernels are currently stubs (they call the scalar classic kernel). Avoid paying
+    // runtime detection overhead for `Kernel::Auto` on the single-series API.
+    if kernel.is_batch() {
+        return Err(IftRsiError::WrongKernelForBatch);
+    }
 
     // Calculate warmup period: first + rsi_period + wma_period - 1
     let warmup_period = first + rsi_period + wma_period - 1;

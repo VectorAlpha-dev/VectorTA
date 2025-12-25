@@ -252,7 +252,15 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
     let mut out = alloc_with_nan_prefix(len, first + period);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => {
+            // For common small windows (<= 65), the scalar kernel uses precomputed weights
+            // and an unrolled dot-product which consistently outperforms the current AVX paths.
+            if period <= 65 {
+                Kernel::Scalar
+            } else {
+                detect_best_kernel()
+            }
+        }
         other => other,
     };
 

@@ -337,8 +337,9 @@ void uma_batch_f32(const float* __restrict__ prices,
         }
 
         // ----- Power weights exponent p -----
-        const float mf_scaled = mf * 2.0f - 100.0f;
-        p = accelerator + fabsf(mf_scaled) / 25.0f;
+        // Match CPU reference: mf_scaled = 2*mf - 100; p = accelerator + abs(mf_scaled) * 0.04
+        const float mf_scaled = fmaf(mf, 2.0f, -100.0f);
+        p = fmaf(fabsf(mf_scaled), 0.04f, accelerator);
 
         // ----- Warp-cooperative weighted sum over len_r -----
         float ws_part = 0.0f, wt_part = 0.0f;
@@ -561,8 +562,9 @@ void uma_many_series_one_param_f32(const float* __restrict__ prices_tm,
             mf = __shfl_sync(mask, mf, 0);
         }
 
-        const float mf_scaled = mf * 2.0f - 100.0f;
-        const float p_local = accelerator + fabsf(mf_scaled) / 25.0f;
+        // Match CPU reference: mf_scaled = 2*mf - 100; p = accelerator + abs(mf_scaled) * 0.04
+        const float mf_scaled = fmaf(mf, 2.0f, -100.0f);
+        const float p_local = fmaf(fabsf(mf_scaled), 0.04f, accelerator);
 
         float ws_part = 0.0f, wt_part = 0.0f;
         for (int j = lane; j < len_r; j += lanes) {

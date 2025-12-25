@@ -312,7 +312,8 @@ pub fn safezonestop_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // AVX2/AVX512 kernels are stubs for this indicator; keep Auto on the scalar path.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -415,7 +416,8 @@ pub fn safezonestop_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        // AVX2/AVX512 kernels are stubs for this indicator; keep Auto on the scalar path.
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -1149,7 +1151,8 @@ pub fn safezonestop_batch_with_kernel(
     k: Kernel,
 ) -> Result<SafeZoneStopBatchOutput, SafeZoneStopError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Batch AVX kernels are stubs/delegating; keep Auto on the scalar batch path.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(SafeZoneStopError::InvalidKernelForBatch(other)),
     };

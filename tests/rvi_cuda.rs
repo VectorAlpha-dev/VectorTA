@@ -47,9 +47,10 @@ fn rvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         devtype: (0, 0, 0),
     };
 
-    let cpu = rvi_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
-
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    // Match the FP32 input domain used by the CUDA wrapper.
+    let data_f64_q: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
+    let cpu = rvi_batch_with_kernel(&data_f64_q, &sweep, Kernel::ScalarBatch)?;
     let cuda = CudaRvi::new(0).expect("CudaRvi::new");
     let (dev, combos) = cuda
         .rvi_batch_dev(&data_f32, &sweep)
@@ -88,6 +89,12 @@ fn rvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         matype: Some(1),
         devtype: Some(0),
     };
+    for s in 0..cols {
+        for t in s..rows {
+            let x = (t as f64) + (s as f64) * 0.2;
+            tm[t * cols + s] = (x * 0.0011).sin() + 0.00021 * x;
+        }
+    }
 
     // CPU baseline per series (scalar)
     let mut cpu_tm = vec![f64::NAN; cols * rows];

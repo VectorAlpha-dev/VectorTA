@@ -8,8 +8,9 @@
 // Warmup/NaN policy matches scalar:
 //   - Leading indices before first_valid are NaN
 //   - Momentum becomes valid after first_valid + lookback
-//   - indicator warmup = mom_first_valid + period - 1
-//   - signal warmup    = indicator_warmup + signal_period - 1
+//   - EMA outputs from the first non-NaN input (running-mean warmup)
+//   - For EMA/EMA (the only CUDA path currently exposed), indicator and signal
+//     outputs begin at the first non-NaN momentum index (scaled by 100.0).
 
 #include <cuda_runtime.h>
 #include <math.h>
@@ -65,59 +66,73 @@ extern "C" __global__ void rsmk_apply_mom_single_row_ema_ema_f32(
     const float nanf = qnan32();
     if (len <= 0 || period <= 0 || signal_period <= 0) return;
 
-    const int ind_warm = first_valid_mom + period - 1;
-    const int sig_warm = ind_warm + signal_period - 1;
-    const float alpha_ind = 2.0f / (float(period) + 1.0f);
-    const float alpha_sig = 2.0f / (float(signal_period) + 1.0f);
+    // Match `ema_scalar_into` warmup semantics:
+    // - Find the first non-NaN input value (NaN prefix only)
+    // - Output running-mean for the first `period` samples
+    // - Then apply EMA updates (skipping non-finite inputs)
+    int first = first_valid_mom;
+    if (first < 0) first = 0;
+    if (first >= len) return;
+    while (first < len && isnan(mom[first])) { first += 1; }
 
-    // Warmup prefixes
-    for (int i = 0; i < min(ind_warm, len); ++i) { out_indicator[i] = nanf; }
-    for (int i = 0; i < min(sig_warm, len); ++i) { out_signal[i] = nanf; }
-    if (ind_warm >= len) return;
-
-    // Seed EMA(indicator) from SMA of first `period` momentum points (NaN-aware)
-    double sum = 0.0; int cnt = 0;
-    const int init_end = min(len, first_valid_mom + period);
-    for (int i = first_valid_mom; i < init_end; ++i) {
-        const float v = mom[i];
-        if (!isnan(v)) { sum += (double)v; cnt += 1; }
+    // NaN prefixes
+    for (int i = 0; i < min(first, len); ++i) {
+        out_indicator[i] = nanf;
+        out_signal[i] = nanf;
     }
-    if (cnt == 0) {
-        // No finite seed: leave post-warmup as NaN as per scalar policy
-        for (int i = ind_warm; i < len; ++i) { out_indicator[i] = nanf; }
-        for (int i = sig_warm; i < len; ++i) { out_signal[i] = nanf; }
-        return;
-    }
-    double ema_ind = (sum / double(cnt)) * 100.0;
-    out_indicator[ind_warm] = (float)ema_ind;
+    if (first >= len) return;
 
-    // Seed EMA(signal) from first `signal_period` indicator values
-    double ema_sig = 0.0; bool sig_seeded = false;
-    double acc_sig = ema_ind; int cnt_sig = 1;
-    if (sig_warm == ind_warm) {
-        ema_sig = (acc_sig / double(cnt_sig));
-        out_signal[sig_warm] = (float)ema_sig; sig_seeded = true;
-    }
+    const double alpha_ind = 2.0 / (double(period) + 1.0);
+    const double beta_ind = 1.0 - alpha_ind;
+    const double alpha_sig = 2.0 / (double(signal_period) + 1.0);
+    const double beta_sig = 1.0 - alpha_sig;
 
-    for (int i = ind_warm + 1; i < len; ++i) {
-        const float mv = mom[i];
-        if (!isnan(mv)) {
-            const double src100 = (double)mv * 100.0;
-            // ema_ind = ema_ind + alpha*(src100 - ema_ind)
-            ema_ind = ((double)alpha_ind) * (src100 - ema_ind) + ema_ind;
-        }
-        out_indicator[i] = (float)ema_ind;
+    // indicator EMA over momentum (scaled by 100.0)
+    double ind_mean = (double)mom[first] * 100.0;
+    double ind_val = ind_mean;
+    out_indicator[first] = (float)ind_val;
+    int ind_count = 1;
+    int ind_warm_end = first + period;
+    if (ind_warm_end > len) ind_warm_end = len;
 
-        if (!sig_seeded) {
-            if (i < sig_warm) { acc_sig += ema_ind; cnt_sig += 1; }
-            else if (i == sig_warm) {
-                ema_sig = (acc_sig / (double)cnt_sig);
-                out_signal[i] = (float)ema_sig; sig_seeded = true; continue;
+    // signal EMA over indicator
+    double sig_mean = ind_val;
+    double sig_val = sig_mean;
+    out_signal[first] = (float)sig_val;
+    int sig_count = 1;
+    int sig_warm_end = first + signal_period;
+    if (sig_warm_end > len) sig_warm_end = len;
+
+    for (int i = first + 1; i < len; ++i) {
+        const double x = (double)mom[i] * 100.0;
+        if (i < ind_warm_end) {
+            if (isfinite(x)) {
+                ind_count += 1;
+                const double vc = (double)ind_count;
+                ind_mean = ((vc - 1.0) * ind_mean + x) / vc;
             }
+            ind_val = ind_mean;
         } else {
-            ema_sig = ((double)alpha_sig) * (ema_ind - ema_sig) + ema_sig;
-            out_signal[i] = (float)ema_sig;
+            if (isfinite(x)) {
+                ind_val = beta_ind * ind_val + alpha_ind * x;
+            }
         }
+        out_indicator[i] = (float)ind_val;
+
+        // Update signal from the (double) indicator value for best parity
+        if (i < sig_warm_end) {
+            if (isfinite(ind_val)) {
+                sig_count += 1;
+                const double vc = (double)sig_count;
+                sig_mean = ((vc - 1.0) * sig_mean + ind_val) / vc;
+            }
+            sig_val = sig_mean;
+        } else {
+            if (isfinite(ind_val)) {
+                sig_val = beta_sig * sig_val + alpha_sig * ind_val;
+            }
+        }
+        out_signal[i] = (float)sig_val;
     }
 }
 
@@ -140,24 +155,26 @@ extern "C" __global__ void rsmk_many_series_one_param_time_major_ema_ema_f32(
     if (threadIdx.x != 0 || blockIdx.x != 0) return; // one thread per series
     const int stride = cols;
     const int fv = first_valids[s];
+    const float nanf = qnan32();
+    if (rows <= 0 || lookback <= 0 || period <= 0 || signal_period <= 0) return;
+
+    // Match `rsmk_scalar` EMA/EMA warmup + seeding semantics (SMA seed).
     const int mom_fv = fv + lookback;
     const int ind_warm = mom_fv + period - 1;
     const int sig_warm = ind_warm + signal_period - 1;
-    const float nanf = qnan32();
-    const float alpha_ind = 2.0f / (float(period) + 1.0f);
-    const float alpha_sig = 2.0f / (float(signal_period) + 1.0f);
+    const double alpha_ind = 2.0 / (double(period) + 1.0);
+    const double alpha_sig = 2.0 / (double(signal_period) + 1.0);
 
+    // Warmup prefixes
     for (int t = 0; t < min(ind_warm, rows); ++t) {
-        const int idx = t * stride + s;
-        out_indicator_tm[idx] = nanf;
+        out_indicator_tm[t * stride + s] = nanf;
     }
     for (int t = 0; t < min(sig_warm, rows); ++t) {
-        const int idx = t * stride + s;
-        out_signal_tm[idx] = nanf;
+        out_signal_tm[t * stride + s] = nanf;
     }
     if (ind_warm >= rows) return;
 
-    // Seed EMA(indicator) from SMA over first `period` momentum values
+    // Seed EMA(indicator) from SMA of the first `period` momentum values (NaN-aware)
     double sum = 0.0; int cnt = 0;
     const int init_end = min(rows, mom_fv + period);
     for (int t = mom_fv; t < init_end; ++t) {
@@ -167,26 +184,31 @@ extern "C" __global__ void rsmk_many_series_one_param_time_major_ema_ema_f32(
         const float c_new = compare_tm[i_new];
         const float m_old = main_tm[i_old];
         const float c_old = compare_tm[i_old];
+        float mv = nanf;
         if (!isnan(m_new) && !isnan(c_new) && !isnan(m_old) && !isnan(c_old) && c_new != 0.0f && c_old != 0.0f) {
             const float lr_new = logf(m_new / c_new);
             const float lr_old = logf(m_old / c_old);
-            sum += (double)(lr_new - lr_old);
-            cnt += 1;
+            mv = lr_new - lr_old;
         }
+        if (!isnan(mv)) { sum += (double)mv; cnt += 1; }
     }
+
     if (cnt == 0) {
         for (int t = ind_warm; t < rows; ++t) { out_indicator_tm[t * stride + s] = nanf; }
         for (int t = sig_warm; t < rows; ++t) { out_signal_tm[t * stride + s] = nanf; }
         return;
     }
-    double ema_ind = (sum / double(cnt)) * 100.0;
+
+    double ema_ind = (sum / (double)cnt) * 100.0;
     out_indicator_tm[ind_warm * stride + s] = (float)ema_ind;
 
+    // Seed EMA(signal) from the first indicator values (mirrors rsmk_scalar's behavior)
     double ema_sig = 0.0; bool sig_seeded = false;
     double acc_sig = ema_ind; int cnt_sig = 1;
     if (sig_warm == ind_warm) {
         ema_sig = (acc_sig / (double)cnt_sig);
-        out_signal_tm[sig_warm * stride + s] = (float)ema_sig; sig_seeded = true;
+        out_signal_tm[sig_warm * stride + s] = (float)ema_sig;
+        sig_seeded = true;
     }
 
     for (int t = ind_warm + 1; t < rows; ++t) {
@@ -196,12 +218,16 @@ extern "C" __global__ void rsmk_many_series_one_param_time_major_ema_ema_f32(
         const float c_new = compare_tm[i_new];
         const float m_old = main_tm[i_old];
         const float c_old = compare_tm[i_old];
+        float mv = nanf;
         if (!isnan(m_new) && !isnan(c_new) && !isnan(m_old) && !isnan(c_old) && c_new != 0.0f && c_old != 0.0f) {
             const float lr_new = logf(m_new / c_new);
             const float lr_old = logf(m_old / c_old);
-            const double mom = (double)(lr_new - lr_old);
-            const double src100 = mom * 100.0;
-            ema_ind = ((double)alpha_ind) * (src100 - ema_ind) + ema_ind;
+            mv = lr_new - lr_old;
+        }
+
+        if (!isnan(mv)) {
+            const double src100 = (double)mv * 100.0;
+            ema_ind = ((src100 - ema_ind) * alpha_ind) + ema_ind;
         }
         out_indicator_tm[i_new] = (float)ema_ind;
 
@@ -212,7 +238,7 @@ extern "C" __global__ void rsmk_many_series_one_param_time_major_ema_ema_f32(
                 out_signal_tm[i_new] = (float)ema_sig; sig_seeded = true; continue;
             }
         } else {
-            ema_sig = ((double)alpha_sig) * (ema_ind - ema_sig) + ema_sig;
+            ema_sig = ((ema_ind - ema_sig) * alpha_sig) + ema_sig;
             out_signal_tm[i_new] = (float)ema_sig;
         }
     }

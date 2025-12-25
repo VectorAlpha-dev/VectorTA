@@ -37,8 +37,7 @@ use crate::indicators::ema::{EmaError, EmaParams, EmaStream};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -474,7 +473,8 @@ pub fn tsi_with_kernel(input: &TsiInput, kernel: Kernel) -> Result<TsiOutput, Ts
 
     // Use classic kernel for default parameters with scalar kernel
     let resolved_kernel = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD is currently stubbed; keep Auto on the fastest scalar path.
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -502,7 +502,8 @@ pub fn tsi_into_slice(dst: &mut [f64], input: &TsiInput, kern: Kernel) -> Result
 
     // Use classic kernel for default parameters with scalar kernel
     let resolved_kernel = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD is currently stubbed; keep Auto on the fastest scalar path.
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -878,7 +879,8 @@ pub fn tsi_batch_with_kernel(
     k: Kernel,
 ) -> Result<TsiBatchOutput, TsiError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Batch SIMD kernels are present as stubs; keep Auto on scalarbatch.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(TsiError::InvalidKernelForBatch(k));
@@ -2163,7 +2165,7 @@ pub fn tsi_batch_py<'py>(
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
+                Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
             };
             // Map batch kernels to regular kernels
@@ -2518,13 +2520,7 @@ pub fn tsi_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
         short_period: config.short_period_range,
     };
 
-    // For WASM, use scalar kernel
-    let kernel = if cfg!(target_arch = "wasm32") {
-        Kernel::Scalar
-    } else {
-        detect_best_kernel()
-    };
-    let result = tsi_batch_slice(data, &sweep, kernel)
+    let result = tsi_batch_slice(data, &sweep, Kernel::Scalar)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let js_output = TsiBatchJsOutput {
@@ -2574,13 +2570,7 @@ pub fn tsi_batch_into(
         let out_slice = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
         // Use the batch_inner_into function to compute directly into output
-        // For WASM, use scalar kernel
-        let kernel = if cfg!(target_arch = "wasm32") {
-            Kernel::Scalar
-        } else {
-            detect_best_kernel()
-        };
-        match tsi_batch_inner_into(data, &sweep, kernel, false, out_slice) {
+        match tsi_batch_inner_into(data, &sweep, Kernel::Scalar, false, out_slice) {
             Ok(_) => Ok(rows),
             Err(e) => Err(JsValue::from_str(&e.to_string())),
         }

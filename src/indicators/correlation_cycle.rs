@@ -58,6 +58,22 @@ use std::error::Error;
 use std::mem::ManuallyDrop;
 use thiserror::Error;
 
+#[inline(always)]
+fn correlation_cycle_auto_kernel() -> Kernel {
+    let k = detect_best_kernel();
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        // AVX2 is faster than AVX-512 for this kernel on many CPUs (AVX-512 downclock).
+        if k == Kernel::Avx512
+            && std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("fma")
+        {
+            return Kernel::Avx2;
+        }
+    }
+    k
+}
+
 impl<'a> AsRef<[f64]> for CorrelationCycleInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -269,7 +285,7 @@ pub fn correlation_cycle_with_kernel(
 
     let threshold = input.get_threshold();
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => correlation_cycle_auto_kernel(),
         k => k,
     };
 
@@ -353,10 +369,7 @@ pub fn correlation_cycle_into(
     }
 
     let threshold = input.get_threshold();
-    let chosen = match Kernel::Auto {
-        Kernel::Auto => detect_best_kernel(),
-        k => k,
-    };
+    let chosen = correlation_cycle_auto_kernel();
 
     // Prefill warmup prefixes with the crate's quiet-NaN pattern used by alloc_with_nan_prefix
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
@@ -441,7 +454,7 @@ pub fn correlation_cycle_into_slices(
     }
     let threshold = input.get_threshold();
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => correlation_cycle_auto_kernel(),
         k => k,
     };
 

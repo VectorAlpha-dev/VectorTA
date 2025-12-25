@@ -344,10 +344,14 @@ pub fn kama_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f
     // 1) Initial Σ|Δp| over the first window [first_valid .. first_valid+period]
     let mut sum_roc1 = 0.0;
     let today = first_valid;
-    for i in 0..=lookback {
-        let a = data[today + i];
-        let b = data[today + i + 1];
-        sum_roc1 += (b - a).abs();
+    unsafe {
+        // Load once per iteration (reuse the trailing sample)
+        let mut prev = *data.get_unchecked(today);
+        for i in 0..=lookback {
+            let next = *data.get_unchecked(today + i + 1);
+            sum_roc1 += (next - prev).abs();
+            prev = next;
+        }
     }
 
     // 2) Seed at index = first_valid + lookback + 1
@@ -360,33 +364,38 @@ pub fn kama_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f
     let mut trailing_value = data[trailing_idx];
 
     // 3) Rolling update
-    for i in (initial_idx + 1)..len {
-        let price_prev = data[i - 1];
-        let price = data[i];
+    unsafe {
+        // Pointer walk avoids bounds checks in the hot loop.
+        let dp = data.as_ptr();
+        let op = out.as_mut_ptr();
+        for i in (initial_idx + 1)..len {
+            let price_prev = *dp.add(i - 1);
+            let price = *dp.add(i);
 
-        // update Σ|Δp|: drop oldest diff, add newest diff
-        let next_tail = data[trailing_idx + 1];
-        let old_diff = (next_tail - trailing_value).abs();
-        let new_diff = (price - price_prev).abs();
-        sum_roc1 += new_diff - old_diff;
+            // update Σ|Δp|: drop oldest diff, add newest diff
+            let next_tail = *dp.add(trailing_idx + 1);
+            let old_diff = (next_tail - trailing_value).abs();
+            let new_diff = (price - price_prev).abs();
+            sum_roc1 += new_diff - old_diff;
 
-        // advance trailing window
-        trailing_value = next_tail;
-        trailing_idx += 1;
+            // advance trailing window (keep `next_tail` for direction below)
+            trailing_value = next_tail;
+            trailing_idx += 1;
 
-        // Efficiency ratio + smoothing constant
-        let direction = (price - trailing_value).abs();
-        let er = if sum_roc1 == 0.0 {
-            0.0
-        } else {
-            direction / sum_roc1
-        };
-        let t = er.mul_add(const_diff, const_max);
-        let sc = t * t; // cheaper than powi(2)
+            // Efficiency ratio + smoothing constant
+            let direction = (price - next_tail).abs();
+            let er = if sum_roc1 == 0.0 {
+                0.0
+            } else {
+                direction / sum_roc1
+            };
+            let t = er.mul_add(const_diff, const_max);
+            let sc = t * t; // cheaper than powi(2)
 
-        // KAMA recurrence; mul_add allows FMA on capable targets
-        kama = (price - kama).mul_add(sc, kama);
-        out[i] = kama;
+            // KAMA recurrence; mul_add allows FMA on capable targets
+            kama = (price - kama).mul_add(sc, kama);
+            *op.add(i) = kama;
+        }
     }
 }
 
@@ -796,7 +805,12 @@ pub fn kama_batch_with_kernel(
     k: Kernel,
 ) -> Result<KamaBatchOutput, KamaError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // On AVX512-capable CPUs, the batch kernels can be memory-bound and
+        // AVX512 may downclock; prefer AVX2 when available.
+        Kernel::Auto => match detect_best_batch_kernel() {
+            Kernel::Avx512Batch => Kernel::Avx2Batch,
+            other => other,
+        },
         other if other.is_batch() => other,
         _ => return Err(KamaError::InvalidKernelForBatch(k)),
     };
@@ -1233,7 +1247,11 @@ pub fn kama_batch_py<'py>(
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
+                // Match Rust batch Auto behavior (prefer AVX2 over AVX512 to avoid downclock).
+                Kernel::Auto => match detect_best_batch_kernel() {
+                    Kernel::Avx512Batch => Kernel::Avx2Batch,
+                    other => other,
+                },
                 k => k,
             };
             let simd = match kernel {

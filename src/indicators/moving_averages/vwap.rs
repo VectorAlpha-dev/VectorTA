@@ -496,15 +496,30 @@ pub fn vwap_scalar(
             // Unroll by 2 to reduce loop overhead
             let mut i: usize = 0;
             let unroll_end = n & !1usize; // round down to even
+            let mut window_start: i64 = 0;
+            let mut next_cutoff: i64 = i64::MIN;
 
             while i < unroll_end {
                 // ---- iteration i ----
                 let ts0 = *ts_ptr.add(i);
-                let gid0 = ts0 / bucket_ms;
-                if gid0 != current_group_id {
-                    current_group_id = gid0;
-                    volume_sum = 0.0;
-                    vol_price_sum = 0.0;
+                if ts0 >= 0 {
+                    if ts0 >= next_cutoff || ts0 < window_start {
+                        let gid0 = ts0 / bucket_ms;
+                        current_group_id = gid0;
+                        window_start = gid0.saturating_mul(bucket_ms);
+                        next_cutoff = window_start.saturating_add(bucket_ms);
+                        volume_sum = 0.0;
+                        vol_price_sum = 0.0;
+                    }
+                } else {
+                    let gid0 = ts0 / bucket_ms;
+                    if gid0 != current_group_id {
+                        current_group_id = gid0;
+                        window_start = gid0.saturating_mul(bucket_ms);
+                        next_cutoff = window_start.saturating_add(bucket_ms);
+                        volume_sum = 0.0;
+                        vol_price_sum = 0.0;
+                    }
                 }
                 let v0 = *vol_ptr.add(i);
                 let p0 = *pr_ptr.add(i);
@@ -519,11 +534,24 @@ pub fn vwap_scalar(
                 // ---- iteration i+1 ----
                 let idx1 = i + 1;
                 let ts1 = *ts_ptr.add(idx1);
-                let gid1 = ts1 / bucket_ms;
-                if gid1 != current_group_id {
-                    current_group_id = gid1;
-                    volume_sum = 0.0;
-                    vol_price_sum = 0.0;
+                if ts1 >= 0 {
+                    if ts1 >= next_cutoff || ts1 < window_start {
+                        let gid1 = ts1 / bucket_ms;
+                        current_group_id = gid1;
+                        window_start = gid1.saturating_mul(bucket_ms);
+                        next_cutoff = window_start.saturating_add(bucket_ms);
+                        volume_sum = 0.0;
+                        vol_price_sum = 0.0;
+                    }
+                } else {
+                    let gid1 = ts1 / bucket_ms;
+                    if gid1 != current_group_id {
+                        current_group_id = gid1;
+                        window_start = gid1.saturating_mul(bucket_ms);
+                        next_cutoff = window_start.saturating_add(bucket_ms);
+                        volume_sum = 0.0;
+                        vol_price_sum = 0.0;
+                    }
                 }
                 let v1 = *vol_ptr.add(idx1);
                 let p1 = *pr_ptr.add(idx1);
@@ -541,11 +569,24 @@ pub fn vwap_scalar(
             // Remainder
             if unroll_end != n {
                 let ts = *ts_ptr.add(unroll_end);
-                let gid = ts / bucket_ms;
-                if gid != current_group_id {
-                    current_group_id = gid;
-                    volume_sum = 0.0;
-                    vol_price_sum = 0.0;
+                if ts >= 0 {
+                    if ts >= next_cutoff || ts < window_start {
+                        let gid = ts / bucket_ms;
+                        current_group_id = gid;
+                        window_start = gid.saturating_mul(bucket_ms);
+                        next_cutoff = window_start.saturating_add(bucket_ms);
+                        volume_sum = 0.0;
+                        vol_price_sum = 0.0;
+                    }
+                } else {
+                    let gid = ts / bucket_ms;
+                    if gid != current_group_id {
+                        current_group_id = gid;
+                        window_start = gid.saturating_mul(bucket_ms);
+                        next_cutoff = window_start.saturating_add(bucket_ms);
+                        volume_sum = 0.0;
+                        vol_price_sum = 0.0;
+                    }
                 }
                 let v = *vol_ptr.add(unroll_end);
                 let p = *pr_ptr.add(unroll_end);

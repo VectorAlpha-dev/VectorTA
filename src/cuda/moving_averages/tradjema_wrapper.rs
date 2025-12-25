@@ -211,7 +211,10 @@ impl CudaTradjema {
 
     #[inline]
     fn smem_bytes_for_len(length: usize) -> usize {
-        length * (std::mem::size_of::<f64>() + 2 * std::mem::size_of::<i32>())
+        // Matches CUDA kernel shared layout:
+        // [ f64 min_vals[length] ][ f64 max_vals[length] ][ i32 min_idx[length] ][ i32 max_idx[length] ]
+        length
+            * (2 * std::mem::size_of::<f64>() + 2 * std::mem::size_of::<i32>())
     }
 
     #[inline]
@@ -765,8 +768,9 @@ impl CudaTradjema {
                 name: "tradjema_many_series_one_param_time_major_f32",
             })?;
 
-        // Many-series kernel only needs TR ring buffer (f64 * length)
-        let shared_bytes = length * std::mem::size_of::<f64>();
+        // Shared memory layout:
+        // [ f64 min_vals[length] ][ f64 max_vals[length] ][ i32 min_idx[length] ][ i32 max_idx[length] ]
+        let shared_bytes = Self::smem_bytes_for_len(length);
         let dev = Device::get_device(self.device_id).map_err(CudaTradjemaError::Cuda)?;
         let max_optin = dev
             .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)

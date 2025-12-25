@@ -231,8 +231,7 @@ fn cmo_prepare<'a>(
         });
     }
     let mut chosen = match k {
-        // SIMD underperforms (<5%) for CMO; keep Auto on scalar.
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         other => other,
     };
     // Normalize any batch kernels to their single-series equivalents here.

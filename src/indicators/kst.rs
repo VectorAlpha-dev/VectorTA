@@ -439,7 +439,9 @@ fn kst_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are currently stubs (they call the scalar body), so avoid paying runtime
+        // detection overhead for `Kernel::Auto` in the single-series path.
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((
@@ -827,7 +829,8 @@ pub fn kst_batch_with_kernel(
     k: Kernel,
 ) -> Result<KstBatchOutput, KstError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Batch SIMD is currently stubbed via the single-series scalar body.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(KstError::InvalidKernelForBatch(other)),
     };

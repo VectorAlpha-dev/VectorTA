@@ -1339,7 +1339,12 @@ pub fn keltner_batch_with_kernel(
     k: Kernel,
 ) -> Result<KeltnerBatchOutput, KeltnerError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => {
+            // AVX-512 batch kernels can downclock and regress vs AVX2 on many CPUs. Prefer AVX2
+            // when Auto is requested and AVX-512 would otherwise be selected.
+            let best = detect_best_batch_kernel();
+            if best == Kernel::Avx512Batch { Kernel::Avx2Batch } else { best }
+        }
         other if other.is_batch() => other,
         _ => {
             return Err(KeltnerError::InvalidKernelForBatch(k));

@@ -319,19 +319,92 @@ pub fn midprice_scalar(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    for i in (first_valid_idx + period - 1)..high.len() {
-        let window_start = i + 1 - period;
-        let mut highest = f64::NEG_INFINITY;
-        let mut lowest = f64::INFINITY;
-        for j in window_start..=i {
-            if high[j] > highest {
-                highest = high[j];
-            }
-            if low[j] < lowest {
-                lowest = low[j];
+    if period <= 64 {
+        let len = high.len();
+        let warmup_end = first_valid_idx + period - 1;
+        unsafe {
+            let high_ptr = high.as_ptr();
+            let low_ptr = low.as_ptr();
+            let out_ptr = out.as_mut_ptr();
+            for i in warmup_end..len {
+                let window_start = i + 1 - period;
+                let mut highest = f64::NEG_INFINITY;
+                let mut lowest = f64::INFINITY;
+                let mut j = window_start;
+                while j <= i {
+                    let h = *high_ptr.add(j);
+                    if h > highest {
+                        highest = h;
+                    }
+                    let l = *low_ptr.add(j);
+                    if l < lowest {
+                        lowest = l;
+                    }
+                    j += 1;
+                }
+                *out_ptr.add(i) = (highest + lowest) * 0.5;
             }
         }
-        out[i] = (highest + lowest) / 2.0;
+        return;
+    }
+
+    let warmup_end = first_valid_idx + period - 1;
+    let mut dq_high: std::collections::VecDeque<usize> =
+        std::collections::VecDeque::with_capacity(period + 1);
+    let mut dq_low: std::collections::VecDeque<usize> =
+        std::collections::VecDeque::with_capacity(period + 1);
+
+    for i in first_valid_idx..high.len() {
+        let hv = high[i];
+        if !hv.is_nan() {
+            while let Some(&j) = dq_high.back() {
+                if high[j] <= hv {
+                    dq_high.pop_back();
+                } else {
+                    break;
+                }
+            }
+            dq_high.push_back(i);
+        }
+
+        let lv = low[i];
+        if !lv.is_nan() {
+            while let Some(&j) = dq_low.back() {
+                if low[j] >= lv {
+                    dq_low.pop_back();
+                } else {
+                    break;
+                }
+            }
+            dq_low.push_back(i);
+        }
+
+        if i < warmup_end {
+            continue;
+        }
+
+        let start = i + 1 - period;
+        while let Some(&j) = dq_high.front() {
+            if j < start {
+                dq_high.pop_front();
+            } else {
+                break;
+            }
+        }
+        while let Some(&j) = dq_low.front() {
+            if j < start {
+                dq_low.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        let highest = dq_high
+            .front()
+            .map(|&j| high[j])
+            .unwrap_or(f64::NEG_INFINITY);
+        let lowest = dq_low.front().map(|&j| low[j]).unwrap_or(f64::INFINITY);
+        out[i] = (highest + lowest) * 0.5;
     }
 }
 
@@ -876,19 +949,90 @@ pub unsafe fn midprice_row_scalar(
     period: usize,
     out: &mut [f64],
 ) {
-    for i in (first + period - 1)..high.len() {
-        let window_start = i + 1 - period;
-        let mut highest = f64::NEG_INFINITY;
-        let mut lowest = f64::INFINITY;
-        for j in window_start..=i {
-            if high[j] > highest {
-                highest = high[j];
+    if period <= 64 {
+        let len = high.len();
+        let warmup_end = first + period - 1;
+        let high_ptr = high.as_ptr();
+        let low_ptr = low.as_ptr();
+        let out_ptr = out.as_mut_ptr();
+        for i in warmup_end..len {
+            let window_start = i + 1 - period;
+            let mut highest = f64::NEG_INFINITY;
+            let mut lowest = f64::INFINITY;
+            let mut j = window_start;
+            while j <= i {
+                let h = *high_ptr.add(j);
+                if h > highest {
+                    highest = h;
+                }
+                let l = *low_ptr.add(j);
+                if l < lowest {
+                    lowest = l;
+                }
+                j += 1;
             }
-            if low[j] < lowest {
-                lowest = low[j];
+            *out_ptr.add(i) = (highest + lowest) * 0.5;
+        }
+        return;
+    }
+
+    let warmup_end = first + period - 1;
+    let mut dq_high: std::collections::VecDeque<usize> =
+        std::collections::VecDeque::with_capacity(period + 1);
+    let mut dq_low: std::collections::VecDeque<usize> =
+        std::collections::VecDeque::with_capacity(period + 1);
+
+    for i in first..high.len() {
+        let hv = high[i];
+        if !hv.is_nan() {
+            while let Some(&j) = dq_high.back() {
+                if high[j] <= hv {
+                    dq_high.pop_back();
+                } else {
+                    break;
+                }
+            }
+            dq_high.push_back(i);
+        }
+
+        let lv = low[i];
+        if !lv.is_nan() {
+            while let Some(&j) = dq_low.back() {
+                if low[j] >= lv {
+                    dq_low.pop_back();
+                } else {
+                    break;
+                }
+            }
+            dq_low.push_back(i);
+        }
+
+        if i < warmup_end {
+            continue;
+        }
+
+        let start = i + 1 - period;
+        while let Some(&j) = dq_high.front() {
+            if j < start {
+                dq_high.pop_front();
+            } else {
+                break;
             }
         }
-        out[i] = (highest + lowest) / 2.0;
+        while let Some(&j) = dq_low.front() {
+            if j < start {
+                dq_low.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        let highest = dq_high
+            .front()
+            .map(|&j| high[j])
+            .unwrap_or(f64::NEG_INFINITY);
+        let lowest = dq_low.front().map(|&j| low[j]).unwrap_or(f64::INFINITY);
+        out[i] = (highest + lowest) * 0.5;
     }
 }
 

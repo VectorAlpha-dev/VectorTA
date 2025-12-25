@@ -257,10 +257,17 @@ fn apo_prepare<'a>(
         });
     }
 
-    let chosen = match kernel {
+    let mut chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
+    // APO is two EMAs (sequential recurrence); SIMD typically provides no benefit and can be slower
+    // due to downclock/extra call overhead. Keep SIMD kernels for future work and batch use, but
+    // prefer the scalar reference for `Kernel::Auto`.
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx2 | Kernel::Avx512) {
+        chosen = Kernel::Scalar;
+    }
     Ok((data, first, short, long, len, chosen))
 }
 

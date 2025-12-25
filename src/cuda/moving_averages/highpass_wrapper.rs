@@ -338,6 +338,7 @@ impl CudaHighpass {
         &self,
         d_prices: &DeviceBuffer<f32>,
         d_periods: &DeviceBuffer<i32>,
+        first_valid: usize,
         series_len: usize,
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
@@ -399,12 +400,14 @@ impl CudaHighpass {
             // Offset parameter and output pointers for this chunk
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut first_valid_i = first_valid as i32;
                 let mut periods_ptr = d_periods.as_device_ptr().add(launched).as_raw();
                 let mut series_len_i = series_len as i32;
                 let mut combos_i = rows as i32;
                 let mut out_ptr = d_out.as_device_ptr().add(launched * series_len).as_raw();
                 let args: &mut [*mut std::ffi::c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut std::ffi::c_void,
+                    &mut first_valid_i as *mut _ as *mut std::ffi::c_void,
                     &mut periods_ptr as *mut _ as *mut std::ffi::c_void,
                     &mut series_len_i as *mut _ as *mut std::ffi::c_void,
                     &mut combos_i as *mut _ as *mut std::ffi::c_void,
@@ -424,6 +427,7 @@ impl CudaHighpass {
         &self,
         data_f32: &[f32],
         combos: &[HighPassParams],
+        first_valid: usize,
         series_len: usize,
     ) -> Result<DeviceArrayF32Highpass, CudaHighpassError> {
         let n_combos = combos.len();
@@ -457,7 +461,7 @@ impl CudaHighpass {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
-        self.launch_batch_kernel(&d_prices, &d_periods, series_len, n_combos, &mut d_out)?;
+        self.launch_batch_kernel(&d_prices, &d_periods, first_valid, series_len, n_combos, &mut d_out)?;
 
         // Keep inputs alive until kernel completes
         self.stream.synchronize()?;
@@ -476,8 +480,8 @@ impl CudaHighpass {
         data_f32: &[f32],
         sweep: &HighPassBatchRange,
     ) -> Result<DeviceArrayF32Highpass, CudaHighpassError> {
-        let (combos, _first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        self.run_batch_kernel(data_f32, &combos, series_len)
+        let (combos, first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
+        self.run_batch_kernel(data_f32, &combos, first_valid, series_len)
     }
 
     pub fn highpass_batch_into_host_f32(
@@ -486,7 +490,7 @@ impl CudaHighpass {
         sweep: &HighPassBatchRange,
         out: &mut [f32],
     ) -> Result<(usize, usize, Vec<HighPassParams>), CudaHighpassError> {
-        let (combos, _first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
+        let (combos, first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let expected = combos.len() * series_len;
         if out.len() != expected {
             return Err(CudaHighpassError::InvalidInput(format!(
@@ -495,7 +499,7 @@ impl CudaHighpass {
                 expected
             )));
         }
-        let arr = self.run_batch_kernel(data_f32, &combos, series_len)?;
+        let arr = self.run_batch_kernel(data_f32, &combos, first_valid, series_len)?;
         // Async D2H copy then a single stream sync
         unsafe { arr.buf.async_copy_to(out, &self.stream)?; }
         self.stream.synchronize()?;
@@ -516,8 +520,8 @@ impl CudaHighpass {
         ),
         CudaHighpassError,
     > {
-        let (combos, _fv, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        let arr = self.run_batch_kernel(data_f32, &combos, series_len)?;
+        let (combos, first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
+        let arr = self.run_batch_kernel(data_f32, &combos, first_valid, series_len)?;
         let mut pinned = unsafe {
             cust::memory::LockedBuffer::<f32>::uninitialized(
                 arr.rows.checked_mul(arr.cols).ok_or_else(|| CudaHighpassError::InvalidInput("size overflow".into()))?,
@@ -531,6 +535,7 @@ impl CudaHighpass {
     pub fn highpass_batch_device(
         &self,
         d_prices: &DeviceBuffer<f32>,
+        first_valid: i32,
         d_periods: &DeviceBuffer<i32>,
         series_len: i32,
         n_combos: i32,
@@ -541,9 +546,13 @@ impl CudaHighpass {
                 "series_len and n_combos must be positive".into(),
             ));
         }
+        if first_valid < 0 || first_valid as usize >= series_len as usize {
+            return Err(CudaHighpassError::InvalidInput("first_valid out of range".into()));
+        }
         self.launch_batch_kernel(
             d_prices,
             d_periods,
+            first_valid as usize,
             series_len as usize,
             n_combos as usize,
             d_out,
@@ -555,7 +564,7 @@ impl CudaHighpass {
         cols: usize,
         rows: usize,
         params: &HighPassParams,
-    ) -> Result<usize, CudaHighpassError> {
+    ) -> Result<(usize, Vec<i32>), CudaHighpassError> {
         if cols == 0 || rows == 0 {
             return Err(CudaHighpassError::InvalidInput(
                 "num_series or series_len is zero".into(),
@@ -595,6 +604,7 @@ impl CudaHighpass {
             )));
         }
 
+        let mut first_valids: Vec<i32> = Vec::with_capacity(cols);
         for series in 0..cols {
             let mut first = None;
             for t in 0..rows {
@@ -607,6 +617,7 @@ impl CudaHighpass {
             let fv = first.ok_or_else(|| {
                 CudaHighpassError::InvalidInput(format!("series {} all NaN", series))
             })?;
+            first_valids.push(fv as i32);
             if rows - fv < period {
                 return Err(CudaHighpassError::InvalidInput(format!(
                     "series {} lacks valid samples: need >= {}, valid = {}",
@@ -617,12 +628,13 @@ impl CudaHighpass {
             }
         }
 
-        Ok(period)
+        Ok((period, first_valids))
     }
 
     fn launch_many_series_kernel(
         &self,
         d_prices: &DeviceBuffer<f32>,
+        d_first_valids: &DeviceBuffer<i32>,
         period: usize,
         cols: usize,
         rows: usize,
@@ -669,12 +681,14 @@ impl CudaHighpass {
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut fv_ptr = d_first_valids.as_device_ptr().as_raw();
             let mut period_i = period as i32;
             let mut cols_i = cols as i32;
             let mut rows_i = rows as i32;
             let mut out_ptr = d_out.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
+                &mut fv_ptr as *mut _ as *mut c_void,
                 &mut period_i as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut rows_i as *mut _ as *mut c_void,
@@ -698,7 +712,7 @@ impl CudaHighpass {
         rows: usize,
         params: &HighPassParams,
     ) -> Result<DeviceArrayF32Highpass, CudaHighpassError> {
-        let period = Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
+        let (period, first_valids) = Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
         let elems = data_tm_f32.len();
         let prices_bytes = elems
@@ -714,6 +728,7 @@ impl CudaHighpass {
         Self::will_fit_checked(required, headroom)?;
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
+        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(
                 cols.checked_mul(rows).ok_or_else(|| CudaHighpassError::InvalidInput("size overflow".into()))?,
@@ -721,7 +736,7 @@ impl CudaHighpass {
             )
         }?;
 
-        self.launch_many_series_kernel(&d_prices, period, cols, rows, &mut d_out)?;
+        self.launch_many_series_kernel(&d_prices, &d_first_valids, period, cols, rows, &mut d_out)?;
         // Inputs created here; ensure they outlive the launch.
         self.stream.synchronize()?;
 
@@ -737,6 +752,7 @@ impl CudaHighpass {
     pub fn highpass_many_series_one_param_time_major_device(
         &self,
         d_prices: &DeviceBuffer<f32>,
+        d_first_valids: &DeviceBuffer<i32>,
         period: i32,
         cols: i32,
         rows: i32,
@@ -749,6 +765,7 @@ impl CudaHighpass {
         }
         self.launch_many_series_kernel(
             d_prices,
+            d_first_valids,
             period as usize,
             cols as usize,
             rows as usize,

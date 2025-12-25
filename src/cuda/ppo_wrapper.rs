@@ -331,27 +331,35 @@ impl CudaPpo {
                     &mut d_out,
                 )?;
             }
-            // EMA path: warp‑cooperative kernel (no MA surfaces)
+            // EMA path: warp-cooperative kernel (no MA surfaces)
             1 => {
-                // Prefer the new warp‑cooperative EMA path; fall back to MA surfaces on failure.
-                let attempted = self.launch_batch_ema_manyparams(
-                    &d_prices,
-                    len as i32,
-                    first_valid,
-                    &d_fasts,
-                    &d_slows,
-                    rows as i32,
-                    &mut d_out,
-                );
-                if let Err(err) = attempted {
-                    eprintln!(
-                        "[ppo] warp-coop EMA launch failed ({}); falling back to MA surfaces",
-                        err
-                    );
-                    // Fallback: build EMA surfaces and use elementwise PPO
+                // Warp-cooperative EMA kernel is currently unstable on some systems/drivers.
+                // Default to the MA-surface fallback unless explicitly enabled.
+                let warp_coop_enabled = match std::env::var("PPO_EMA_WARP_COOP") {
+                    Ok(v) => v == "1" || v.eq_ignore_ascii_case("true"),
+                    Err(_) => false,
+                };
+
+                let mut used_warp_coop = false;
+                if warp_coop_enabled {
+                    used_warp_coop = self
+                        .launch_batch_ema_manyparams(
+                            &d_prices,
+                            len as i32,
+                            first_valid,
+                            &d_fasts,
+                            &d_slows,
+                            rows as i32,
+                            &mut d_out,
+                        )
+                        .is_ok();
+                }
+
+                // Fallback: build EMA surfaces and use elementwise PPO
+                if !used_warp_coop {
                     let (fs, fe, fstep) = sweep.fast_period;
                     let (ss, se, sstep) = sweep.slow_period;
-                    let ema = CudaEma::new(0)?;
+                    let ema = CudaEma::new(self.device_id as usize)?;
                     let fast_dev = ema
                         .ema_batch_dev(
                             data_f32,

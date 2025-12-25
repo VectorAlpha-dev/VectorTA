@@ -675,7 +675,7 @@ fn apply_laguerre(input: &[f64], gamma: f64, output: &mut [f64]) {
 /// Calculate MAC-Z warmup length
 #[inline(always)]
 fn macz_warm_len(first: usize, slow: usize, lz: usize, lsd: usize, sig: usize) -> usize {
-    first + slow.max(lz).max(lsd) + sig - 1
+    first + slow.max(lz).max(lsd) + sig - 2
 }
 
 /// Prepare MAC-Z calculation parameters
@@ -1444,12 +1444,7 @@ impl MaczBatchBuilder {
     }
 
     pub fn apply_slice(self, data: &[f64]) -> Result<MaczBatchOutput, MaczError> {
-        let kernel = if self.kernel == Kernel::Auto {
-            detect_best_batch_kernel()
-        } else {
-            self.kernel
-        };
-        macz_batch_with_kernel(data, &self.range, kernel)
+        macz_batch_with_kernel(data, &self.range, self.kernel)
     }
 
     pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<MaczBatchOutput, MaczError> {
@@ -1462,12 +1457,7 @@ impl MaczBatchBuilder {
         source: &str,
     ) -> Result<MaczBatchOutput, MaczError> {
         let data = source_type(candles, source);
-        let kernel = if self.kernel == Kernel::Auto {
-            detect_best_batch_kernel()
-        } else {
-            self.kernel
-        };
-        macz_batch_with_kernel_vol(data, Some(&candles.volume), &self.range, kernel)
+        macz_batch_with_kernel_vol(data, Some(&candles.volume), &self.range, self.kernel)
     }
 
     pub fn with_default_candles(c: &Candles) -> Result<MaczBatchOutput, MaczError> {
@@ -1605,7 +1595,10 @@ pub fn macz_batch_with_kernel_vol(
     k: Kernel,
 ) -> Result<MaczBatchOutput, MaczError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // Batch AVX2/AVX512 kernels currently underperform significantly for MACZ
+        // (likely due to recurrence-heavy structure and reduced opportunities for lane speedups).
+        // Keep them available for explicit selection, but default Auto to the scalar batch path.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
             return Err(MaczError::InvalidKernelForBatch(k));
@@ -2552,7 +2545,7 @@ pub fn macz_batch_py<'py>(
     let combos = py
         .allow_threads(|| {
             let k = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
+                Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
             };
             macz_batch_inner_into_vol(slice_in, vol_opt, &sweep, k, true, slice_out)

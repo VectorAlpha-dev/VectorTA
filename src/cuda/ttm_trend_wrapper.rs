@@ -124,6 +124,7 @@ impl CudaTtmTrend {
         let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
         let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
         let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let (gx, gy, gz) = grid;
         let (bx, by, bz) = block;
         if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 {
@@ -132,6 +133,13 @@ impl CudaTtmTrend {
             ));
         }
         if gx > max_gx || gy > max_gy || gz > max_gz || bx > max_bx || by > max_by || bz > max_bz {
+            return Err(CudaTtmTrendError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        let threads = bx
+            .checked_mul(by)
+            .and_then(|v| v.checked_mul(bz))
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("block size overflow".into()))?;
+        if threads > max_threads {
             return Err(CudaTtmTrendError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
         }
         Ok(())
@@ -309,7 +317,7 @@ impl CudaTtmTrend {
 
         // Keep host constants in sync with .cu defaults
         const TTM_TILE_TIME: u32 = 256;
-        const TTM_TILE_PARAMS: u32 = 8;
+        const TTM_TILE_PARAMS: u32 = 4;
         let grid_x: u32 = ((len as u32) + TTM_TILE_TIME - 1) / TTM_TILE_TIME;
         let grid_y: u32 = ((n_combos as u32) + TTM_TILE_PARAMS - 1) / TTM_TILE_PARAMS;
         let gx = grid_x.max(1);

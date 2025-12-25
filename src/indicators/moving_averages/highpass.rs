@@ -365,15 +365,18 @@ pub fn highpass_with_kernel(
         other => other,
     };
 
-    // Highpass writes all values; allocate without warmup prefix using zero-copy helper
-    let mut out = alloc_with_nan_prefix(len, 0);
+    // HighPass computes from the first valid sample. Preserve leading-NaN semantics by
+    // keeping the prefix NaN and running the recurrence on the valid suffix.
+    let mut out = alloc_with_nan_prefix(len, first);
+    let data_tail = &data[first..];
+    let out_tail = &mut out[first..];
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => highpass_scalar(data, period, &mut out),
+            Kernel::Scalar | Kernel::ScalarBatch => highpass_scalar(data_tail, period, out_tail),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => highpass_avx2(data, period, &mut out),
+            Kernel::Avx2 | Kernel::Avx2Batch => highpass_avx2(data_tail, period, out_tail),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => highpass_avx512(data, period, &mut out),
+            Kernel::Avx512 | Kernel::Avx512Batch => highpass_avx512(data_tail, period, out_tail),
             _ => unreachable!(),
         }
     }
@@ -436,16 +439,20 @@ fn highpass_with_kernel_into(
         other => other,
     };
 
-    // The caller is responsible for initializing the output buffer
-    // No need to fill with NaN here as the buffer should be pre-initialized
+    // Preserve leading-NaN semantics: write NaNs for the prefix and compute on the valid suffix.
+    for v in &mut out[..first] {
+        *v = f64::NAN;
+    }
+    let data_tail = &data[first..];
+    let out_tail = &mut out[first..];
 
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => highpass_scalar(data, period, out),
+            Kernel::Scalar | Kernel::ScalarBatch => highpass_scalar(data_tail, period, out_tail),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => highpass_avx2(data, period, out),
+            Kernel::Avx2 | Kernel::Avx2Batch => highpass_avx2(data_tail, period, out_tail),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => highpass_avx512(data, period, out),
+            Kernel::Avx512 | Kernel::Avx512Batch => highpass_avx512(data_tail, period, out_tail),
             _ => unreachable!(),
         }
     }

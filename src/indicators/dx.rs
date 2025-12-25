@@ -259,7 +259,8 @@ fn dx_prepare<'a>(
         });
     }
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // SIMD kernels are stubs that delegate to scalar; avoid dispatch overhead.
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((high, low, close, len, first, chosen))
@@ -771,7 +772,8 @@ pub fn dx_batch_with_kernel(
     k: Kernel,
 ) -> Result<DxBatchOutput, DxError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        // SIMD batch kernels are stubs that delegate to scalar; avoid dispatch overhead.
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(DxError::InvalidKernelForBatch(other)),
     };

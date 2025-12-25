@@ -96,14 +96,26 @@ void volume_adjusted_ma_batch_f32(
                 continue;
             }
             const int start = t + 1 - sample_period;
-            const double window_sum = (double)prefix_window(prefix_volumes, t, start);
-            avg_volume_d = window_sum / (double)sample_period;
+            if (sample_period == 1) {
+                const float vv = volumes[t];
+                avg_volume_d = isfinite(vv) ? (double)vv : 0.0;
+            } else {
+                // Avoid catastrophic cancellation from FP32 prefix differences at large `t` by
+                // summing the small window directly in FP64 (matches scalar semantics).
+                double window_sum = 0.0;
+                for (int k = start; k <= t; ++k) {
+                    const float vv = volumes[k];
+                    if (isfinite(vv)) {
+                        window_sum += (double)vv;
+                    }
+                }
+                avg_volume_d = window_sum / (double)sample_period;
+            }
         }
 
         const double vi_threshold_d = avg_volume_d * (double)vi_factor;
-        const float  vi_threshold   = (float)vi_threshold_d;
-        float weighted_sum = 0.0f;
-        float v2i_sum = 0.0f;
+        double weighted_sum_d = 0.0;
+        double v2i_sum_d = 0.0;
         int nmb = 0;
 
         if (!strict) {
@@ -111,8 +123,6 @@ void volume_adjusted_ma_batch_f32(
             int cap = length;
             if (cap > t + 1) cap = t + 1;
 
-            double wsum_d = 0.0;
-            double v2i_sum_d = 0.0;
             int idx = t;
             for (int j = 0; j < cap; ++j) {
                 const float vol_val = volumes[idx];
@@ -122,7 +132,7 @@ void volume_adjusted_ma_batch_f32(
                         v2i_sum_d += v2i;
                         const float price_val = prices[idx];
                         if (isfinite(price_val)) {
-                            wsum_d = fma((double)price_val, v2i, wsum_d);
+                            weighted_sum_d = fma((double)price_val, v2i, weighted_sum_d);
                         }
                     }
                 }
@@ -131,44 +141,32 @@ void volume_adjusted_ma_batch_f32(
                 if (idx == 0) break;
                 --idx;
             }
-            v2i_sum = (float)v2i_sum_d;
-            weighted_sum = (float)wsum_d;
         } else {
-            int cap = strict ? length * 10 : length;
-            if (cap > t + 1) {
-                cap = t + 1;
-            }
+            int cap = length * 10;
+            if (cap > t + 1) cap = t + 1;
 
             int idx = t;
             for (int j = 0; j < cap; ++j) {
                 const float vol_val = volumes[idx];
-                float v2i_nz = 0.0f;
-                if (vi_threshold > 0.0f && isfinite(vol_val)) {
-                    const float ratio = vol_val / vi_threshold;
+                double v2i_nz = 0.0;
+                if (vi_threshold_d > 0.0 && isfinite(vol_val)) {
+                    const double ratio = (double)vol_val / vi_threshold_d;
                     if (isfinite(ratio)) {
                         v2i_nz = ratio;
                     }
                 }
 
-                if (v2i_nz != 0.0f) {
+                if (v2i_nz != 0.0) {
                     const float price_val = prices[idx];
                     if (isfinite(price_val)) {
-                        weighted_sum = fmaf(price_val, v2i_nz, weighted_sum);
+                        weighted_sum_d = fma((double)price_val, v2i_nz, weighted_sum_d);
                     }
                 }
 
-                v2i_sum += v2i_nz;
+                v2i_sum_d += v2i_nz;
                 nmb = j + 1;
 
-                if (strict) {
-                    if (v2i_sum >= float(length)) {
-                        break;
-                    }
-                } else {
-                    if (nmb >= length) {
-                        break;
-                    }
-                }
+                if (v2i_sum_d >= (double)length) break;
 
                 if (idx == 0) {
                     break;
@@ -181,8 +179,9 @@ void volume_adjusted_ma_batch_f32(
             const int idx_nmb = t - nmb;
             const float p0 = prices[idx_nmb];
             if (isfinite(p0)) {
-                const float numer = weighted_sum - (v2i_sum - float(length)) * p0;
-                out[out_idx] = numer / float(length);
+                const double numer_d =
+                    weighted_sum_d - (v2i_sum_d - (double)length) * (double)p0;
+                out[out_idx] = (float)(numer_d / (double)length);
             } else {
                 out[out_idx] = NAN;
             }

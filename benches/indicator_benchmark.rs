@@ -156,13 +156,13 @@ use my_project::indicators::{
     fisher::{fisher as fisher_raw, FisherInput},
     fosc::{fosc as fosc_raw, fosc_with_kernel, FoscInput},
     gatorosc::{gatorosc as gatorosc_raw, GatorOscInput},
-    ift_rsi::{ift_rsi as ift_rsi_raw, IftRsiInput},
+    ift_rsi::{ift_rsi as ift_rsi_raw, ift_rsi_with_kernel, IftRsiInput},
     kaufmanstop::{kaufmanstop as kaufmanstop_raw, kaufmanstop_with_kernel, KaufmanstopInput},
-    kdj::{kdj as kdj_raw, KdjInput},
-    keltner::{keltner as keltner_raw, KeltnerInput},
+    kdj::{kdj as kdj_raw, kdj_with_kernel, KdjInput},
+    keltner::{keltner as keltner_raw, keltner_with_kernel, KeltnerInput},
     kst::{kst as kst_raw, KstBatchBuilder, KstInput},
     kurtosis::{kurtosis as kurtosis_raw, kurtosis_with_kernel, KurtosisInput},
-    kvo::{kvo as kvo_raw, KvoBatchBuilder, KvoInput},
+    kvo::{kvo as kvo_raw, kvo_with_kernel, KvoBatchBuilder, KvoInput},
     linearreg_angle::{
         linearreg_angle as linearreg_angle_raw, linearreg_angle_with_kernel, Linearreg_angleInput,
     },
@@ -185,7 +185,7 @@ use my_project::indicators::{
     medprice::{medprice as medprice_raw, MedpriceInput},
     mfi::{mfi as mfi_raw, MfiBatchBuilder, MfiData, MfiInput},
     midpoint::{midpoint as midpoint_raw, MidpointInput},
-    midprice::{midprice as midprice_raw, MidpriceInput},
+    midprice::{midprice as midprice_raw, MidpriceBatchBuilder, MidpriceData, MidpriceInput},
     minmax::{minmax as minmax_raw, MinmaxInput},
     mod_god_mode::{mod_god_mode as mod_god_mode_raw, mod_god_mode_with_kernel, ModGodModeInput},
     mom::{mom as mom_raw, mom_with_kernel, MomBatchBuilder, MomInput},
@@ -1718,6 +1718,10 @@ make_kernel_wrappers!(er, er_with_kernel, ErInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ttm_trend, ttm_trend_with_kernel, TtmTrendInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(macz, macz_with_kernel, MaczInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(mom, mom_with_kernel, MomInputS; Scalar,Avx2,Avx512);
+// LPC single-series kernel variants (Scalar, AVX2, AVX512)
+make_kernel_wrappers!(lpc, my_project::indicators::lpc::lpc_with_kernel, LpcInputS; Scalar,Avx2,Avx512);
+// LRSI single-series kernel variants (Scalar, AVX2, AVX512)
+make_kernel_wrappers!(lrsi, my_project::indicators::lrsi::lrsi_with_kernel, LrsiInputS; Scalar,Avx2,Avx512);
 // WAD single-series kernel wrappers (Scalar/AVX2/AVX512)
 make_kernel_wrappers!(
     wad,
@@ -1799,6 +1803,7 @@ make_kernel_wrappers!(vidya, vidya_with_kernel, VidyaInputS; Scalar,Avx2,Avx512)
 make_kernel_wrappers!(volume_adjusted_ma, VolumeAdjustedMa_with_kernel, VolumeAdjustedMaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vlma, vlma_with_kernel, VlmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vpwma, vpwma_with_kernel, VpwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(vwap, my_project::indicators::vwap::vwap_with_kernel, VwapInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vwma, vwma_with_kernel, VwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wclprice, wclprice_with_kernel, WclpriceInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wilders, wilders_with_kernel, WildersInputS; Scalar,Avx2,Avx512);
@@ -1816,6 +1821,12 @@ make_kernel_wrappers!(ppo, ppo_with_kernel, PpoInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(kurtosis, kurtosis_with_kernel, KurtosisInputS; Scalar,Avx2,Avx512);
 // ADXR single-series kernel wrappers (add explicit kernel variants)
 make_kernel_wrappers!(adxr, adxr_with_kernel, AdxrInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(
+    alligator,
+    my_project::indicators::alligator::alligator_with_kernel,
+    AlligatorInputS;
+    Scalar,Avx2,Avx512
+);
 
 // Stochastic Oscillator (single-series) kernel wrappers
 make_kernel_wrappers!(stoch, stoch_with_kernel, StochInputS; Scalar,Avx2,Avx512);
@@ -1930,6 +1941,14 @@ bench_variants!(
     rvi_avx2,
     rvi_avx512,
 );
+// Mean AD: enable Scalar vs AVX2 vs AVX512 comparisons
+make_kernel_wrappers!(
+    mean_ad,
+    my_project::indicators::mean_ad::mean_ad_with_kernel,
+    MeanAdInputS;
+    Scalar,Avx2,Avx512
+);
+
 // Medium AD: enable Scalar vs AVX2 vs AVX512 comparisons
 make_kernel_wrappers!(
     medium_ad,
@@ -1937,6 +1956,15 @@ make_kernel_wrappers!(
     MediumAdInputS;
     Scalar,Avx2,Avx512
 );
+
+// Mean AD batch wrappers (ScalarBatch/Avx2Batch/Avx512Batch)
+make_batch_wrappers!(
+    mean_ad_batch,
+    my_project::indicators::mean_ad::MeanAdBatchBuilder,
+    MeanAdInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
 // Pivot single-series kernel wrappers
 make_kernel_wrappers!(pivot, pivot_with_kernel, PivotInputS; Scalar,Avx2,Avx512);
 
@@ -1991,6 +2019,10 @@ make_kernel_wrappers!(net_myrsi, net_myrsi_with_kernel, NetMyrsiInputS; Scalar,A
 make_kernel_wrappers!(cci_cycle, cci_cycle_with_kernel, CciCycleInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(fvg_trailing_stop, fvg_trailing_stop_with_kernel, FvgTrailingStopInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(halftrend, halftrend_with_kernel, HalfTrendInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(ift_rsi, ift_rsi_with_kernel, IftRsiInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(kdj, kdj_with_kernel, KdjInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(keltner, keltner_with_kernel, KeltnerInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(kvo, kvo_with_kernel, KvoInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(reverse_rsi, reverse_rsi_with_kernel, ReverseRsiInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vama, vama_with_kernel, VamaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wavetrend, wavetrend_with_kernel, WavetrendInputS; Scalar,Avx2,Avx512);
@@ -2011,6 +2043,41 @@ make_batch_wrappers!(
 make_batch_wrappers!(
     roc_batch, RocBatchBuilder, RocInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+// CCI batch variants (small period sweep: 14, 34, 54)
+#[inline(always)]
+fn cci_batch_scalarbatch(input: &CciInputS) -> anyhow::Result<()> {
+    let slice: &[f64] = input.as_ref();
+    my_project::indicators::cci::CciBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .period_range(14, 54, 20)
+        .apply_slice(slice)?;
+    Ok(())
+}
+#[inline(always)]
+fn cci_batch_avx2batch(input: &CciInputS) -> anyhow::Result<()> {
+    let slice: &[f64] = input.as_ref();
+    my_project::indicators::cci::CciBatchBuilder::new()
+        .kernel(Kernel::Avx2Batch)
+        .period_range(14, 54, 20)
+        .apply_slice(slice)?;
+    Ok(())
+}
+#[inline(always)]
+fn cci_batch_avx512batch(input: &CciInputS) -> anyhow::Result<()> {
+    let slice: &[f64] = input.as_ref();
+    my_project::indicators::cci::CciBatchBuilder::new()
+        .kernel(Kernel::Avx512Batch)
+        .period_range(14, 54, 20)
+        .apply_slice(slice)?;
+    Ok(())
+}
+bench_variants!(
+    cci_batch => CciInputS; None;
+    cci_batch_scalarbatch,
+    cci_batch_avx2batch,
+    cci_batch_avx512batch
 );
 
 // CG: kernel-specific wrappers for SIMD benchmarking
@@ -2228,6 +2295,28 @@ make_pair_with_builder_wrappers!(
         Ok((tp, vol))
     },
     |b: MfiBatchBuilder| b.period_range(5, 200, 5)
+);
+
+// Midprice: pair extractor + representative period sweep config
+make_pair_with_builder_wrappers!(
+    midprice_batch,
+    MidpriceBatchBuilder,
+    MidpriceInputS,
+    |input: &MidpriceInputS| -> anyhow::Result<(&[f64], &[f64])> {
+        let (high, low) = match &input.data {
+            MidpriceData::Candles {
+                candles,
+                high_src,
+                low_src,
+            } => (
+                source_type(candles, high_src),
+                source_type(candles, low_src),
+            ),
+            MidpriceData::Slices { high, low } => (*high, *low),
+        };
+        Ok((high, low))
+    },
+    |b: MidpriceBatchBuilder| b.period_range(10, 30, 5)
 );
 
 make_triple_with_builder_wrappers!(
@@ -2943,6 +3032,22 @@ bench_variants!(
     er_scalar,
     er_avx2,
     er_avx512,
+);
+
+// LPC single-series: compare scalar vs AVX2 vs AVX512
+bench_variants!(
+    lpc => LpcInputS; None;
+    lpc_scalar,
+    lpc_avx2,
+    lpc_avx512,
+);
+
+// LRSI single-series: compare scalar vs AVX2 vs AVX512
+bench_variants!(
+    lrsi => LrsiInputS; None;
+    lrsi_scalar,
+    lrsi_avx2,
+    lrsi_avx512,
 );
 
 // MACD batch variants (ScalarBatch/Avx2Batch/Avx512Batch)
@@ -4191,6 +4296,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    vwap => VwapInputS; None;
+    vwap_scalar,
+    vwap_avx2,
+    vwap_avx512,
+);
+
+bench_variants!(
     vwma => VwmaInputS; None;
     vwma_scalar,
     vwma_avx2,
@@ -4486,6 +4598,34 @@ bench_variants!(
     halftrend_avx512,
 );
 
+bench_variants!(
+    ift_rsi => IftRsiInputS; None;
+    ift_rsi_scalar,
+    ift_rsi_avx2,
+    ift_rsi_avx512,
+);
+
+bench_variants!(
+    kdj => KdjInputS; None;
+    kdj_scalar,
+    kdj_avx2,
+    kdj_avx512,
+);
+
+bench_variants!(
+    keltner => KeltnerInputS; None;
+    keltner_scalar,
+    keltner_avx2,
+    keltner_avx512,
+);
+
+bench_variants!(
+    kvo => KvoInputS; None;
+    kvo_scalar,
+    kvo_avx2,
+    kvo_avx512,
+);
+
 // TODO: HalfTrend needs custom batch wrapper
 // bench_variants!(
 // 	halftrend_batch => HalfTrendInputS; Some(100);
@@ -4501,12 +4641,27 @@ bench_variants!(
     reverse_rsi_avx512,
 );
 
+// Mean AD single-series variants
+bench_variants!(
+    mean_ad => MeanAdInputS; None;
+    mean_ad_scalar,
+    mean_ad_avx2,
+    mean_ad_avx512,
+);
+
 // Medium AD single-series variants
 bench_variants!(
     medium_ad => MediumAdInputS; None;
     medium_ad_scalar,
     medium_ad_avx2,
     medium_ad_avx512,
+);
+
+bench_variants!(
+    mean_ad_batch => MeanAdInputS; Some(5);
+    mean_ad_batch_scalarbatch,
+    mean_ad_batch_avx2batch,
+    mean_ad_batch_avx512batch,
 );
 
 // MSW single-series: compare Scalar vs AVX2 vs AVX512
@@ -4560,6 +4715,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    alligator => AlligatorInputS; None;
+    alligator_scalar,
+    alligator_avx2,
+    alligator_avx512,
+);
+
+bench_variants!(
     cci => CciInputS; Some(14);
     cci_scalar,
     cci_avx2,
@@ -4599,6 +4761,43 @@ bench_variants!(
     prb_batch_scalarbatch,
     prb_batch_avx2batch,
     prb_batch_avx512batch
+);
+
+// Aroon kernel variant benches (Scalar/Avx2/Avx512)
+make_kernel_wrappers!(
+    aroon,
+    my_project::indicators::aroon::aroon_with_kernel,
+    AroonInputS;
+    Scalar, Avx2, Avx512
+);
+
+bench_variants!(
+    aroon => AroonInputS; Some(14);
+    aroon_scalar,
+    aroon_avx2,
+    aroon_avx512
+);
+
+make_pair_from_input_wrappers!(
+    aroon_batch,
+    my_project::indicators::aroon::AroonBatchBuilder,
+    AroonInputS,
+    |input: &AroonInputS| -> anyhow::Result<(&[f64], &[f64])> {
+        let (high, low) = match &input.data {
+            my_project::indicators::aroon::AroonData::Candles { candles } => {
+                (&candles.high[..], &candles.low[..])
+            }
+            my_project::indicators::aroon::AroonData::SlicesHL { high, low } => (*high, *low),
+        };
+        Ok((high, low))
+    }
+);
+
+bench_variants!(
+    aroon_batch => AroonInputS; Some(14);
+    aroon_batch_scalarbatch,
+    aroon_batch_avx2batch,
+    aroon_batch_avx512batch
 );
 
 // Aroon Oscillator kernel variant benches (Scalar/Avx2/Avx512)
@@ -4828,6 +5027,13 @@ bench_variants!(
     mfi_batch_avx512batch,
 );
 
+bench_variants!(
+    midprice_batch => MidpriceInputS; Some(14);
+    midprice_batch_scalarbatch,
+    midprice_batch_avx2batch,
+    midprice_batch_avx512batch,
+);
+
 // DX batch benchmarks (period sweep 10..=30 step 5; window representative: 14)
 bench_variants!(
     dx_batch => DxInputS; Some(14);
@@ -4836,18 +5042,22 @@ bench_variants!(
     dx_batch_avx512batch,
 );
 
-criterion_main!(
-    benches_scalar,
-    benches_safezonestop,
-    benches_roc,
-    benches_roc_batch,
-    benches_adxr,
-    benches_bandpass,
-    benches_cci,
-    benches_correl_hl,
-    benches_sar,
-    benches_safezonestop_batch,
-    benches_natr,
+	criterion_main!(
+	    benches_scalar,
+	    benches_safezonestop,
+	    benches_roc,
+	    benches_roc_batch,
+	    benches_adxr,
+	    benches_alligator,
+	    benches_bandpass,
+	    benches_cci,
+	    benches_cci_batch,
+	    benches_cci_cycle,
+	    benches_cci_cycle_batch,
+	    benches_correl_hl,
+	    benches_sar,
+	    benches_safezonestop_batch,
+	    benches_natr,
     benches_efi,
     benches_marketfi,
     benches_natr_batch,
@@ -4855,6 +5065,20 @@ criterion_main!(
     benches_stoch,
     benches_stoch_batch,
     benches_fisher_batch,
+    benches_fvg_trailing_stop,
+    benches_gatorosc,
+    benches_halftrend,
+    benches_ift_rsi,
+    benches_kdj,
+    benches_keltner,
+    benches_keltner_batch,
+    benches_kvo,
+    benches_lrsi,
+    benches_lpc,
+    benches_mean_ad,
+    benches_mean_ad_batch,
+    benches_medium_ad,
+    benches_medium_ad_batch,
     // Range Filter (single + batch)
     benches_range_filter,
     benches_range_filter_batch,
@@ -4871,14 +5095,19 @@ criterion_main!(
     benches_vpci,
     benches_vpci_batch,
     benches_bollinger_bands,
+    benches_bop,
     benches_cg,
     benches_ttm_trend,
     benches_ttm_trend_batch,
     benches_ad,
     benches_cmo,
     benches_cmo_batch,
+    benches_coppock,
+    benches_coppock_batch,
     benches_cvi,
     benches_cvi_batch,
+    benches_damiani_volatmeter,
+    benches_damiani_volatmeter_batch,
     benches_linearreg_angle,
     benches_nvi,
     benches_pvi,
@@ -4913,6 +5142,7 @@ criterion_main!(
     benches_tsi,
     benches_rsi,
     benches_mfi_batch,
+    benches_midprice_batch,
     benches_rsi_batch,
     benches_dx_batch,
     benches_adx,
@@ -5054,6 +5284,7 @@ criterion_main!(
     benches_sama_batch,
     benches_er_batch,
     benches_vpwma,
+    benches_vwap,
     benches_vpwma_batch,
     benches_prb_batch,
     benches_squeeze_momentum_batch,
@@ -5105,8 +5336,12 @@ criterion_main!(
     benches_kvo_batch,
     benches_bollinger_bands_width,
     benches_bollinger_bands_width_batch,
+    benches_aroon,
+    benches_aroon_batch,
     benches_aroon_osc,
     benches_aroon_osc_batch,
+    benches_avsl,
+    benches_avsl_batch,
     benches_ehma,
     benches_ehma_batch,
     benches_vpt,

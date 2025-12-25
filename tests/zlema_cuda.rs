@@ -80,7 +80,7 @@ fn zlema_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let combo_count = expand_grid_count(&sweep);
     let mut cpu_out = vec![f64::NAN; combo_count * len];
-    let combos_cpu = zlema_batch_inner_into(&data, &sweep, Kernel::Scalar, false, &mut cpu_out)?;
+    let combos_cpu = zlema_batch_inner_into(&data, &sweep, Kernel::ScalarBatch, false, &mut cpu_out)?;
 
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let cuda = CudaZlema::new(0).expect("CudaZlema::new");
@@ -118,7 +118,7 @@ fn zlema_cuda_host_copy_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     let sweep = ZlemaBatchRange { period: (7, 31, 6) };
 
     let mut cpu_out = vec![f64::NAN; expand_grid_count(&sweep) * len];
-    let combos_cpu = zlema_batch_inner_into(&data, &sweep, Kernel::Scalar, false, &mut cpu_out)?;
+    let combos_cpu = zlema_batch_inner_into(&data, &sweep, Kernel::ScalarBatch, false, &mut cpu_out)?;
 
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let cuda = CudaZlema::new(0).expect("CudaZlema::new");

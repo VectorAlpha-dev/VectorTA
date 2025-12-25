@@ -504,7 +504,7 @@ fn avsl_compute_into(
         }
 
         match kernel {
-            Kernel::Scalar | Kernel::ScalarBatch => avsl_scalar_ref(
+            Kernel::Scalar | Kernel::ScalarBatch => avsl_scalar(
                 close,
                 low,
                 volume,
@@ -538,7 +538,7 @@ fn avsl_compute_into(
             ),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                avsl_scalar_ref(
+                avsl_scalar(
                     close,
                     low,
                     volume,
@@ -624,16 +624,16 @@ pub fn avsl_scalar(
                 sum_vol_s += v;
                 sum_cxv_s += cv;
 
-                if i + 1 >= fast_period + first_val {
-                    let k = i + 1 - fast_period;
+                if i + 1 > fast_period + first_val {
+                    let k = i + 1 - fast_period - 1;
                     let c_old = *c_ptr.add(k);
                     let v_old = *v_ptr.add(k);
                     sum_close_f -= c_old;
                     sum_vol_f -= v_old;
                     sum_cxv_f -= c_old * v_old;
                 }
-                if i + 1 >= slow_period + first_val {
-                    let k = i + 1 - slow_period;
+                if i + 1 > slow_period + first_val {
+                    let k = i + 1 - slow_period - 1;
                     let c_old = *c_ptr.add(k);
                     let v_old = *v_ptr.add(k);
                     sum_close_s -= c_old;
@@ -2076,7 +2076,7 @@ fn avsl_batch_inner(
             let mult = p.multiplier.unwrap_or(2.0);
             let dst_f64: &mut [f64] =
                 unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut f64, cols) };
-            avsl_scalar_ref(close, low, volume, fast, slow, mult, first, dst_f64)?;
+            avsl_compute_into(close, low, volume, fast, slow, mult, first, simd, dst_f64)?;
         }
     }
 
@@ -2136,7 +2136,7 @@ fn avsl_batch_inner_into(
         // Write directly into the row slice
         let dst: &mut [f64] =
             unsafe { core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, cols) };
-        avsl_scalar_ref(close, low, volume, fast, slow, mult, first, dst)
+        avsl_compute_into(close, low, volume, fast, slow, mult, first, kern, dst)
     };
 
     // Non-WASM: allow parallel fill. On WASM: serial.

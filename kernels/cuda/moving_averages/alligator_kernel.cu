@@ -32,6 +32,22 @@ static __device__ __forceinline__ int warp_reduce_max(int v) {
   return v;
 }
 
+static __device__ __forceinline__ int warp_reduce_max(int v, unsigned mask) {
+  for (int ofs = WARP_SIZE >> 1; ofs > 0; ofs >>= 1) {
+    int other = __shfl_down_sync(mask, v, ofs);
+    v = max(v, other);
+  }
+  return v;
+}
+
+static __device__ __forceinline__ int warp_reduce_min(int v, unsigned mask) {
+  for (int ofs = WARP_SIZE >> 1; ofs > 0; ofs >>= 1) {
+    int other = __shfl_down_sync(mask, v, ofs);
+    v = min(v, other);
+  }
+  return v;
+}
+
 extern "C" __global__
 void alligator_batch_f32(const float* __restrict__ prices,
                          const int*   __restrict__ jaw_periods,
@@ -48,7 +64,6 @@ void alligator_batch_f32(const float* __restrict__ prices,
                          float* __restrict__ out_lips) {
 
   const int combo = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned full = 0xFFFFFFFFu;
   const float nan_f = __int_as_float(0x7fffffff);
 
   // Per-thread parameters
@@ -96,10 +111,14 @@ void alligator_batch_f32(const float* __restrict__ prices,
   // broadcasted pass up to max(pj, pt, pl).
   float prev_j = 0.f, prev_t = 0.f, prev_l = 0.f;
   if (combo < n_combos && valid) {
+    const unsigned mask = __activemask();
     const int warm_base_j = first_valid + pj - 1;
     const int warm_base_t = first_valid + pt - 1;
     const int warm_base_l = first_valid + pl - 1;
-    const int maxP = warp_reduce_max(max(pj, max(pt, pl)));
+    int maxP = warp_reduce_max(max(pj, max(pt, pl)), mask);
+    // warp_reduce_max only returns the full reduction in lane 0; broadcast it so
+    // all lanes loop over the same max period.
+    maxP = __shfl_sync(mask, maxP, 0);
     const int leader = 0; // broadcast lane
     float sum_j = 0.f, sum_t = 0.f, sum_l = 0.f;
     for (int k = 0; k < maxP; ++k) {
@@ -107,7 +126,7 @@ void alligator_batch_f32(const float* __restrict__ prices,
       if (lane_id() == (unsigned)leader) {
         v = prices[first_valid + k];
       }
-      const float pk = __shfl_sync(full, v, leader);
+      const float pk = __shfl_sync(mask, v, leader);
       if (k < pj) sum_j += pk;
       if (k < pt) sum_t += pk;
       if (k < pl) sum_l += pk;
@@ -125,13 +144,20 @@ void alligator_batch_f32(const float* __restrict__ prices,
     if (tl < series_len) out_lips[base + tl] = prev_l;
 
     // Continue recurrence for i = warm_base+1.., writing at shifted indices.
-    const int start_i = min(min(warm_base_j, warm_base_t), warm_base_l) + 1;
+    //
+    // IMPORTANT: We broadcast prices from lane 0 to reduce global loads. To keep
+    // the broadcast correct, every active lane in the warp must iterate over
+    // the same `i` values. Use a warp-wide minimum start index; per-lane gates
+    // below ensure each line only updates/writes once it is warm.
+    const int min_base = min(min(warm_base_j, warm_base_t), warm_base_l);
+    int start_i = warp_reduce_min(min_base, mask);
+    start_i = __shfl_sync(mask, start_i, 0) + 1;
     for (int i = start_i; i < series_len; ++i) {
       float v2 = 0.f;
       if (lane_id() == (unsigned)leader) {
         v2 = prices[i];
       }
-      const float px = __shfl_sync(full, v2, leader);
+      const float px = __shfl_sync(mask, v2, leader);
       // Update only after each line's warm_base
       if (i > warm_base_j) {
         prev_j = fmaf(prev_j, bj, px * aj);
@@ -229,9 +255,8 @@ void alligator_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int tj = i + jaw_offset;
     const int tt = i + teeth_offset;
     const int tl = i + lips_offset;
-    if (tj < series_len) out_jaw_tm[size_t(tj) * stride + col] = prev_j;
-    if (tt < series_len) out_teeth_tm[size_t(tt) * stride + col] = prev_t;
-    if (tl < series_len) out_lips_tm[size_t(tl) * stride + col] = prev_l;
+    if (tj < series_len && i >= warm_base_j) out_jaw_tm[size_t(tj) * stride + col] = prev_j;
+    if (tt < series_len && i >= warm_base_t) out_teeth_tm[size_t(tt) * stride + col] = prev_t;
+    if (tl < series_len && i >= warm_base_l) out_lips_tm[size_t(tl) * stride + col] = prev_l;
   }
 }
-

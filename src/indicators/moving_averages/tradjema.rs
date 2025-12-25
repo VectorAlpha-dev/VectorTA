@@ -454,12 +454,14 @@ fn tradjema_compute_into_scalar(
         cap: usize,
     ) {
         let mut back = dec(*tail, cap);
-        while *tail != *head && vals[back] > v {
+        while *tail != *head && unsafe { *vals.get_unchecked(back) } > v {
             *tail = back;
             back = dec(*tail, cap);
         }
-        vals[*tail] = v;
-        id[*tail] = idx;
+        unsafe {
+            *vals.get_unchecked_mut(*tail) = v;
+            *id.get_unchecked_mut(*tail) = idx;
+        }
         inc(tail, cap);
     }
     #[inline(always)]
@@ -473,12 +475,14 @@ fn tradjema_compute_into_scalar(
         cap: usize,
     ) {
         let mut back = dec(*tail, cap);
-        while *tail != *head && vals[back] < v {
+        while *tail != *head && unsafe { *vals.get_unchecked(back) } < v {
             *tail = back;
             back = dec(*tail, cap);
         }
-        vals[*tail] = v;
-        id[*tail] = idx;
+        unsafe {
+            *vals.get_unchecked_mut(*tail) = v;
+            *id.get_unchecked_mut(*tail) = idx;
+        }
         inc(tail, cap);
     }
     #[inline(always)]
@@ -491,7 +495,7 @@ fn tradjema_compute_into_scalar(
         cap: usize,
     ) {
         let lim = cur.saturating_sub(len);
-        while *head != *tail && id[*head] <= lim {
+        while *head != *tail && unsafe { *id.get_unchecked(*head) } <= lim {
             inc(head, cap);
         }
     }
@@ -508,7 +512,7 @@ fn tradjema_compute_into_scalar(
 
     // --- Seed window: [first .. warm] ---
     // i == first: TR = H-L
-    let tr0 = high[first] - low[first];
+    let tr0 = unsafe { *high.get_unchecked(first) - *low.get_unchecked(first) };
     minq_push(
         tr0,
         first,
@@ -531,9 +535,9 @@ fn tradjema_compute_into_scalar(
 
     let mut i = first + 1;
     while i <= warm {
-        let hi = high[i];
-        let lo = low[i];
-        let pc1 = close[i - 1];
+        let hi = unsafe { *high.get_unchecked(i) };
+        let lo = unsafe { *low.get_unchecked(i) };
+        let pc1 = unsafe { *close.get_unchecked(i - 1) };
         let tr = max3(hi - lo, (hi - pc1).abs(), (lo - pc1).abs());
         minq_push(
             tr,
@@ -558,8 +562,8 @@ fn tradjema_compute_into_scalar(
     }
 
     // Compute first output at warm
-    let tr_low = min_vals[min_head];
-    let tr_high = max_vals[max_head];
+    let tr_low = unsafe { *min_vals.get_unchecked(min_head) };
+    let tr_high = unsafe { *max_vals.get_unchecked(max_head) };
     let denom = tr_high - tr_low;
     let tr_adj0 = if denom != 0.0 {
         (last_tr - tr_low) / denom
@@ -567,9 +571,11 @@ fn tradjema_compute_into_scalar(
         0.0
     };
     let a0 = alpha * (1.0 + tr_adj0 * mult);
-    let src0 = close[warm - 1]; // 1-bar lag
+    let src0 = unsafe { *close.get_unchecked(warm - 1) }; // 1-bar lag
     let mut y = src0.mul_add(a0, 0.0); // Pine seed (0 + a0*(src0-0))
-    out[warm] = y;
+    unsafe {
+        *out.get_unchecked_mut(warm) = y;
+    }
 
     // --- Main loop ---
     i = warm + 1;
@@ -579,9 +585,9 @@ fn tradjema_compute_into_scalar(
         q_expire(i, length, &mut max_idx, &mut max_head, &mut max_tail, cap);
 
         // compute TR at i and push
-        let hi = high[i];
-        let lo = low[i];
-        let pc1 = close[i - 1];
+        let hi = unsafe { *high.get_unchecked(i) };
+        let lo = unsafe { *low.get_unchecked(i) };
+        let pc1 = unsafe { *close.get_unchecked(i - 1) };
         let tr = max3(hi - lo, (hi - pc1).abs(), (lo - pc1).abs());
         minq_push(
             tr,
@@ -603,14 +609,16 @@ fn tradjema_compute_into_scalar(
         );
 
         // normalize and update EMA with lagged source close[i-1]
-        let lo_tr = min_vals[min_head];
-        let hi_tr = max_vals[max_head];
+        let lo_tr = unsafe { *min_vals.get_unchecked(min_head) };
+        let hi_tr = unsafe { *max_vals.get_unchecked(max_head) };
         let den = hi_tr - lo_tr;
         let tr_adj = if den != 0.0 { (tr - lo_tr) / den } else { 0.0 };
         let a = alpha * (1.0 + tr_adj * mult);
         let src = pc1;
         y = (src - y).mul_add(a, y);
-        out[i] = y;
+        unsafe {
+            *out.get_unchecked_mut(i) = y;
+        }
 
         i += 1;
     }

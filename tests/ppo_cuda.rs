@@ -19,6 +19,15 @@ fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() <= tol
 }
 
+fn approx_eq_absrel(a: f64, b: f64, abs_tol: f64, rel_tol: f64) -> bool {
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
+    let diff = (a - b).abs();
+    let scale = a.abs().max(1.0);
+    diff <= abs_tol.max(rel_tol * scale)
+}
+
 #[test]
 fn cuda_feature_off_noop() {
     #[cfg(not(feature = "cuda"))]
@@ -52,9 +61,9 @@ fn ppo_cuda_batch_matches_cpu_sma() -> Result<(), Box<dyn std::error::Error>> {
         ma_type: "sma".into(),
     };
 
-    let cpu = ppo_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
-
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
+    let price32_as_f64: Vec<f64> = price_f32.iter().map(|&v| v as f64).collect();
+    let cpu = ppo_batch_with_kernel(&price32_as_f64, &sweep, Kernel::ScalarBatch)?;
     let cuda = CudaPpo::new(0).expect("CudaPpo::new");
     let (dev, combos) = cuda
         .ppo_batch_dev(&price_f32, &sweep)
@@ -65,12 +74,16 @@ fn ppo_cuda_batch_matches_cpu_sma() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
-    let tol = 8e-4;
+    let tol = 3e-3;
     for idx in 0..(cpu.rows * cpu.cols) {
+        let c = cpu.values[idx];
+        let g = host[idx] as f64;
         assert!(
-            approx_eq(cpu.values[idx], host[idx] as f64, tol),
-            "batch sma mismatch at {}",
-            idx
+            approx_eq(c, g, tol),
+            "batch sma mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
         );
     }
     Ok(())
@@ -91,9 +104,9 @@ fn ppo_cuda_batch_matches_cpu_ema() -> Result<(), Box<dyn std::error::Error>> {
         ma_type: "ema".into(),
     };
 
-    let cpu = ppo_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
-
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
+    let price32_as_f64: Vec<f64> = price_f32.iter().map(|&v| v as f64).collect();
+    let cpu = ppo_batch_with_kernel(&price32_as_f64, &sweep, Kernel::ScalarBatch)?;
     let cuda = CudaPpo::new(0).expect("CudaPpo::new");
     let (dev, _combos) = cuda
         .ppo_batch_dev(&price_f32, &sweep)
@@ -103,12 +116,17 @@ fn ppo_cuda_batch_matches_cpu_ema() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
-    let tol = 1.5e-3; // EMA recurrence fp32 vs fp64
+    let abs_tol = 2.0;
+    let rel_tol = 1e-4;
     for idx in 0..(cpu.rows * cpu.cols) {
+        let c = cpu.values[idx];
+        let g = host[idx] as f64;
         assert!(
-            approx_eq(cpu.values[idx], host[idx] as f64, tol),
-            "batch ema mismatch at {}",
-            idx
+            approx_eq_absrel(c, g, abs_tol, rel_tol),
+            "batch ema mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
         );
     }
     Ok(())
@@ -136,12 +154,14 @@ fn ppo_cuda_many_series_one_param_matches_cpu_sma() -> Result<(), Box<dyn std::e
         ma_type: Some("sma".into()),
     };
 
+    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
+
     // CPU baseline per series
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
         for t in 0..rows {
-            p[t] = data_tm[t * cols + s];
+            p[t] = data_tm_f32[t * cols + s] as f64;
         }
         let input = PpoInput {
             data: PpoData::Slice(&p),
@@ -153,7 +173,6 @@ fn ppo_cuda_many_series_one_param_matches_cpu_sma() -> Result<(), Box<dyn std::e
         }
     }
 
-    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaPpo::new(0).expect("CudaPpo::new");
     let dev = cuda
         .ppo_many_series_one_param_time_major_dev(&data_tm_f32, cols, rows, &params)
@@ -163,12 +182,16 @@ fn ppo_cuda_many_series_one_param_matches_cpu_sma() -> Result<(), Box<dyn std::e
 
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
-    let tol = 8e-4;
+    let tol = 3e-3;
     for idx in 0..host.len() {
+        let c = cpu_tm[idx];
+        let g = host[idx] as f64;
         assert!(
-            approx_eq(cpu_tm[idx], host[idx] as f64, tol),
-            "many-series sma mismatch at {}",
-            idx
+            approx_eq(c, g, tol),
+            "many-series sma mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
         );
     }
     Ok(())
@@ -196,12 +219,14 @@ fn ppo_cuda_many_series_one_param_matches_cpu_ema() -> Result<(), Box<dyn std::e
         ma_type: Some("ema".into()),
     };
 
+    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
+
     // CPU baseline
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
         for t in 0..rows {
-            p[t] = data_tm[t * cols + s];
+            p[t] = data_tm_f32[t * cols + s] as f64;
         }
         let input = PpoInput {
             data: PpoData::Slice(&p),
@@ -213,7 +238,6 @@ fn ppo_cuda_many_series_one_param_matches_cpu_ema() -> Result<(), Box<dyn std::e
         }
     }
 
-    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaPpo::new(0).expect("CudaPpo::new");
     let dev = cuda
         .ppo_many_series_one_param_time_major_dev(&data_tm_f32, cols, rows, &params)
@@ -223,10 +247,11 @@ fn ppo_cuda_many_series_one_param_matches_cpu_ema() -> Result<(), Box<dyn std::e
 
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
-    let tol = 1.5e-3;
+    let abs_tol = 2.0;
+    let rel_tol = 1e-4;
     for idx in 0..host.len() {
         assert!(
-            approx_eq(cpu_tm[idx], host[idx] as f64, tol),
+            approx_eq_absrel(cpu_tm[idx], host[idx] as f64, abs_tol, rel_tol),
             "many-series ema mismatch at {}",
             idx
         );

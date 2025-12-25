@@ -957,29 +957,6 @@ pub fn chandelier_exit_with_kernel(
     let mut long_stop = alloc_with_nan_prefix(len, warm);
     let mut short_stop = alloc_with_nan_prefix(len, warm);
 
-    // Rolling state for trailing logic (unmasked)
-    let mut long_raw_prev = f64::NAN;
-    let mut short_raw_prev = f64::NAN;
-    let mut prev_dir: i8 = 1;
-
-    // Monotone deques for rolling max/min over the chosen source
-    // Use power-of-two capacity to enable fast masking
-    let cap = period.next_power_of_two();
-    let mask = cap - 1;
-    let mut dq_max = vec![0usize; cap];
-    let mut dq_min = vec![0usize; cap];
-    let mut hmax = 0usize; // head index for max deque
-    let mut tmax = 0usize; // tail index for max deque
-    let mut hmin = 0usize; // head index for min deque
-    let mut tmin = 0usize; // tail index for min deque
-
-    // Select extremum source once
-    let (src_max, src_min) = if use_close {
-        (close, close)
-    } else {
-        (high, low)
-    };
-
     // Single pass over all bars; emit once warm is satisfied
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     if matches!(chosen, Kernel::Avx2 | Kernel::Avx512) {
@@ -996,6 +973,29 @@ pub fn chandelier_exit_with_kernel(
             first,
         );
     } else {
+        // Rolling state for trailing logic (unmasked)
+        let mut long_raw_prev = f64::NAN;
+        let mut short_raw_prev = f64::NAN;
+        let mut prev_dir: i8 = 1;
+
+        // Monotone deques for rolling max/min over the chosen source
+        // Use power-of-two capacity to enable fast masking
+        let cap = period.next_power_of_two();
+        let mask = cap - 1;
+        let mut dq_max = vec![0usize; cap];
+        let mut dq_min = vec![0usize; cap];
+        let mut hmax = 0usize; // head index for max deque
+        let mut tmax = 0usize; // tail index for max deque
+        let mut hmin = 0usize; // head index for min deque
+        let mut tmin = 0usize; // tail index for min deque
+
+        // Select extremum source once
+        let (src_max, src_min) = if use_close {
+            (close, close)
+        } else {
+            (high, low)
+        };
+
         for i in 0..len {
             // Evict indices that are out of the window [i - period + 1 .. i]
             while hmax != tmax {
@@ -1111,6 +1111,29 @@ pub fn chandelier_exit_with_kernel(
     }
     #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
     {
+        // Rolling state for trailing logic (unmasked)
+        let mut long_raw_prev = f64::NAN;
+        let mut short_raw_prev = f64::NAN;
+        let mut prev_dir: i8 = 1;
+
+        // Monotone deques for rolling max/min over the chosen source
+        // Use power-of-two capacity to enable fast masking
+        let cap = period.next_power_of_two();
+        let mask = cap - 1;
+        let mut dq_max = vec![0usize; cap];
+        let mut dq_min = vec![0usize; cap];
+        let mut hmax = 0usize; // head index for max deque
+        let mut tmax = 0usize; // tail index for max deque
+        let mut hmin = 0usize; // head index for min deque
+        let mut tmin = 0usize; // tail index for min deque
+
+        // Select extremum source once
+        let (src_max, src_min) = if use_close {
+            (close, close)
+        } else {
+            (high, low)
+        };
+
         for i in 0..len {
             // Evict indices that are out of the window [i - period + 1 .. i]
             while hmax != tmax {

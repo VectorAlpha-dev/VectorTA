@@ -446,7 +446,7 @@ impl CudaBandpass {
         data_f32: &[f32],
         sweep: &BandPassBatchRange,
     ) -> Result<CudaBandpassBatchResult, CudaBandpassError> {
-        let (combos, _first_valid, len) = Self::prepare_batch(data_f32, sweep)?;
+        let (combos, first_valid, len) = Self::prepare_batch(data_f32, sweep)?;
         let n = len;
         let rows = combos.len();
 
@@ -515,17 +515,23 @@ impl CudaBandpass {
             .len()
             .checked_mul(n)
             .ok_or_else(|| CudaBandpassError::InvalidInput("hp buffer length overflow".into()))?;
-        let mut d_hp: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(hp_len, &self.stream)? };
+        // `d_hp` is written by `CudaHighpass` on its own stream; allocate synchronously
+        // to avoid stream-ordered allocation hazards across streams.
+        let mut d_hp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(hp_len)? };
         let cuda_hp = CudaHighpass::new(0).map_err(|e| CudaBandpassError::InvalidInput(e.to_string()))?;
         cuda_hp
             .highpass_batch_device(
                 &d_prices,
+                first_valid as i32,
                 &d_hp_periods,
                 n as i32,
                 hp_unique.len() as i32,
                 &mut d_hp,
             ).map_err(|e| CudaBandpassError::InvalidInput(e.to_string()))?;
+        // Ensure HP stage completes before consuming `d_hp` on this stream.
+        cuda_hp
+            .synchronize()
+            .map_err(|e| CudaBandpassError::InvalidInput(e.to_string()))?;
 
         // Params to device
         let d_hp_idx = DeviceBuffer::from_slice(&hp_row_idx)?;
@@ -556,9 +562,10 @@ impl CudaBandpass {
         // occupancy suggestion
         let (suggested, _min_grid) =
             func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+        // Kernel is compiled with `__launch_bounds__(256, 2)`, so cap threads-per-block.
         let bx = match self.policy.batch {
-            BatchKernelPolicy::Auto => suggested.max(128),
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+            BatchKernelPolicy::Auto => suggested.clamp(128, 256),
+            BatchKernelPolicy::Plain { block_x } => block_x.clamp(32, 256),
         };
         unsafe {
             (*(self as *const _ as *mut CudaBandpass)).last_batch =
@@ -692,9 +699,10 @@ impl CudaBandpass {
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let (suggested, _mg) =
             func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+        // Kernel is compiled with `__launch_bounds__(256, 2)`, so cap threads-per-block.
         let bx = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => suggested.max(128),
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+            ManySeriesKernelPolicy::Auto => suggested.clamp(128, 256),
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.clamp(32, 256),
         };
         unsafe {
             (*(self as *const _ as *mut CudaBandpass)).last_many =

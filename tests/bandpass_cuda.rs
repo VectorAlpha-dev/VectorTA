@@ -47,9 +47,9 @@ fn bandpass_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         bandwidth: (0.2, 0.4, 0.1),
     };
 
-    let cpu = bandpass_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
-
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
+    let price_quant: Vec<f64> = price_f32.iter().map(|&v| v as f64).collect();
+    let cpu = bandpass_batch_with_kernel(&price_quant, &sweep, Kernel::ScalarBatch)?;
     let cuda = CudaBandpass::new(0).expect("CudaBandpass::new");
     let res = cuda
         .bandpass_batch_dev(&price_f32, &sweep)
@@ -115,7 +115,9 @@ fn bandpass_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
     let period = 20usize;
     let bandwidth = 0.3f64;
 
-    // CPU baseline per series
+    let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
+    // CPU baseline per series (quantize inputs to match GPU FP32 path)
+    let price_tm_quant: Vec<f64> = price_tm_f32.iter().map(|&v| v as f64).collect();
     let mut cpu_bp_tm = vec![f64::NAN; cols * rows];
     let mut cpu_bpn_tm = vec![f64::NAN; cols * rows];
     let mut cpu_sig_tm = vec![f64::NAN; cols * rows];
@@ -123,7 +125,7 @@ fn bandpass_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
         for t in 0..rows {
-            p[t] = price_tm[t * cols + s];
+            p[t] = price_tm_quant[t * cols + s];
         }
         let params = BandPassParams {
             period: Some(period),
@@ -139,7 +141,6 @@ fn bandpass_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         }
     }
 
-    let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaBandpass::new(0).expect("CudaBandpass::new");
     let out = cuda
         .bandpass_many_series_one_param_time_major_dev(

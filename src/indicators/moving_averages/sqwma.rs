@@ -283,26 +283,42 @@ pub fn sqwma_scalar(
     let n = data.len();
 
     let inv_ws = 1.0 / weight_sum;
-    for j in (first + period + 1)..n {
-        let mut sum = 0.0;
-        let mut k = 0;
-        while k < p4 {
-            let d0 = data[j - k];
-            let d1 = data[j - (k + 1)];
-            let d2 = data[j - (k + 2)];
-            let d3 = data[j - (k + 3)];
-            sum = d0.mul_add(weights[k], sum);
-            sum = d1.mul_add(weights[k + 1], sum);
-            sum = d2.mul_add(weights[k + 2], sum);
-            sum = d3.mul_add(weights[k + 3], sum);
-            k += 4;
+    unsafe {
+        let d_ptr = data.as_ptr();
+        let w_ptr = weights.as_ptr();
+        let o_ptr = out.as_mut_ptr();
+
+        for j in (first + period + 1)..n {
+            let mut sum = 0.0;
+            let mut k = 0;
+            let mut dp = d_ptr.add(j);
+            let mut wp = w_ptr;
+
+            while k < p4 {
+                let d0 = *dp;
+                let d1 = *dp.sub(1);
+                let d2 = *dp.sub(2);
+                let d3 = *dp.sub(3);
+
+                sum = d0.mul_add(*wp, sum);
+                sum = d1.mul_add(*wp.add(1), sum);
+                sum = d2.mul_add(*wp.add(2), sum);
+                sum = d3.mul_add(*wp.add(3), sum);
+
+                dp = dp.sub(4);
+                wp = wp.add(4);
+                k += 4;
+            }
+            while k < p_minus_1 {
+                let d = *dp;
+                sum = d.mul_add(*wp, sum);
+                dp = dp.sub(1);
+                wp = wp.add(1);
+                k += 1;
+            }
+
+            *o_ptr.add(j) = sum * inv_ws;
         }
-        while k < p_minus_1 {
-            let d = data[j - k];
-            sum = d.mul_add(weights[k], sum);
-            k += 1;
-        }
-        out[j] = sum * inv_ws;
     }
 }
 

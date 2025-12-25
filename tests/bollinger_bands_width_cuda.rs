@@ -49,9 +49,9 @@ fn bollinger_bands_width_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::err
         devdn: (2.0, 2.0, 0.0),
     };
 
-    let cpu = bollinger_bands_width_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
-
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
+    let price_quant: Vec<f64> = price_f32.iter().map(|&v| v as f64).collect();
+    let cpu = bollinger_bands_width_batch_with_kernel(&price_quant, &sweep, Kernel::ScalarBatch)?;
     let cuda = CudaBbw::new(0).expect("CudaBbw::new");
     let (dev, _meta) = cuda
         .bbw_batch_dev(&price_f32, &sweep)
@@ -102,12 +102,14 @@ fn bollinger_bands_width_cuda_many_series_one_param_matches_cpu(
     let devup = 2.0f64;
     let devdn = 2.0f64;
 
-    // CPU baseline per series
+    let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
+    // CPU baseline per series (quantize inputs to match GPU FP32 path)
+    let price_tm_quant: Vec<f64> = price_tm_f32.iter().map(|&v| v as f64).collect();
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
         for t in 0..rows {
-            p[t] = price_tm[t * cols + s];
+            p[t] = price_tm_quant[t * cols + s];
         }
         let params = BollingerBandsWidthParams {
             period: Some(period),
@@ -126,7 +128,6 @@ fn bollinger_bands_width_cuda_many_series_one_param_matches_cpu(
         }
     }
 
-    let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaBbw::new(0).expect("CudaBbw::new");
     let dev_tm = cuda
         .bbw_many_series_one_param_time_major_dev(

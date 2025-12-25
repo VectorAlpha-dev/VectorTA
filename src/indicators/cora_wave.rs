@@ -402,11 +402,12 @@ fn cora_wave_prepare<'a>(
         let base = 1.0 + r * r_multi;
 
         let mut sum = 0.0;
-        for j in 0..period {
-            // newest gets largest weight ⇒ exponent j+1
-            let w = start_wt * base.powi((j + 1) as i32);
+        // newest gets largest weight ⇒ exponent j+1
+        let mut w = start_wt * base;
+        for _ in 0..period {
             weights.push(w);
             sum += w;
+            w *= base;
         }
         inv_sum = 1.0 / sum;
     }

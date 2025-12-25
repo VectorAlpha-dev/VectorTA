@@ -4,15 +4,146 @@
     <meta charset="UTF-8" />
     <title>TA Desktop Demo</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <style>
-      body { font-family: system-ui, sans-serif; margin: 2rem; }
-      h1 { margin-bottom: 0.5rem; }
-      p { margin-top: 0.25rem; color: #555; }
-    </style>
+    <link rel="stylesheet" href="./app.css" />
   </head>
   <body>
-    <h1>TA Desktop Demo</h1>
-    <p>Backend is running. Frontend wiring is minimal for now.</p>
+    <header>
+      <h1>TA Desktop Demo (Double MA Optimizer)</h1>
+    </header>
+    <main>
+      <section class="card">
+        <h2>Data</h2>
+        <div>
+          <label for="csvPath">CSV path (local file path)</label>
+          <input id="csvPath" type="text" placeholder="C:\\path\\to\\candles.csv" />
+        </div>
+        <div class="actions">
+          <button class="primary" id="btnLoad">Load CSV</button>
+          <button id="btnClear">Clear</button>
+        </div>
+        <div style="margin-top: 0.65rem;">
+          <div class="muted">Loaded data id</div>
+          <div class="mono" id="dataId">—</div>
+        </div>
+
+        <hr style="border: none; border-top: 1px solid var(--border); margin: 1.1rem 0 0.9rem;" />
+        <h2>Optimization</h2>
+        <div class="row">
+          <div>
+            <label for="backend">Backend</label>
+            <select id="backend">
+              <option value="CpuOnly">CPU</option>
+              <option value="GpuOnly">GPU</option>
+            </select>
+          </div>
+          <div>
+            <label for="deviceId">GPU device id</label>
+            <input id="deviceId" type="number" min="0" step="1" value="0" />
+          </div>
+        </div>
+
+        <div class="split" style="margin-top: 0.9rem;">
+          <div>
+            <div class="muted" style="margin-bottom: 0.35rem;">Fast range</div>
+            <div class="row3">
+              <div>
+                <label for="fastStart">Start</label>
+                <input id="fastStart" type="number" min="1" step="1" value="5" />
+              </div>
+              <div>
+                <label for="fastEnd">End</label>
+                <input id="fastEnd" type="number" min="1" step="1" value="30" />
+              </div>
+              <div>
+                <label for="fastStep">Step</label>
+                <input id="fastStep" type="number" min="0" step="1" value="1" />
+              </div>
+            </div>
+            <div style="margin-top: 0.65rem;">
+              <div class="muted">Fast MA types</div>
+              <div class="checks">
+                <label><input class="fastMa" type="checkbox" value="0" checked />SMA</label>
+                <label><input class="fastMa" type="checkbox" value="1" />EMA</label>
+                <label><input class="fastMa" type="checkbox" value="2" />ALMA</label>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div class="muted" style="margin-bottom: 0.35rem;">Slow range</div>
+            <div class="row3">
+              <div>
+                <label for="slowStart">Start</label>
+                <input id="slowStart" type="number" min="1" step="1" value="20" />
+              </div>
+              <div>
+                <label for="slowEnd">End</label>
+                <input id="slowEnd" type="number" min="1" step="1" value="120" />
+              </div>
+              <div>
+                <label for="slowStep">Step</label>
+                <input id="slowStep" type="number" min="0" step="1" value="1" />
+              </div>
+            </div>
+            <div style="margin-top: 0.65rem;">
+              <div class="muted">Slow MA types</div>
+              <div class="checks">
+                <label><input class="slowMa" type="checkbox" value="0" checked />SMA</label>
+                <label><input class="slowMa" type="checkbox" value="1" />EMA</label>
+                <label><input class="slowMa" type="checkbox" value="2" />ALMA</label>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top: 0.9rem;">
+          <div>
+            <label for="objective">Objective</label>
+            <select id="objective">
+              <option value="Sharpe">Sharpe</option>
+              <option value="Pnl">PnL</option>
+              <option value="MaxDrawdown">Min drawdown</option>
+            </select>
+          </div>
+          <div>
+            <label for="mode">Mode</label>
+            <select id="mode">
+              <option value="Grid">Grid</option>
+              <option value="Auto">Auto</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top: 0.9rem;">
+          <div>
+            <label for="topK">Return top K (0 = best only)</label>
+            <input id="topK" type="number" min="0" step="1" value="20" />
+          </div>
+          <div>
+            <label for="includeAll">Return all results (can be huge)</label>
+            <select id="includeAll">
+              <option value="false" selected>False</option>
+              <option value="true">True</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button class="primary" id="btnRun">Run optimization</button>
+        </div>
+        <div class="muted" style="margin-top: 0.6rem; font-size: 0.8rem;">
+          Tip: keep ranges small until GPU backend is implemented for your chosen MA types.
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Status</h2>
+        <div class="mono" id="status">Ready.</div>
+        <pre class="mono" id="output">{}</pre>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
   </body>
   </html>
 

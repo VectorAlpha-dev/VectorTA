@@ -16,6 +16,9 @@ fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
         return true;
     }
+    if a == b {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -169,13 +172,17 @@ fn rsmk_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     for idx in 0..g_ind_tm.len() {
         assert!(
             approx_eq(cpu_ind_tm[idx], g_ind_tm[idx] as f64, tol),
-            "indicator mismatch at {}",
-            idx
+            "indicator mismatch at {} (cpu={}, gpu={})",
+            idx,
+            cpu_ind_tm[idx],
+            g_ind_tm[idx]
         );
         assert!(
             approx_eq(cpu_sig_tm[idx], g_sig_tm[idx] as f64, tol),
-            "signal mismatch at {}",
-            idx
+            "signal mismatch at {} (cpu={}, gpu={})",
+            idx,
+            cpu_sig_tm[idx],
+            g_sig_tm[idx]
         );
     }
     Ok(())

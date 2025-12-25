@@ -392,14 +392,53 @@ pub fn pwma_scalar(data: &[f64], weights: &[f64], period: usize, first: usize, o
         "`out` must be at least as long as `data`"
     );
 
-    for i in (first + period - 1)..data.len() {
-        let start = i + 1 - period;
-        let window = &data[start..start + period];
-        let mut sum = 0.0;
-        for (d, w) in window.iter().zip(weights.iter()) {
-            sum += d * w;
+    let n = data.len();
+    let d_base = data.as_ptr();
+    let w_ptr = weights.as_ptr();
+    let o_ptr = out.as_mut_ptr();
+
+    unsafe {
+        let mut i = first + period - 1;
+        while i < n {
+            let start = i + 1 - period;
+            let d_ptr = d_base.add(start);
+
+            // 4-lane unrolled scalar dot for ILP (low overhead for small periods).
+            let mut s0 = 0.0f64;
+            let mut s1 = 0.0f64;
+            let mut s2 = 0.0f64;
+            let mut s3 = 0.0f64;
+
+            let mut k = 0usize;
+            let k_end = period & !3usize;
+            while k < k_end {
+                let d0 = *d_ptr.add(k + 0);
+                let d1 = *d_ptr.add(k + 1);
+                let d2 = *d_ptr.add(k + 2);
+                let d3 = *d_ptr.add(k + 3);
+
+                let w0 = *w_ptr.add(k + 0);
+                let w1 = *w_ptr.add(k + 1);
+                let w2 = *w_ptr.add(k + 2);
+                let w3 = *w_ptr.add(k + 3);
+
+                s0 = d0.mul_add(w0, s0);
+                s1 = d1.mul_add(w1, s1);
+                s2 = d2.mul_add(w2, s2);
+                s3 = d3.mul_add(w3, s3);
+
+                k += 4;
+            }
+
+            let mut sum = (s0 + s1) + (s2 + s3);
+            while k < period {
+                sum = (*d_ptr.add(k)).mul_add(*w_ptr.add(k), sum);
+                k += 1;
+            }
+
+            *o_ptr.add(i) = sum;
+            i += 1;
         }
-        out[i] = sum;
     }
 }
 

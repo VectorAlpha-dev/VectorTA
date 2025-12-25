@@ -352,7 +352,7 @@ pub fn cksp_with_kernel(input: &CkspInput, kernel: Kernel) -> Result<CkspOutput,
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -443,7 +443,7 @@ pub fn cksp_into_slices(
         return Err(CkspError::NotEnoughValidData { needed, valid });
     }
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -3311,7 +3311,7 @@ fn cksp_prepare(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -3790,7 +3790,7 @@ pub fn cksp_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

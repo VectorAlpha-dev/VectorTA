@@ -27,6 +27,10 @@
 #define STC_SMALL_K 16   // heuristic: tiny k uses trivial scan which is faster than deque
 #endif
 
+// Match CPU's `f64::EPSILON`-style "no-range" guard used by the scalar reference.
+// Note: this is intentionally much smaller than `FLT_EPSILON`.
+#define STC_RANGE_EPS 2.2204460492503131e-16f
+
 // Dynamic shared mem size helper (host-side reference; kernel uses extern __shared__)
 #define STC_BATCH_SMEM_BYTES(max_k) ((size_t)(max_k) * (2*sizeof(float) + 4*sizeof(int)))
 
@@ -34,6 +38,11 @@
 static __device__ __forceinline__ float ema_update_f32(float prev, float a, float x) {
     // Use fused multiply-add for better precision and performance in FP32.
     return __fmaf_rn(a, (x - prev), prev);
+}
+
+// Precise FP32 division even when compiled with --use_fast_math.
+static __device__ __forceinline__ float div_rn_f32(float num, float den) {
+    return __fdiv_rn(num, den);
 }
 
 // Compensated FP32 adder (Neumaier variant) for accurate SMA seeds
@@ -118,9 +127,9 @@ static __device__ __forceinline__ void stc_compute_series_f32(
     if (warm >= len) return;
 
     // EMAs: FP32 alpha + FMA
-    const float fast_a = 2.0f / (float)(fast + 1);
-    const float slow_a = 2.0f / (float)(slow + 1);
-    const float d_a    = 2.0f / (float)(d + 1);
+    const float fast_a = div_rn_f32(2.0f, (float)(fast + 1));
+    const float slow_a = div_rn_f32(2.0f, (float)(slow + 1));
+    const float d_a    = div_rn_f32(2.0f, (float)(d + 1));
 
     // SMA seeds for fast/slow EMA with compensated FP32
     KahanF32 fast_acc; fast_acc.reset();
@@ -130,8 +139,8 @@ static __device__ __forceinline__ void stc_compute_series_f32(
     const int s_end = min(slow, len - first_valid);
     for (int i = 0; i < f_end; ++i) { float v = prices[first_valid + i]; if (!isfinite(v)) { fast_seed_nan = true; break; } fast_acc.add(v); }
     for (int i = 0; i < s_end; ++i) { float v = prices[first_valid + i]; if (!isfinite(v)) { slow_seed_nan = true; break; } slow_acc.add(v); }
-    float fast_ema = (f_end == fast && !fast_seed_nan) ? (fast_acc.result() / (float)fast) : NAN;
-    float slow_ema = (s_end == slow && !slow_seed_nan) ? (slow_acc.result() / (float)slow) : NAN;
+    float fast_ema = (f_end == fast && !fast_seed_nan) ? div_rn_f32(fast_acc.result(), (float)fast) : NAN;
+    float slow_ema = (s_end == slow && !slow_seed_nan) ? div_rn_f32(slow_acc.result(), (float)slow) : NAN;
 
     // Deques for sliding min/max over MACD and d-EMA
     IndexDeque macd_min, macd_max, d_min, d_max;
@@ -184,7 +193,7 @@ static __device__ __forceinline__ void stc_compute_series_f32(
                 for (int j = 0; j < min(macd_run, k); ++j) { float v = macd_ring[(start + j) % k]; mn = fminf(mn, v); mx = fmaxf(mx, v); }
                 if (macd_run >= k) {
                     const float range = mx - mn;
-                    stok = (fabsf(range) > 1e-20f) ? ((macd - mn) * (100.0f / range)) : 50.0f;
+                    stok = (fabsf(range) > STC_RANGE_EPS) ? ((macd - mn) * div_rn_f32(100.0f, range)) : 50.0f;
                 } else { stok = 50.0f; }
             } else {
                 // deque path
@@ -195,19 +204,31 @@ static __device__ __forceinline__ void stc_compute_series_f32(
                     const float mn = macd_min.front_val();
                     const float mx = macd_max.front_val();
                     const float range = mx - mn;
-                    stok = (fabsf(range) > 1e-20f) ? ((macd - mn) * (100.0f / range)) : 50.0f;
+                    stok = (fabsf(range) > STC_RANGE_EPS) ? ((macd - mn) * div_rn_f32(100.0f, range)) : 50.0f;
                 } else { stok = 50.0f; }
             }
         } else {
             macd_run = 0; macd_min.reset(); macd_max.reset(); stok = NAN;
         }
 
-        // EMA(d) of stok with compensated seed
+        // EMA(d) of stok (carry-forward + running-mean warmup; match CPU semantics)
         float d_val = NAN;
         if (isfinite(stok)) {
-            if (d_seed_cnt < d) { d_seed_acc.add(stok); d_seed_cnt += 1; if (d_seed_cnt == d) { d_ema = d_seed_acc.result() / (float)d; d_val = d_ema; } }
-            else { d_ema = ema_update_f32(d_ema, d_a, stok); d_val = d_ema; }
-        } else { d_run = 0; }
+            if (d_seed_cnt < d) {
+                d_seed_acc.add(stok);
+                d_seed_cnt += 1;
+                const float sum = d_seed_acc.result();
+                if (d_seed_cnt == d) { d_ema = div_rn_f32(sum, (float)d); d_val = d_ema; }
+                else { d_val = div_rn_f32(sum, (float)d_seed_cnt); }
+            } else {
+                d_ema = ema_update_f32(d_ema, d_a, stok);
+                d_val = d_ema;
+            }
+        } else {
+            if (d_seed_cnt == 0) d_val = NAN;
+            else if (d_seed_cnt < d) d_val = div_rn_f32(d_seed_acc.result(), (float)d_seed_cnt);
+            else d_val = d_ema;
+        }
 
         // Second stochastic over d-EMA
         float kd = NAN;
@@ -217,23 +238,35 @@ static __device__ __forceinline__ void stc_compute_series_f32(
                 float mn = d_ring[(i - (d_run-1)) % k]; float mx = mn;
                 int start = i - min(d_run, k) + 1;
                 for (int j = 0; j < min(d_run, k); ++j) { float v = d_ring[(start + j) % k]; mn = fminf(mn, v); mx = fmaxf(mx, v); }
-                if (d_run >= k) { const float range = mx - mn; kd = (fabsf(range) > 1e-20f) ? ((d_val - mn) * (100.0f / range)) : 50.0f; } else { kd = 50.0f; }
+                if (d_run >= k) { const float range = mx - mn; kd = (fabsf(range) > STC_RANGE_EPS) ? ((d_val - mn) * div_rn_f32(100.0f, range)) : 50.0f; } else { kd = 50.0f; }
             } else {
                 d_min.push(i, d_val); d_max.push(i, d_val);
                 const int left = i - k + 1;
                 d_min.pop_expired(left); d_max.pop_expired(left);
                 if (d_run >= k && !d_min.empty() && !d_max.empty()) {
                     const float mn = d_min.front_val(); const float mx = d_max.front_val();
-                    const float range = mx - mn; kd = (fabsf(range) > 1e-20f) ? ((d_val - mn) * (100.0f / range)) : 50.0f;
+                    const float range = mx - mn; kd = (fabsf(range) > STC_RANGE_EPS) ? ((d_val - mn) * div_rn_f32(100.0f, range)) : 50.0f;
                 } else { kd = 50.0f; }
             }
         } else { d_min.reset(); d_max.reset(); }
 
-        // Final EMA(d) smoothing (seed with compensated FP32)
+        // Final EMA(d) smoothing (carry-forward + running-mean warmup; match CPU semantics)
         float out_i = NAN;
         if (isfinite(kd)) {
-            if (final_seed_cnt < d) { final_seed_acc.add(kd); final_seed_cnt += 1; if (final_seed_cnt == d) { final_ema = final_seed_acc.result() / (float)d; out_i = final_ema; } }
-            else { final_ema = ema_update_f32(final_ema, d_a, kd); out_i = final_ema; }
+            if (final_seed_cnt < d) {
+                final_seed_acc.add(kd);
+                final_seed_cnt += 1;
+                const float sum = final_seed_acc.result();
+                if (final_seed_cnt == d) { final_ema = div_rn_f32(sum, (float)d); out_i = final_ema; }
+                else { out_i = div_rn_f32(sum, (float)final_seed_cnt); }
+            } else {
+                final_ema = ema_update_f32(final_ema, d_a, kd);
+                out_i = final_ema;
+            }
+        } else {
+            if (final_seed_cnt == 0) out_i = NAN;
+            else if (final_seed_cnt < d) out_i = div_rn_f32(final_seed_acc.result(), (float)final_seed_cnt);
+            else out_i = final_ema;
         }
 
         if (i >= warm) out[i] = out_i; // remains NaN until all pieces valid
@@ -292,9 +325,9 @@ void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
     if (warm >= rows) return;
 
     // EMA alphas (FP32)
-    const float fast_a = 2.0f / (float)(fast + 1);
-    const float slow_a = 2.0f / (float)(slow + 1);
-    const float d_a    = 2.0f / (float)(d + 1);
+    const float fast_a = div_rn_f32(2.0f, (float)(fast + 1));
+    const float slow_a = div_rn_f32(2.0f, (float)(slow + 1));
+    const float d_a    = div_rn_f32(2.0f, (float)(d + 1));
 
     // Seed EMAs (SMA) from [first..first+period) using compensated FP32
     KahanF32 fast_acc; fast_acc.reset();
@@ -303,8 +336,8 @@ void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int s_end = min(slow, rows - first);
     for (int i = 0; i < f_end; ++i) fast_acc.add(prices_tm[(first + i) * cols + s]);
     for (int i = 0; i < s_end; ++i) slow_acc.add(prices_tm[(first + i) * cols + s]);
-    float fast_ema = (f_end == fast) ? (fast_acc.result() / (float)fast) : NAN;
-    float slow_ema = (s_end == slow) ? (slow_acc.result() / (float)slow) : NAN;
+    float fast_ema = (f_end == fast) ? div_rn_f32(fast_acc.result(), (float)fast) : NAN;
+    float slow_ema = (s_end == slow) ? div_rn_f32(slow_acc.result(), (float)slow) : NAN;
 
     // Local rings (cap k to reasonable bound)
     const int KMAX = 2048;
@@ -344,14 +377,26 @@ void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
             if (macd_run >= k) {
                 float mn = macd_ring[(i - (k-1)) % kk], mx = mn;
                 for (int j = 1; j < k; ++j) { float v = macd_ring[(i - (k-1) + j) % kk]; mn = fminf(mn, v); mx = fmaxf(mx, v); }
-                const float range = mx - mn; stok = (fabsf(range) > 1e-20f) ? ((macd - mn) * (100.0f / range)) : 50.0f;
+                const float range = mx - mn; stok = (fabsf(range) > STC_RANGE_EPS) ? ((macd - mn) * div_rn_f32(100.0f, range)) : 50.0f;
             } else { stok = 50.0f; }
         } else { macd_run = 0; }
 
         float d_val = NAN;
         if (isfinite(stok)) {
-            if (d_seed_cnt < d) { d_seed_acc.add(stok); d_seed_cnt += 1; if (d_seed_cnt == d) { d_ema = d_seed_acc.result() / (float)d; d_val = d_ema; } }
-            else { d_ema = ema_update_f32(d_ema, d_a, stok); d_val = d_ema; }
+            if (d_seed_cnt < d) {
+                d_seed_acc.add(stok);
+                d_seed_cnt += 1;
+                const float sum = d_seed_acc.result();
+                if (d_seed_cnt == d) { d_ema = div_rn_f32(sum, (float)d); d_val = d_ema; }
+                else { d_val = div_rn_f32(sum, (float)d_seed_cnt); }
+            } else {
+                d_ema = ema_update_f32(d_ema, d_a, stok);
+                d_val = d_ema;
+            }
+        } else {
+            if (d_seed_cnt == 0) d_val = NAN;
+            else if (d_seed_cnt < d) d_val = div_rn_f32(d_seed_acc.result(), (float)d_seed_cnt);
+            else d_val = d_ema;
         }
 
         float kd = NAN;
@@ -360,14 +405,26 @@ void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
             if (d_run >= k) {
                 float mn = d_ring[(i - (k-1)) % kk], mx = mn;
                 for (int j = 1; j < k; ++j) { float v = d_ring[(i - (k-1) + j) % kk]; mn = fminf(mn, v); mx = fmaxf(mx, v); }
-                const float range = mx - mn; kd = (fabsf(range) > 1e-20f) ? ((d_val - mn) * (100.0f / range)) : 50.0f;
+                const float range = mx - mn; kd = (fabsf(range) > STC_RANGE_EPS) ? ((d_val - mn) * div_rn_f32(100.0f, range)) : 50.0f;
             } else { kd = 50.0f; }
         } else { d_run = 0; }
 
         float out_i = NAN;
         if (isfinite(kd)) {
-            if (final_seed_cnt < d) { final_seed_acc.add(kd); final_seed_cnt += 1; if (final_seed_cnt == d) { final_ema = final_seed_acc.result() / (float)d; out_i = final_ema; } }
-            else { final_ema = ema_update_f32(final_ema, d_a, kd); out_i = final_ema; }
+            if (final_seed_cnt < d) {
+                final_seed_acc.add(kd);
+                final_seed_cnt += 1;
+                const float sum = final_seed_acc.result();
+                if (final_seed_cnt == d) { final_ema = div_rn_f32(sum, (float)d); out_i = final_ema; }
+                else { out_i = div_rn_f32(sum, (float)final_seed_cnt); }
+            } else {
+                final_ema = ema_update_f32(final_ema, d_a, kd);
+                out_i = final_ema;
+            }
+        } else {
+            if (final_seed_cnt == 0) out_i = NAN;
+            else if (final_seed_cnt < d) out_i = div_rn_f32(final_seed_acc.result(), (float)final_seed_cnt);
+            else out_i = final_ema;
         }
 
         if (i >= warm) out_tm[i * cols + s] = out_i;

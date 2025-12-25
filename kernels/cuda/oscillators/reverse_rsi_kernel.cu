@@ -60,54 +60,61 @@ extern "C" __global__ void reverse_rsi_batch_f32(
     int first_valid,
     float* __restrict__ out             // length = n_combos * series_len
 ) {
-    const int combo = blockIdx.x * blockDim.x + threadIdx.x;
-    if (combo >= n_combos) return;
-
-    // Per-thread parameters
-    const int n = lengths[combo];
-    const float L = levels[combo];
-    float* out_row = out + combo * series_len;
-
-    // Validate inputs; mirror scalar guard semantics with NaN outputs.
-    if (UNLIKELY(n <= 0 || !(L > 0.0f && L < 100.0f) || !is_finite_bits(L))) {
-        for (int i = 0; i < series_len; ++i) out_row[i] = RRSI_NAN;
-        return;
-    }
-    if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) {
-        for (int i = 0; i < series_len; ++i) out_row[i] = RRSI_NAN;
-        return;
-    }
-
-    const int ema_len = (2 * n) - 1;
-    const int tail = series_len - first_valid;
-    if (UNLIKELY(tail <= ema_len)) {
-        for (int i = 0; i < series_len; ++i) out_row[i] = RRSI_NAN;
-        return;
-    }
-
-    // Indices
-    const int warm_end = first_valid + ema_len; // exclusive
-    const int warm_idx = warm_end - 1;
-
-    // Constants (pure FP32 path)
-    const float alpha = 1.0f / float(n);       // == 2/(ema_len+1)
-    const float beta  = 1.0f - alpha;
-    const float inv   = 100.0f - L;
-    const float rs_target = L / inv;           // L / (100-L)
-    const float neg_scale = inv / L;           // (100-L)/L
-    const float n_minus_1 = float(n - 1);
-    const float rs_coeff  = n_minus_1 * rs_target;
-
 #if __CUDA_ARCH__ >= 800
-    // Ampere+/Ada path: async copy to shared + double-buffered pipeline
-    constexpr int TILE = 256; // tuned for sm_89; 2*TILE + TILE + TILE = 1024 floats (4 KB)
+    // IMPORTANT: this kernel uses cooperative barriers (__syncthreads) and a block-level
+    // pipeline. Do not early-return per thread; inactive lanes must still participate,
+    // otherwise the block can deadlock (e.g., last partially-full block).
+    const int combo = blockIdx.x * blockDim.x + threadIdx.x;
+    const bool active = (combo < n_combos);
 
-    cg::thread_block cta = cg::this_thread_block();
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pss;
-    auto pipe = cuda::make_pipeline(cta, &pss);
+    int n = 1;
+    float L = 50.0f;
+    float* out_row = nullptr;
+    if (active) {
+        n = lengths[combo];
+        L = levels[combo];
+        out_row = out + (size_t)combo * (size_t)series_len;
+    }
+
+    bool valid = active;
+    if (valid) {
+        valid = (n > 0) && (L > 0.0f && L < 100.0f) && is_finite_bits(L) &&
+                (first_valid >= 0) && (first_valid < series_len);
+    }
+
+    int ema_len = 1;
+    int warm_end = 0;
+    int warm_idx = 0;
+    float alpha = 0.0f;
+    float neg_scale = 0.0f;
+    float n_minus_1 = 0.0f;
+    float rs_coeff = 0.0f;
+    if (valid) {
+        ema_len = (2 * n) - 1;
+        const int tail = series_len - first_valid;
+        if (tail <= ema_len) {
+            valid = false;
+        } else {
+            warm_end = first_valid + ema_len; // exclusive
+            warm_idx = warm_end - 1;
+
+            // Constants (pure FP32 path)
+            alpha = 1.0f / float(n); // == 2/(ema_len+1)
+            const float inv = 100.0f - L;
+            const float rs_target = L / inv; // L / (100-L)
+            neg_scale = inv / L;             // (100-L)/L
+            n_minus_1 = float(n - 1);
+            rs_coeff = n_minus_1 * rs_target;
+        }
+    }
+
+    // Ampere+/Ada path: shared tiling (no cp.async pipeline).
+    // The cp.async pipeline version is intentionally avoided here due to correctness
+    // hazards when a single thread consumes data copied by other threads.
+    constexpr int TILE = 256; // 2*TILE + TILE + TILE = 1024 floats (4 KB)
 
     // Dynamic shared memory region layout:
-    // [0 .. 2*TILE) -> double-buffered price tiles
+    // [0 .. 2*TILE) -> price tiles (only stage 0 used here)
     // [2*TILE .. 3*TILE) -> up[] tile
     // [3*TILE .. 4*TILE) -> dn[] tile
     extern __shared__ float smem[];
@@ -116,22 +123,6 @@ extern "C" __global__ void reverse_rsi_batch_f32(
     float* dn_buf     = smem + 3 * TILE;
 
     const int num_tiles = (series_len + TILE - 1) / TILE;
-
-    // Producer helper
-    auto prefetch_tile = [&](int t) {
-        if (t >= num_tiles) return;
-        const int stage = t & 1;
-        float* dst  = prices_buf + stage * TILE;
-        const int g0   = t * TILE;
-        const int len  = min(TILE, series_len - g0);
-
-        pipe.producer_acquire();
-        // Cooperative async copy: each thread pulls a strided subset
-        for (int i = threadIdx.x; i < len; i += blockDim.x) {
-            cuda::memcpy_async(cta, dst + i, prices + g0 + i, sizeof(float), pipe);
-        }
-        pipe.producer_commit();
-    };
 
     // Warmup accumulators (Kahan) and EMA state (per thread)
     float sum_up = 0.f, c_up = 0.f;
@@ -144,18 +135,16 @@ extern "C" __global__ void reverse_rsi_batch_f32(
     if (threadIdx.x == 0) { prev_carry = 0.0f; prev_carry_is_finite = 1u; }
     __syncthreads();
 
-    // Prefetch first tile
-    prefetch_tile(0);
-
     for (int t = 0; t < num_tiles; ++t) {
-        // Wait for current tile, then expose it to all threads
-        pipe.consumer_wait();
-        __syncthreads();
-
-        const int stage = t & 1;
-        float* p = prices_buf + stage * TILE;
         const int start = t * TILE;
         const int len   = min(TILE, series_len - start);
+        float* p = prices_buf; // stage 0
+
+        // Load tile (cooperative)
+        for (int i = threadIdx.x; i < len; i += blockDim.x) {
+            p[i] = prices[start + i];
+        }
+        __syncthreads();
 
         // Build per-sample up/dn once (thread 0), honoring NaN/Inf semantics
         if (threadIdx.x == 0) {
@@ -185,52 +174,91 @@ extern "C" __global__ void reverse_rsi_batch_f32(
         }
         __syncthreads();
 
-        // While consuming this tile, prefetch the next
-        prefetch_tile(t + 1);
-
-        // Consume tile for this thread's parameter combo
-        for (int j = 0; j < len; ++j) {
-            const int r = start + j;
-
-            if (r < warm_idx) {
-                out_row[r] = RRSI_NAN;
-                continue;
-            }
-
-            if (r < warm_end) {
-                // Warmup: Kahan sums for SMA of up/down over ema_len samples
-                kahan_add(up_buf[j], sum_up, c_up);
-                kahan_add(dn_buf[j], sum_dn, c_dn);
-
-                if (r == warm_idx) {
-                    up_ema = sum_up / float(ema_len);
-                    dn_ema = sum_dn / float(ema_len);
-
-                    const float x = fmaf(rs_coeff, dn_ema, -n_minus_1 * up_ema);
-                    const float m = (x >= 0.0f) ? 1.0f : 0.0f;
-                    const float scale = fmaf(m, (1.0f - neg_scale), neg_scale);
-                    const float v = p[j] + x * scale;
-                    out_row[r] = (is_finite_bits(v) || x >= 0.0f) ? v : 0.0f;
-                } else {
-                    out_row[r] = RRSI_NAN;
+        if (active) {
+            if (!valid) {
+                // Invalid params or insufficient data: entire row is NaN (mirror scalar guards).
+                for (int j = 0; j < len; ++j) {
+                    out_row[start + j] = RRSI_NAN;
                 }
             } else {
-                // EMA recurrence with FMA: y += alpha*(x - y)
-                up_ema = fmaf(alpha, (up_buf[j] - up_ema), up_ema);
-                dn_ema = fmaf(alpha, (dn_buf[j] - dn_ema), dn_ema);
+                // Consume tile for this thread's parameter combo
+                for (int j = 0; j < len; ++j) {
+                    const int r = start + j;
 
-                const float x = fmaf(rs_coeff, dn_ema, -n_minus_1 * up_ema);
-                const float m = (x >= 0.0f) ? 1.0f : 0.0f;
-                const float scale = fmaf(m, (1.0f - neg_scale), neg_scale);
-                const float v = p[j] + x * scale;
-                out_row[r] = (is_finite_bits(v) || x >= 0.0f) ? v : 0.0f;
+                    if (r < warm_end) {
+                        // Warmup: Kahan sums for SMA of up/down over ema_len samples.
+                        // Note: up_buf/dn_buf are 0.0 for r < first_valid by construction.
+                        kahan_add(up_buf[j], sum_up, c_up);
+                        kahan_add(dn_buf[j], sum_dn, c_dn);
+
+                        if (r == warm_idx) {
+                            up_ema = sum_up / float(ema_len);
+                            dn_ema = sum_dn / float(ema_len);
+
+                            const float x = fmaf(rs_coeff, dn_ema, -n_minus_1 * up_ema);
+                            const float m = (x >= 0.0f) ? 1.0f : 0.0f;
+                            const float scale = fmaf(m, (1.0f - neg_scale), neg_scale);
+                            const float v = p[j] + x * scale;
+                            out_row[r] = (is_finite_bits(v) || x >= 0.0f) ? v : 0.0f;
+                        } else {
+                            out_row[r] = RRSI_NAN;
+                        }
+                    } else {
+                        // EMA recurrence with FMA: y += alpha*(x - y)
+                        up_ema = fmaf(alpha, (up_buf[j] - up_ema), up_ema);
+                        dn_ema = fmaf(alpha, (dn_buf[j] - dn_ema), dn_ema);
+
+                        const float x = fmaf(rs_coeff, dn_ema, -n_minus_1 * up_ema);
+                        const float m = (x >= 0.0f) ? 1.0f : 0.0f;
+                        const float scale = fmaf(m, (1.0f - neg_scale), neg_scale);
+                        const float v = p[j] + x * scale;
+                        out_row[r] = (is_finite_bits(v) || x >= 0.0f) ? v : 0.0f;
+                    }
+                }
             }
         }
-
-        pipe.consumer_release();
+        // Ensure all threads are done with the shared tile buffers before reusing them.
+        __syncthreads();
     }
 
 #else
+    const int combo = blockIdx.x * blockDim.x + threadIdx.x;
+    if (combo >= n_combos) return;
+
+    // Per-thread parameters
+    const int n = lengths[combo];
+    const float L = levels[combo];
+    float* out_row = out + (size_t)combo * (size_t)series_len;
+
+    // Validate inputs; mirror scalar guard semantics with NaN outputs.
+    if (UNLIKELY(n <= 0 || !(L > 0.0f && L < 100.0f) || !is_finite_bits(L))) {
+        for (int i = 0; i < series_len; ++i) out_row[i] = RRSI_NAN;
+        return;
+    }
+    if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) {
+        for (int i = 0; i < series_len; ++i) out_row[i] = RRSI_NAN;
+        return;
+    }
+
+    const int ema_len = (2 * n) - 1;
+    const int tail = series_len - first_valid;
+    if (UNLIKELY(tail <= ema_len)) {
+        for (int i = 0; i < series_len; ++i) out_row[i] = RRSI_NAN;
+        return;
+    }
+
+    // Indices
+    const int warm_end = first_valid + ema_len; // exclusive
+    const int warm_idx = warm_end - 1;
+
+    // Constants (pure FP32 path)
+    const float alpha = 1.0f / float(n);       // == 2/(ema_len+1)
+    const float inv   = 100.0f - L;
+    const float rs_target = L / inv;           // L / (100-L)
+    const float neg_scale = inv / L;           // (100-L)/L
+    const float n_minus_1 = float(n - 1);
+    const float rs_coeff  = n_minus_1 * rs_target;
+
     // Fallback path (pre-Ampere): still FP32 only, Kahan warmup, FMA EMA
     // Fill NaNs up to warm_idx
     for (int i = 0; i < warm_idx; ++i) out_row[i] = RRSI_NAN;

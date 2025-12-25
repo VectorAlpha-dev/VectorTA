@@ -220,10 +220,17 @@ pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdErr
         return Err(AdError::EmptyInputData);
     }
 
-    let chosen = match kernel {
+    let mut chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
+    // Prefer AVX2 over AVX512 for AD in Auto: this workload is typically memory/divide bound and
+    // AVX-512 often downclocks and underperforms AVX2 on many CPUs. Explicit Avx512 selection is
+    // still supported via the API.
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
+        chosen = Kernel::Avx2;
+    }
 
     // For AD, warmup period is 0 since it's a cumulative indicator starting from 0
     // We use alloc_with_nan_prefix with warmup=0 to get an uninitialized vector
@@ -292,7 +299,11 @@ pub fn ad_into_slice(dst: &mut [f64], input: &AdInput, kern: Kernel) -> Result<(
     // Compute AD values directly into dst
     match kern {
         Kernel::Auto => {
-            let k = detect_best_kernel();
+            let mut k = detect_best_kernel();
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            if matches!(k, Kernel::Avx512) {
+                k = Kernel::Avx2;
+            }
             match k {
                 Kernel::Scalar => ad_scalar(high, low, close, volume, dst),
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -529,11 +540,15 @@ pub fn ad_avx512_long(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], 
 
 #[inline]
 pub fn ad_batch_with_kernel(data: &AdBatchInput, k: Kernel) -> Result<AdBatchOutput, AdError> {
-    let kernel = match k {
+    let mut kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         other => return Err(AdError::InvalidKernelForBatch(other)),
     };
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(k, Kernel::Auto) && matches!(kernel, Kernel::Avx512Batch) {
+        kernel = Kernel::Avx2Batch;
+    }
 
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -642,10 +657,14 @@ fn ad_batch_inner_into(
     }
 
     // Resolve actual kernel for row computation
-    let actual = match kern {
+    let mut actual = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(kern, Kernel::Auto) && matches!(actual, Kernel::Avx512Batch) {
+        actual = Kernel::Avx2Batch;
+    }
 
     let do_row = |row: usize, dst: &mut [f64]| unsafe {
         match actual {

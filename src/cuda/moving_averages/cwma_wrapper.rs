@@ -600,10 +600,14 @@ impl CudaCwma {
 
             // Shared: weights (<= wlen=max_period-1) aligned to 16B + tile (tile_x + wlen)
             let wlen = max_period.saturating_sub(1);
+            let tile_stages: usize = if func_name.contains("_async_") { 2 } else { 1 };
+            let shared_for_tile = |tile: u32| -> u32 {
+                (align16(wlen * std::mem::size_of::<f32>())
+                    + tile_stages * (tile as usize + wlen) * std::mem::size_of::<f32>())
+                    as u32
+            };
             let mut tile_x_used = tile_x;
-            let mut shared_bytes = (align16(wlen * std::mem::size_of::<f32>())
-                + (tile_x_used as usize + wlen) * std::mem::size_of::<f32>())
-                as u32;
+            let mut shared_bytes = shared_for_tile(tile_x_used);
             // Downshift tile if shared memory exceeds device capacity
             let dev = Device::get_device(self.device_id).ok();
             let max_smem_default: usize = dev
@@ -621,9 +625,7 @@ impl CudaCwma {
             let avail = max_smem_optin.max(max_smem_default);
             while (shared_bytes as usize) > avail && tile_x_used > 64 {
                 tile_x_used /= 2;
-                shared_bytes = (align16(wlen * std::mem::size_of::<f32>())
-                    + (tile_x_used as usize + wlen) * std::mem::size_of::<f32>())
-                    as u32;
+                shared_bytes = shared_for_tile(tile_x_used);
             }
             // Hint kernel for larger dynamic shared memory when available
             self.prefer_shared_and_optin_smem(&mut func, shared_bytes as usize);

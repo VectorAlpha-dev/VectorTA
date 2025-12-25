@@ -476,11 +476,11 @@ impl CudaCorrelHl {
 
     fn launch_batch_dp(
         &self,
-        d_ps_h: &DeviceBuffer<Float2>,
-        d_ps_h2: &DeviceBuffer<Float2>,
-        d_ps_l: &DeviceBuffer<Float2>,
-        d_ps_l2: &DeviceBuffer<Float2>,
-        d_ps_hl: &DeviceBuffer<Float2>,
+        d_ps_h: &DeviceBuffer<f64>,
+        d_ps_h2: &DeviceBuffer<f64>,
+        d_ps_l: &DeviceBuffer<f64>,
+        d_ps_l2: &DeviceBuffer<f64>,
+        d_ps_hl: &DeviceBuffer<f64>,
         d_ps_nan: &DeviceBuffer<i32>,
         len: usize,
         first_valid: usize,
@@ -490,8 +490,8 @@ impl CudaCorrelHl {
     ) -> Result<(), CudaCorrelHlError> {
         let func = self
             .module
-            .get_function("correl_hl_batch_f32ds")
-            .map_err(|_| CudaCorrelHlError::MissingKernelSymbol { name: "correl_hl_batch_f32ds" })?;
+            .get_function("correl_hl_batch_f32")
+            .map_err(|_| CudaCorrelHlError::MissingKernelSymbol { name: "correl_hl_batch_f32" })?;
 
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
@@ -640,19 +640,12 @@ impl CudaCorrelHl {
         } else {
             // Legacy f64 prefixes for maximal parity with CPU baseline on smaller inputs
             let (ps_h, ps_h2, ps_l, ps_l2, ps_hl, ps_nan) = Self::build_prefixes_f64(high_f32, low_f32);
-            // Convert to DS format required by kernels
-            let ps_h_ds: Vec<Float2>  = ps_h.iter().map(|&x| pack_ds(x)).collect();
-            let ps_h2_ds: Vec<Float2> = ps_h2.iter().map(|&x| pack_ds(x)).collect();
-            let ps_l_ds: Vec<Float2>  = ps_l.iter().map(|&x| pack_ds(x)).collect();
-            let ps_l2_ds: Vec<Float2> = ps_l2.iter().map(|&x| pack_ds(x)).collect();
-            let ps_hl_ds: Vec<Float2> = ps_hl.iter().map(|&x| pack_ds(x)).collect();
-
-            let d_ps_h: DeviceBuffer<Float2>  = unsafe { DeviceBuffer::from_slice_async(ps_h_ds.as_slice(),  &self.stream) }?;
-            let d_ps_h2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_h2_ds.as_slice(), &self.stream) }?;
-            let d_ps_l: DeviceBuffer<Float2>  = unsafe { DeviceBuffer::from_slice_async(ps_l_ds.as_slice(),  &self.stream) }?;
-            let d_ps_l2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_l2_ds.as_slice(), &self.stream) }?;
-            let d_ps_hl: DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(ps_hl_ds.as_slice(), &self.stream) }?;
-            let d_ps_nan: DeviceBuffer<i32>   = unsafe { DeviceBuffer::from_slice_async(&ps_nan, &self.stream) }?;
+            let d_ps_h: DeviceBuffer<f64>  = unsafe { DeviceBuffer::from_slice_async(ps_h.as_slice(),  &self.stream) }?;
+            let d_ps_h2: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(ps_h2.as_slice(), &self.stream) }?;
+            let d_ps_l: DeviceBuffer<f64>  = unsafe { DeviceBuffer::from_slice_async(ps_l.as_slice(),  &self.stream) }?;
+            let d_ps_l2: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(ps_l2.as_slice(), &self.stream) }?;
+            let d_ps_hl: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(ps_hl.as_slice(), &self.stream) }?;
+            let d_ps_nan: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(ps_nan.as_slice(), &self.stream) }?;
 
             self.launch_batch_dp(
                 &d_ps_h,

@@ -510,7 +510,7 @@ pub unsafe fn chop_scalar(
 
     // Hoisted constants
     let alpha = 1.0 / (drift as f64);
-    // Keep log10(period) in emission path to mirror original numerical pathway
+    let logp = (period as f64).log10();
 
     // Rolling sum of ATR via ring buffer (no modulo in hot path)
     let mut atr_ring = vec![0.0_f64; period];
@@ -574,7 +574,10 @@ pub unsafe fn chop_scalar(
         };
         atr_ring[atr_ring_idx] = new_val;
         rolling_sum_atr += new_val;
-        atr_ring_idx = (atr_ring_idx + 1) % period;
+        atr_ring_idx += 1;
+        if atr_ring_idx == period {
+            atr_ring_idx = 0;
+        }
 
         // Sliding-window HH/LL using monotonic VecDeque
         let win_start = i.saturating_sub(period - 1);
@@ -614,7 +617,6 @@ pub unsafe fn chop_scalar(
             let ll_idx = *dq_low.front().unwrap();
             let range = high[hh_idx] - low[ll_idx];
             if range > 0.0 && rolling_sum_atr > 0.0 {
-                let logp = (period as f64).log10();
                 out[i] = (scalar * (rolling_sum_atr.log10() - range.log10())) / logp;
             } else {
                 out[i] = f64::NAN;

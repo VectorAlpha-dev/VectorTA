@@ -54,6 +54,7 @@ void hpf_coeffs_from_period(int period, double& c, double& oma, bool& ok) {
 
 extern "C" __global__
 void highpass_batch_f32(const float* __restrict__ prices,
+                        int first_valid,
                         const int*   __restrict__ periods,
                         int series_len,
                         int n_combos,
@@ -76,17 +77,27 @@ void highpass_batch_f32(const float* __restrict__ prices,
 
         const int base = combo * series_len;
 
-        // Broadcast prices[0] once per warp
+        int fv = first_valid;
+        if (fv < 0) fv = 0;
+        if (fv > series_len) fv = series_len;
+
+        // NaN prefix for missing data
+        for (int t = 0; t < fv; ++t) {
+            out[base + t] = CUDART_NAN_F;
+        }
+        if (fv >= series_len) continue;
+
+        // Broadcast prices[fv] once per warp
         unsigned mask  = __activemask();
         int leader     = first_active_lane(mask);
-        float p0_f     = (lane_id() == leader) ? prices[0] : 0.0f;
+        float p0_f     = (lane_id() == leader) ? prices[fv] : 0.0f;
         p0_f           = __shfl_sync(mask, p0_f, leader);
         double prev_x  = static_cast<double>(p0_f);
         double prev_y  = prev_x;
-        out[base]      = static_cast<float>(prev_y);
+        out[base + fv] = static_cast<float>(prev_y);
 
         // Time recursion; broadcast prices[t] once/warp/step
-        for (int t = 1; t < series_len; ++t) {
+        for (int t = fv + 1; t < series_len; ++t) {
             float xf = (lane_id() == leader) ? prices[t] : 0.0f;
             xf       = __shfl_sync(mask, xf, leader);
             const double x    = static_cast<double>(xf);
@@ -101,6 +112,7 @@ void highpass_batch_f32(const float* __restrict__ prices,
 
 extern "C" __global__
 void highpass_many_series_one_param_time_major_f32(const float* __restrict__ prices_tm,
+                                                   const int*   __restrict__ first_valids,
                                                    int period,
                                                    int num_series,
                                                    int series_len,
@@ -118,13 +130,26 @@ void highpass_many_series_one_param_time_major_f32(const float* __restrict__ pri
          series_idx < num_series;
          series_idx += blockDim.x * gridDim.x)
     {
-        int idx       = series_idx;
+        int fv = first_valids ? first_valids[series_idx] : 0;
+        if (fv < 0) fv = 0;
+        if (fv > series_len) fv = series_len;
+
+        // Fill NaN prefix
+        int idx = series_idx;
+        for (int t = 0; t < fv; ++t) {
+            out_tm[idx] = CUDART_NAN_F;
+            idx += stride;
+        }
+        if (fv >= series_len) continue;
+
+        // Seed at first valid
+        idx = fv * stride + series_idx;
         double prev_x = static_cast<double>(prices_tm[idx]);
         double prev_y = prev_x;
         out_tm[idx]   = static_cast<float>(prev_y);
 
         // advance in time-major layout by 'stride'
-        for (int t = 1; t < series_len; ++t) {
+        for (int t = fv + 1; t < series_len; ++t) {
             idx += stride;
             const double x    = static_cast<double>(prices_tm[idx]);
             const double diff = x - prev_x;

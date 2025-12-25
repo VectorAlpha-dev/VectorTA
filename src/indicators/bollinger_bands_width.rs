@@ -1454,6 +1454,29 @@ fn bollinger_bands_width_batch_inner(
         return Err(BollingerBandsWidthError::AllValuesNaN);
     }
 
+    // Validate once before allocating; avoids leaking `buf_mu` on early error paths.
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(BollingerBandsWidthError::AllValuesNaN)?;
+    let mut max_p = 0usize;
+    for c in &combos {
+        let p = c.period.unwrap();
+        if p == 0 || p > cols {
+            return Err(BollingerBandsWidthError::InvalidPeriod {
+                period: p,
+                data_len: cols,
+            });
+        }
+        max_p = max_p.max(p);
+    }
+    if cols - first < max_p {
+        return Err(BollingerBandsWidthError::NotEnoughValidData {
+            needed: max_p,
+            valid: cols - first,
+        });
+    }
+
     // Step 1: Allocate uninitialized matrix (checked rows*cols)
     let _ = rows
         .checked_mul(cols)
@@ -1463,7 +1486,7 @@ fn bollinger_bands_width_batch_inner(
     // Step 2: Calculate warmup periods for each row
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| data.iter().position(|x| !x.is_nan()).unwrap_or(0) + c.period.unwrap() - 1)
+        .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
     // Step 3: Initialize NaN prefixes for each row
@@ -1513,7 +1536,17 @@ pub fn bollinger_bands_width_batch_inner_into(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(BollingerBandsWidthError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let mut max_p = 0usize;
+    for c in &combos {
+        let p = c.period.unwrap();
+        if p == 0 || p > data.len() {
+            return Err(BollingerBandsWidthError::InvalidPeriod {
+                period: p,
+                data_len: data.len(),
+            });
+        }
+        max_p = max_p.max(p);
+    }
     if data.len() - first < max_p {
         return Err(BollingerBandsWidthError::NotEnoughValidData {
             needed: max_p,
@@ -1530,114 +1563,123 @@ pub fn bollinger_bands_width_batch_inner_into(
         return Err(BollingerBandsWidthError::OutputLengthMismatch { expected, got: out.len() });
     }
 
-    // Group combinations by (period, matype, devtype) to avoid redundant calculations
-    use std::collections::HashMap;
-    let mut groups: HashMap<(usize, String, usize), Vec<(usize, f64, f64)>> = HashMap::new();
+    // This batch sweep is specialized for SMA + stddev (devtype=0). Using `ma()` + `deviation()`
+    // per period is much slower than the classic rolling SMA+stddev kernel.
+    //
+    // Strategy:
+    // - If a period has only one (devup, devdn) combination, compute the row directly in one pass.
+    // - If a period has multiple (devup, devdn) combos, compute `std/mean` once (u_plus_d = 1),
+    //   then scale into each row (SIMD for the scaling pass where available).
+    let kern = match kern {
+        Kernel::Auto => Kernel::Scalar,
+        other => other,
+    };
 
-    for (idx, combo) in combos.iter().enumerate() {
-        let key = (
-            combo.period.unwrap(),
-            combo.matype.as_ref().unwrap_or(&"sma".to_string()).clone(),
-            combo.devtype.unwrap_or(0),
-        );
-        groups.entry(key).or_insert_with(Vec::new).push((
-            idx,
-            combo.devup.unwrap(),
-            combo.devdn.unwrap(),
-        ));
-    }
-
-    // Process each unique (period, matype, devtype) group
-    for ((period, matype, devtype), indices) in groups {
-        // Compute MA and deviation once for this group
-        let ma_data = crate::indicators::moving_averages::ma::MaData::Slice(data);
-        let middle = crate::indicators::moving_averages::ma::ma(&matype, ma_data, period)
-            .map_err(|e| BollingerBandsWidthError::MaError(e.to_string()))?;
-
-        let dev_input = crate::indicators::deviation::DevInput::from_slice(
-            data,
-            crate::indicators::deviation::DevParams {
-                period: Some(period),
-                devtype: Some(devtype),
-            },
-        );
-        let dev_values = crate::indicators::deviation::deviation(&dev_input)
-            .map_err(|e| BollingerBandsWidthError::DeviationError(e.to_string()))?;
-
-        // Precompute dev/middle ratio for this group once
+    let mut ratio: Option<Vec<f64>> = None;
+    let mut row = 0usize;
+    while row < rows {
+        let period = combos[row].period.unwrap();
+        let group_start = row;
+        row += 1;
+        while row < rows && combos[row].period.unwrap() == period {
+            row += 1;
+        }
+        let group_end = row;
+        let group_rows = group_end - group_start;
         let time_start = first + period - 1;
-        let mut ratio: Vec<f64> = vec![f64::NAN; cols];
-        for i in time_start..cols {
-            let m = middle[i];
-            let d = dev_values.values[i];
-            ratio[i] = d / m;
+        if time_start >= cols {
+            continue;
         }
 
-        // Now compute BBW for each (devup, devdn) combination in this group
+        // Common case: one row per period (devup/devdn fixed) -> fastest direct pass.
+        if group_rows == 1 {
+            let prm = &combos[group_start];
+            let devup = prm.devup.unwrap();
+            let devdn = prm.devdn.unwrap();
+            let off = group_start * cols;
+            let out_row = &mut out[off..off + cols];
+            unsafe {
+                bollinger_bands_width_scalar_classic_sma(data, period, devup, devdn, first, out_row)?;
+            }
+            continue;
+        }
+
+        // Ensure a reusable ratio buffer, computed as `std/mean` (u_plus_d = 1).
+        if ratio.is_none() {
+            ratio = Some(vec![0.0; cols]);
+        }
+        {
+            let ratio_buf = ratio.as_mut().unwrap();
+            unsafe {
+                bollinger_bands_width_scalar_classic_sma(data, period, 1.0, 0.0, first, ratio_buf)?;
+            }
+        }
+        let ratio = ratio.as_ref().unwrap().as_slice();
+
+        let group_out = &mut out[group_start * cols..group_end * cols];
+        let group_combos = &combos[group_start..group_end];
+
         if parallel {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 use rayon::prelude::*;
-
-                // Precompute a fast row -> (devup, devdn) map for this group
-                let mut row_params: Vec<Option<(f64, f64)>> = vec![None; combos.len()];
-                for &(idx, u, d) in &indices {
-                    row_params[idx] = Some((u, d));
-                }
-
-                out.par_chunks_mut(cols)
+                group_out
+                    .par_chunks_mut(cols)
                     .enumerate()
-                    .for_each(|(row_idx, out_row)| {
-                        if let Some((u, d)) = row_params[row_idx] {
-                            let u_plus_d = u + d;
-                            // Vectorized scale where available
-                            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                            {
-                                match kern {
-                                    Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
-                                        use core::arch::x86_64::*;
-                                        let k = _mm512_set1_pd(u_plus_d);
-                                        let mut i = time_start;
-                                        while i + 8 <= cols {
-                                            let vr = _mm512_loadu_pd(ratio.as_ptr().add(i));
-                                            let vout = _mm512_mul_pd(k, vr);
-                                            _mm512_storeu_pd(out_row.as_mut_ptr().add(i), vout);
-                                            i += 8;
-                                        }
-                                        while i < cols {
-                                            *out_row.get_unchecked_mut(i) =
-                                                u_plus_d * *ratio.get_unchecked(i);
-                                            i += 1;
-                                        }
-                                    },
-                                    Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
-                                        use core::arch::x86_64::*;
-                                        let k = _mm256_set1_pd(u_plus_d);
-                                        let mut i = time_start;
-                                        while i + 4 <= cols {
-                                            let vr = _mm256_loadu_pd(ratio.as_ptr().add(i));
-                                            let vout = _mm256_mul_pd(k, vr);
-                                            _mm256_storeu_pd(out_row.as_mut_ptr().add(i), vout);
-                                            i += 4;
-                                        }
-                                        while i < cols {
-                                            *out_row.get_unchecked_mut(i) =
-                                                u_plus_d * *ratio.get_unchecked(i);
-                                            i += 1;
-                                        }
-                                    },
-                                    _ => {
-                                        for i in time_start..cols {
-                                            out_row[i] = u_plus_d * ratio[i];
-                                        }
-                                    }
+                    .for_each(|(r, out_row)| unsafe {
+                        let prm = &group_combos[r];
+                        let u_plus_d = prm.devup.unwrap() + prm.devdn.unwrap();
+
+                        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                        match kern {
+                            Kernel::Avx512 | Kernel::Avx512Batch => {
+                                use core::arch::x86_64::*;
+                                let k = _mm512_set1_pd(u_plus_d);
+                                let mut i = time_start;
+                                while i + 8 <= cols {
+                                    let vr = _mm512_loadu_pd(ratio.as_ptr().add(i));
+                                    let vout = _mm512_mul_pd(k, vr);
+                                    _mm512_storeu_pd(out_row.as_mut_ptr().add(i), vout);
+                                    i += 8;
+                                }
+                                while i < cols {
+                                    *out_row.get_unchecked_mut(i) =
+                                        u_plus_d * *ratio.get_unchecked(i);
+                                    i += 1;
                                 }
                             }
-                            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-                            {
-                                for i in time_start..cols {
-                                    out_row[i] = u_plus_d * ratio[i];
+                            Kernel::Avx2 | Kernel::Avx2Batch => {
+                                use core::arch::x86_64::*;
+                                let k = _mm256_set1_pd(u_plus_d);
+                                let mut i = time_start;
+                                while i + 4 <= cols {
+                                    let vr = _mm256_loadu_pd(ratio.as_ptr().add(i));
+                                    let vout = _mm256_mul_pd(k, vr);
+                                    _mm256_storeu_pd(out_row.as_mut_ptr().add(i), vout);
+                                    i += 4;
                                 }
+                                while i < cols {
+                                    *out_row.get_unchecked_mut(i) =
+                                        u_plus_d * *ratio.get_unchecked(i);
+                                    i += 1;
+                                }
+                            }
+                            _ => {
+                                let mut i = time_start;
+                                while i < cols {
+                                    *out_row.get_unchecked_mut(i) =
+                                        u_plus_d * *ratio.get_unchecked(i);
+                                    i += 1;
+                                }
+                            }
+                        }
+
+                        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                        {
+                            let mut i = time_start;
+                            while i < cols {
+                                *out_row.get_unchecked_mut(i) = u_plus_d * ratio[i];
+                                i += 1;
                             }
                         }
                     });
@@ -1645,23 +1687,18 @@ pub fn bollinger_bands_width_batch_inner_into(
 
             #[cfg(target_arch = "wasm32")]
             {
-                for &(idx, devup, devdn) in &indices {
-                    let row_off = idx * cols;
-                    let end = row_off + cols;
-                    let out_row = &mut out[row_off..end];
-                    let u_plus_d = devup + devdn;
+                for (r, out_row) in group_out.chunks_mut(cols).enumerate() {
+                    let prm = &group_combos[r];
+                    let u_plus_d = prm.devup.unwrap() + prm.devdn.unwrap();
                     for i in time_start..cols {
                         out_row[i] = u_plus_d * ratio[i];
                     }
                 }
             }
         } else {
-            for &(idx, devup, devdn) in &indices {
-                let row_off = idx * cols;
-                let end = row_off + cols;
-                let out_row = &mut out[row_off..end];
-                let u_plus_d = devup + devdn;
-                // Vectorized scale where available
+            for (r, out_row) in group_out.chunks_mut(cols).enumerate() {
+                let prm = &group_combos[r];
+                let u_plus_d = prm.devup.unwrap() + prm.devdn.unwrap();
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 {
                     match kern {
@@ -1676,7 +1713,8 @@ pub fn bollinger_bands_width_batch_inner_into(
                                 i += 8;
                             }
                             while i < cols {
-                                *out_row.get_unchecked_mut(i) = u_plus_d * *ratio.get_unchecked(i);
+                                *out_row.get_unchecked_mut(i) =
+                                    u_plus_d * *ratio.get_unchecked(i);
                                 i += 1;
                             }
                         },
@@ -1691,13 +1729,17 @@ pub fn bollinger_bands_width_batch_inner_into(
                                 i += 4;
                             }
                             while i < cols {
-                                *out_row.get_unchecked_mut(i) = u_plus_d * *ratio.get_unchecked(i);
+                                *out_row.get_unchecked_mut(i) =
+                                    u_plus_d * *ratio.get_unchecked(i);
                                 i += 1;
                             }
                         },
-                        _ => {
-                            for i in time_start..cols {
-                                out_row[i] = u_plus_d * ratio[i];
+                        _ => unsafe {
+                            let mut i = time_start;
+                            while i < cols {
+                                *out_row.get_unchecked_mut(i) =
+                                    u_plus_d * *ratio.get_unchecked(i);
+                                i += 1;
                             }
                         }
                     }

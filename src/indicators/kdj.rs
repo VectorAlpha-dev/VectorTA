@@ -245,10 +245,23 @@ pub fn kdj_with_kernel(input: &KdjInput, kernel: Kernel) -> Result<KdjOutput, Kd
         });
     }
 
-    let chosen = match kernel {
+    let mut chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
+
+    // Default params (9,3,3 + SMA/SMA) are dominated by rolling max/min + EMA-style recurrences,
+    // and the current scalar fast-path outperforms the SIMD variants at typical sizes. Prefer
+    // scalar when `Kernel::Auto` is requested to avoid a regression on AVX-capable CPUs.
+    if matches!(kernel, Kernel::Auto)
+        && fast_k_period == 9
+        && slow_k_period == 3
+        && slow_d_period == 3
+        && slow_k_ma_type.eq_ignore_ascii_case("sma")
+        && slow_d_ma_type.eq_ignore_ascii_case("sma")
+    {
+        chosen = Kernel::Scalar;
+    }
 
     unsafe {
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -523,8 +536,23 @@ fn kdj_compute_into_scalar(
             j_out[i] = f64::NAN;
         }
 
-        let mut maxdq: VecDeque<usize> = VecDeque::with_capacity(fast_k + 1);
-        let mut mindq: VecDeque<usize> = VecDeque::with_capacity(fast_k + 1);
+        // Use fixed-size monotonic queues (ring buffers) instead of VecDeque to reduce overhead.
+        let cap = fast_k + 1;
+        let mut max_idx = vec![0usize; cap];
+        let mut max_val = vec![0.0f64; cap];
+        let mut min_idx = vec![0usize; cap];
+        let mut min_val = vec![0.0f64; cap];
+        let (mut max_head, mut max_tail, mut max_cnt) = (0usize, 0usize, 0usize);
+        let (mut min_head, mut min_tail, mut min_cnt) = (0usize, 0usize, 0usize);
+        #[inline(always)]
+        fn inc(i: usize, cap: usize) -> usize {
+            let j = i + 1;
+            if j == cap { 0 } else { j }
+        }
+        #[inline(always)]
+        fn dec(i: usize, cap: usize) -> usize {
+            if i == 0 { cap - 1 } else { i - 1 }
+        }
 
         let mut stoch_ring = vec![f64::NAN; slow_k];
         let mut sum_k = 0.0f64;
@@ -534,41 +562,50 @@ fn kdj_compute_into_scalar(
         let mut sum_d = 0.0f64;
         let mut cnt_d: usize = 0;
 
+        // Avoid `%` in the hot path: positions only start being used from their warmups onward,
+        // and then advance contiguously by 1 each iteration.
+        let mut pos_k = stoch_warm % slow_k;
+        let mut pos_d = k_warm % slow_d;
+
         for i in first..len {
             // update max deque
             let hi = unsafe { *high.get_unchecked(i) };
-            while let Some(&idx) = maxdq.back() {
-                if unsafe { *high.get_unchecked(idx) } <= hi {
-                    maxdq.pop_back();
+            while max_cnt > 0 {
+                let back = dec(max_tail, cap);
+                if max_val[back] <= hi {
+                    max_tail = back;
+                    max_cnt -= 1;
                 } else {
                     break;
                 }
             }
-            maxdq.push_back(i);
-            while let Some(&idx) = maxdq.front() {
-                if idx + fast_k <= i {
-                    maxdq.pop_front();
-                } else {
-                    break;
-                }
+            max_val[max_tail] = hi;
+            max_idx[max_tail] = i;
+            max_tail = inc(max_tail, cap);
+            max_cnt += 1;
+            while max_cnt > 0 && max_idx[max_head] + fast_k <= i {
+                max_head = inc(max_head, cap);
+                max_cnt -= 1;
             }
 
             // update min deque
             let lo = unsafe { *low.get_unchecked(i) };
-            while let Some(&idx) = mindq.back() {
-                if unsafe { *low.get_unchecked(idx) } >= lo {
-                    mindq.pop_back();
+            while min_cnt > 0 {
+                let back = dec(min_tail, cap);
+                if min_val[back] >= lo {
+                    min_tail = back;
+                    min_cnt -= 1;
                 } else {
                     break;
                 }
             }
-            mindq.push_back(i);
-            while let Some(&idx) = mindq.front() {
-                if idx + fast_k <= i {
-                    mindq.pop_front();
-                } else {
-                    break;
-                }
+            min_val[min_tail] = lo;
+            min_idx[min_tail] = i;
+            min_tail = inc(min_tail, cap);
+            min_cnt += 1;
+            while min_cnt > 0 && min_idx[min_head] + fast_k <= i {
+                min_head = inc(min_head, cap);
+                min_cnt -= 1;
             }
 
             if i < stoch_warm {
@@ -576,8 +613,8 @@ fn kdj_compute_into_scalar(
             }
 
             // compute stoch
-            let hh = unsafe { *high.get_unchecked(*maxdq.front().unwrap()) };
-            let ll = unsafe { *low.get_unchecked(*mindq.front().unwrap()) };
+            let hh = max_val[max_head];
+            let ll = min_val[min_head];
             let denom = hh - ll;
             let stoch_i = if denom == 0.0 || denom.is_nan() {
                 f64::NAN
@@ -587,7 +624,6 @@ fn kdj_compute_into_scalar(
             };
 
             // feed K SMA
-            let pos_k = i % slow_k;
             let old_st = stoch_ring[pos_k];
             if !old_st.is_nan() {
                 sum_k -= old_st;
@@ -597,6 +633,10 @@ fn kdj_compute_into_scalar(
             if !stoch_i.is_nan() {
                 sum_k += stoch_i;
                 cnt_k += 1;
+            }
+            pos_k += 1;
+            if pos_k == slow_k {
+                pos_k = 0;
             }
 
             if i >= k_warm {
@@ -608,7 +648,6 @@ fn kdj_compute_into_scalar(
                 unsafe { *k_out.get_unchecked_mut(i) = k_val };
 
                 // feed D SMA
-                let pos_d = i % slow_d;
                 let old_k = k_ring[pos_d];
                 if !old_k.is_nan() {
                     sum_d -= old_k;
@@ -618,6 +657,10 @@ fn kdj_compute_into_scalar(
                 if !k_val.is_nan() {
                     sum_d += k_val;
                     cnt_d += 1;
+                }
+                pos_d += 1;
+                if pos_d == slow_d {
+                    pos_d = 0;
                 }
 
                 if i >= d_warm {

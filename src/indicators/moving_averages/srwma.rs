@@ -992,6 +992,13 @@ unsafe fn srwma_row_avx2(
     inv_n: f64,
     out: &mut [f64],
 ) {
+    // Match the single-series heuristic: for small periods, the scalar unrolled dot
+    // is faster than SIMD lane-reversal + horizontal reductions.
+    if period <= 32 {
+        srwma_row_scalar(data, first, period, stride, w_ptr, inv_n, out);
+        return;
+    }
+
     #[target_feature(enable = "avx2,fma")]
     unsafe fn hadd_m256d(x: __m256d) -> f64 {
         let hi = _mm256_extractf128_pd(x, 1);
@@ -1051,6 +1058,12 @@ pub unsafe fn srwma_row_avx512(
     inv_n: f64,
     out: &mut [f64],
 ) {
+    // Same heuristic as srwma_with_kernel(): scalar wins for small periods.
+    if period <= 32 {
+        srwma_row_scalar(data, first, period, stride, w_ptr, inv_n, out);
+        return;
+    }
+
     if period <= 32 {
         srwma_row_avx512_short(data, first, period, stride, w_ptr, inv_n, out);
     } else {

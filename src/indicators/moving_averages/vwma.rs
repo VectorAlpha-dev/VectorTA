@@ -331,12 +331,6 @@ pub fn vwma_with_kernel(input: &VwmaInput, kernel: Kernel) -> Result<VwmaOutput,
     if len == 0 {
         return Err(VwmaError::EmptyInputData);
     }
-    if len == 0 {
-        return Err(VwmaError::EmptyInputData);
-    }
-    if len == 0 {
-        return Err(VwmaError::EmptyInputData);
-    }
     let period = input.get_period();
 
     if period == 0 || period > len {
@@ -404,23 +398,84 @@ pub fn vwma_scalar(price: &[f64], volume: &[f64], period: usize, first: usize, o
         return;
     }
 
-    let mut sum = 0.0;
-    let mut vsum = 0.0;
-    for i in 0..period {
-        let idx = first + i;
-        sum += price[idx] * volume[idx];
-        vsum += volume[idx];
-    }
-    let first_idx = first + period - 1;
-    out[first_idx] = sum / vsum;
+    unsafe {
+        let p_ptr = price.as_ptr();
+        let v_ptr = volume.as_ptr();
+        let out_ptr = out.as_mut_ptr();
 
-    for i in (first_idx + 1)..len {
-        sum += price[i] * volume[i];
-        vsum += volume[i];
-        let old_idx = i - period;
-        sum -= price[old_idx] * volume[old_idx];
-        vsum -= volume[old_idx];
-        out[i] = sum / vsum;
+        // 1) initialize window
+        let base = first;
+        let mut sum = 0.0f64;
+        let mut vsum = 0.0f64;
+        for i in 0..period {
+            let p = *p_ptr.add(base + i);
+            let v = *v_ptr.add(base + i);
+            sum += p * v;
+            vsum += v;
+        }
+
+        *out_ptr.add(base + period - 1) = sum / vsum;
+
+        // 2) sliding window (unrolled)
+        let mut new_idx = base + period;
+        let mut old_idx = base;
+        while new_idx + 3 < len {
+            // 0
+            let pn0 = *p_ptr.add(new_idx);
+            let vn0 = *v_ptr.add(new_idx);
+            let po0 = *p_ptr.add(old_idx);
+            let vo0 = *v_ptr.add(old_idx);
+            sum += pn0 * vn0;
+            sum -= po0 * vo0;
+            vsum += vn0 - vo0;
+            *out_ptr.add(new_idx) = sum / vsum;
+
+            // 1
+            let pn1 = *p_ptr.add(new_idx + 1);
+            let vn1 = *v_ptr.add(new_idx + 1);
+            let po1 = *p_ptr.add(old_idx + 1);
+            let vo1 = *v_ptr.add(old_idx + 1);
+            sum += pn1 * vn1;
+            sum -= po1 * vo1;
+            vsum += vn1 - vo1;
+            *out_ptr.add(new_idx + 1) = sum / vsum;
+
+            // 2
+            let pn2 = *p_ptr.add(new_idx + 2);
+            let vn2 = *v_ptr.add(new_idx + 2);
+            let po2 = *p_ptr.add(old_idx + 2);
+            let vo2 = *v_ptr.add(old_idx + 2);
+            sum += pn2 * vn2;
+            sum -= po2 * vo2;
+            vsum += vn2 - vo2;
+            *out_ptr.add(new_idx + 2) = sum / vsum;
+
+            // 3
+            let pn3 = *p_ptr.add(new_idx + 3);
+            let vn3 = *v_ptr.add(new_idx + 3);
+            let po3 = *p_ptr.add(old_idx + 3);
+            let vo3 = *v_ptr.add(old_idx + 3);
+            sum += pn3 * vn3;
+            sum -= po3 * vo3;
+            vsum += vn3 - vo3;
+            *out_ptr.add(new_idx + 3) = sum / vsum;
+
+            new_idx += 4;
+            old_idx += 4;
+        }
+
+        while new_idx < len {
+            let pn = *p_ptr.add(new_idx);
+            let vn = *v_ptr.add(new_idx);
+            let po = *p_ptr.add(old_idx);
+            let vo = *v_ptr.add(old_idx);
+            sum += pn * vn;
+            sum -= po * vo;
+            vsum += vn - vo;
+            *out_ptr.add(new_idx) = sum / vsum;
+            new_idx += 1;
+            old_idx += 1;
+        }
     }
 }
 

@@ -45,18 +45,23 @@ fn pvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test a set of initial values
     let inits = vec![500.0, 1000.0, 1500.0, 2000.0];
+
+    // Quantize CPU baseline inputs to FP32 to match GPU inputs
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let volume_f32: Vec<f32> = volume.iter().map(|&v| v as f32).collect();
+    let close32_as_f64: Vec<f64> = close_f32.iter().map(|&v| v as f64).collect();
+    let volume32_as_f64: Vec<f64> = volume_f32.iter().map(|&v| v as f64).collect();
+
     let mut cpu_rows: Vec<Vec<f64>> = Vec::new();
     for &iv in &inits {
         let params = PviParams {
             initial_value: Some(iv),
         };
-        let input = PviInput::from_slices(&close, &volume, params);
+        let input = PviInput::from_slices(&close32_as_f64, &volume32_as_f64, params);
         let out = pvi_with_kernel(&input, Kernel::Scalar)?.values;
         cpu_rows.push(out);
     }
 
-    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
-    let volume_f32: Vec<f32> = volume.iter().map(|&v| v as f32).collect();
     let inits_f32: Vec<f32> = inits.iter().map(|&v| v as f32).collect();
     let cuda = CudaPvi::new(0).expect("CudaPvi::new");
     let dev = match cuda.pvi_batch_dev(&close_f32, &volume_f32, &inits_f32) {

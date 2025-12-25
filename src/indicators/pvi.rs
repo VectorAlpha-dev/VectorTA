@@ -250,7 +250,11 @@ pub fn pvi_with_kernel(input: &PviInput, kernel: Kernel) -> Result<PviOutput, Pv
 
     let mut out = alloc_with_nan_prefix(close.len(), first_valid_idx);
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => match detect_best_kernel() {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => Kernel::Avx2,
+            other => other,
+        },
         other => other,
     };
     unsafe {
@@ -403,7 +407,11 @@ pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result
     // Helper functions already handle NaN prefix initialization
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => match detect_best_kernel() {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => Kernel::Avx2,
+            other => other,
+        },
         other => other,
     };
 
